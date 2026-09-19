@@ -10,12 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npx expo-doctor
+      - name: Expo Doctor (retry transient API failures)
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            npx expo-doctor && exit 0
+            if [ "$attempt" -lt 3 ]; then sleep 10; fi
+          done
+          exit 1
       - run: npx expo prebuild --platform android --no-install
