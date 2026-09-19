@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "Salcara Image",
+    "slug": "salcara-image-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "top.salcara.image",
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-secure-store",
+      "expo-sharing",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "允许 Salcara Image 读取你选择的参考图片。",
+          "cameraPermission": "允许 Salcara Image 拍摄参考图片。"
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "允许 Salcara Image 访问你选择的图片。",
+          "savePhotosPermission": "允许 Salcara Image 将生成图片保存到相册。"
+        }
+      ],
+      "expo-font",
+      "expo-asset"
+    ]
+  }
+}
