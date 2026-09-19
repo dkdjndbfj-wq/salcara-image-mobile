@@ -27,7 +27,14 @@ test -n "$current_code"
 test -n "$current_cert"
 
 if [[ -n "$previous_apk" && -f "$previous_apk" ]]; then
-  previous_badging="$(read_badging "$previous_apk")"
+  if [[ ! -s "$previous_apk" ]]; then
+    echo "Previous APK is empty; skipping previous-version comparison: $previous_apk" >&2
+    exit 0
+  fi
+  if ! previous_badging="$(read_badging "$previous_apk")"; then
+    echo "Previous APK is not a readable Android package; skipping previous-version comparison: $previous_apk" >&2
+    exit 0
+  fi
   previous_package="$(read_value "$previous_badging" name)"
   previous_code="$(read_value "$previous_badging" versionCode)"
   previous_cert="$("$apksigner" verify --print-certs "$previous_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
