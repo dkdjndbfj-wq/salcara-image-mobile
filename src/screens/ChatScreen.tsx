@@ -15,6 +15,15 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  interpolateColor,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 
 import type { ChatMessage, ReferenceImage } from '../domain';
 import { createReferenceFromGenerated, pickFromFiles, pickFromGallery, takePhoto } from '../image-inputs';
@@ -29,6 +38,8 @@ import { ReferenceTray } from '../components/ReferenceTray';
 import { SettingsSheet } from '../components/SettingsSheet';
 import { IconButton, Sheet } from '../components/ui';
 
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
 export function ChatScreen() {
   const app = useApp();
   const listRef = useRef<FlatList<ChatMessage>>(null);
@@ -41,6 +52,18 @@ export function ChatScreen() {
   const [attachmentsVisible, setAttachmentsVisible] = useState(false);
   const [maskVisible, setMaskVisible] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const sendScale = useSharedValue(1);
+  const transparentProgress = useSharedValue(app.activeConversation?.transparent ? 1 : 0);
+
+  useEffect(() => {
+    transparentProgress.value = withTiming(app.activeConversation?.transparent ? 1 : 0, { duration: 180 });
+  }, [app.activeConversation?.transparent, transparentProgress]);
+
+  const transparentAnimatedStyle = useAnimatedStyle(() => ({
+    backgroundColor: interpolateColor(transparentProgress.value, [0, 1], [colors.background, colors.blueSurface]),
+    borderColor: interpolateColor(transparentProgress.value, [0, 1], [colors.border, colors.primary]),
+  }));
+  const sendAnimatedStyle = useAnimatedStyle(() => ({ transform: [{ scale: sendScale.value }] }));
 
   useEffect(() => {
     if (app.ready && app.providers.length === 0) setProvidersVisible(true);
@@ -145,12 +168,12 @@ export function ChatScreen() {
 
       <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         {app.messages.length === 0 ? (
-          <View style={styles.emptyState}>
+          <Animated.View entering={FadeIn.duration(280)} style={styles.emptyState}>
             <View style={styles.logo}><Ionicons name="sparkles" size={30} color={colors.primaryStrong} /></View>
             <Text style={styles.emptyTitle}>描述你想看到的画面</Text>
             <Text style={styles.emptyText}>{app.activeProvider ? '直接输入提示词，或添加最多四张参考图。生成参数可随时切换。' : '先添加一个 OpenAI 兼容服务商，再开始生成图片。'}</Text>
             {!app.activeProvider && <Pressable style={styles.setupButton} onPress={() => setProvidersVisible(true)}><Text style={styles.setupText}>添加服务商</Text></Pressable>}
-          </View>
+          </Animated.View>
         ) : (
           <FlatList
             ref={listRef}
@@ -159,16 +182,18 @@ export function ChatScreen() {
             contentContainerStyle={styles.messages}
             keyboardShouldPersistTaps="handled"
             renderItem={({ item }) => (
-              <MessageBubble
-                message={item}
-                elapsedSeconds={app.elapsedSeconds}
-                onCancel={app.cancelGeneration}
-                onRetry={() => void app.retryMessage(item)}
-                onSave={() => item.imageUri && void handleImageAction('save', item.imageUri)}
-                onShare={() => item.imageUri && void handleImageAction('share', item.imageUri)}
-                onReuse={() => item.imageUri && void reuseImage(item.imageUri)}
-                onPreview={() => setPreviewUri(item.imageUri)}
-              />
+              <Animated.View entering={FadeInDown.duration(230).springify().damping(18)}>
+                <MessageBubble
+                  message={item}
+                  elapsedSeconds={app.elapsedSeconds}
+                  onCancel={app.cancelGeneration}
+                  onRetry={() => void app.retryMessage(item)}
+                  onSave={() => item.imageUri && void handleImageAction('save', item.imageUri)}
+                  onShare={() => item.imageUri && void handleImageAction('share', item.imageUri)}
+                  onReuse={() => item.imageUri && void reuseImage(item.imageUri)}
+                  onPreview={() => setPreviewUri(item.imageUri)}
+                />
+              </Animated.View>
             )}
           />
         )}
@@ -176,10 +201,10 @@ export function ChatScreen() {
         <View style={styles.composerWrap}>
           <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => setMaskVisible(true)} hasMask={Boolean(maskUri)} />
           <View style={styles.quickSettings}>
-            <Pressable style={[styles.transparent, transparent && styles.transparentActive]} disabled={!app.activeProvider} onPress={() => void app.toggleTransparent()}>
+            <AnimatedPressable style={[styles.transparent, transparentAnimatedStyle]} disabled={!app.activeProvider} onPress={() => void app.toggleTransparent()}>
               <Ionicons name="layers-outline" size={17} color={transparent ? colors.primaryStrong : colors.textMuted} />
               <Text style={[styles.transparentText, transparent && styles.transparentTextActive]}>透明背景</Text>
-            </Pressable>
+            </AnimatedPressable>
             {app.activeProvider?.quality && app.activeProvider.aspectRatio && app.activeProvider.resolutionTier && (
               <Pressable onPress={() => setSettingsVisible(true)} style={styles.settingsSummary}>
                 <Text style={styles.settingsText}>{app.activeProvider.quality} · {app.activeProvider.aspectRatio} · {app.activeProvider.resolutionTier}</Text>
@@ -197,9 +222,16 @@ export function ChatScreen() {
               maxLength={4000}
               style={styles.input}
             />
-            <Pressable accessibilityLabel="发送" disabled={app.generating} onPress={send} style={[styles.send, app.generating && styles.disabled]}>
+            <AnimatedPressable
+              accessibilityLabel="发送"
+              disabled={app.generating}
+              onPress={send}
+              onPressIn={() => { sendScale.value = withSpring(0.9, { damping: 16, stiffness: 260 }); }}
+              onPressOut={() => { sendScale.value = withSpring(1, { damping: 14, stiffness: 220 }); }}
+              style={[styles.send, sendAnimatedStyle, app.generating && styles.disabled]}
+            >
               <Ionicons name="arrow-up" size={22} color="#fff" />
-            </Pressable>
+            </AnimatedPressable>
           </View>
         </View>
       </KeyboardAvoidingView>
