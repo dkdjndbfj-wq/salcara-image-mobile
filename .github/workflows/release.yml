@@ -51,11 +51,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p previous-release
-          gh release download --pattern '*.apk' --dir previous-release || true
+          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease --jq 'map(select(.isDraft == false and .isPrerelease == false))[0].tagName')"
+          if [[ -n "$previous_tag" && "$previous_tag" != "$GITHUB_REF_NAME" ]]; then
+            gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" --pattern '*.apk' --dir previous-release || true
+          fi
+          find previous-release -maxdepth 1 -type f -name '*.apk' -size +1k -print
       - name: Verify overwrite-install compatibility
         shell: bash
         run: |
-          previous_apk="$(find previous-release -maxdepth 1 -name '*.apk' -print -quit)"
+          previous_apk="$(find previous-release -maxdepth 1 -type f -name '*.apk' -size +1k -print -quit)"
           bash scripts/verify-apk-upgrade.sh android/app/build/outputs/apk/release/app-release.apk "$previous_apk"
       - name: Name APK and checksum
         shell: bash
