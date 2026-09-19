@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, StyleSheet, Text, TextInput, View } from 'react-native';
+import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import type { AspectRatio, Quality, ResolutionTier } from '../domain';
 import { ALL_QUALITIES, qualitiesForModel, sizeFor } from '../domain-utils';
 import { useApp } from '../state/AppContext';
 import { colors, radius, spacing } from '../theme';
-import { Chip, PrimaryButton, Sheet } from './ui';
+import { AppDialog, Chip, PrimaryButton, Sheet } from './ui';
 
 const RATIOS: AspectRatio[] = ['1:1', '16:9', '9:16'];
 const TIERS: ResolutionTier[] = ['1K', '2K', '4K'];
@@ -16,6 +16,7 @@ export function SettingsSheet({ visible, onClose }: { visible: boolean; onClose:
   const [quality, setQuality] = useState<Quality | null>(null);
   const [ratio, setRatio] = useState<AspectRatio | null>(null);
   const [tier, setTier] = useState<ResolutionTier | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible || !activeProvider) return;
@@ -31,7 +32,7 @@ export function SettingsSheet({ visible, onClose }: { visible: boolean; onClose:
       await updateActiveProviderSettings({ model: model.trim(), quality, aspectRatio: ratio, resolutionTier: tier });
       onClose();
     } catch (error) {
-      Alert.alert('无法保存', error instanceof Error ? error.message : '请检查参数');
+      setErrorMessage(error instanceof Error ? error.message : '请检查参数。');
     }
   };
 
@@ -51,6 +52,7 @@ export function SettingsSheet({ visible, onClose }: { visible: boolean; onClose:
         {ratio && tier && <Text style={styles.hint}>本次尺寸：{sizeFor(ratio, tier)} · PNG · 1 张</Text>}
         <PrimaryButton label="应用设置" icon="checkmark" onPress={() => void save()} />
       </View>
+      <AppDialog visible={Boolean(errorMessage)} title="无法保存" message={errorMessage ?? ''} onClose={() => setErrorMessage(null)} />
     </Sheet>
   );
 }

@@ -12,9 +12,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
+      - run: node scripts/verify-release-version.mjs
       - run: npm run typecheck
       - run: npm test
       - name: Expo Doctor (retry transient API failures)

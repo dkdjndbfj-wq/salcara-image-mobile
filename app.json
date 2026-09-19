@@ -2,7 +2,7 @@
   "expo": {
     "name": "Salcara Image",
     "slug": "salcara-image-mobile",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -11,10 +11,12 @@
     },
     "android": {
       "package": "top.salcara.image",
-      "versionCode": 2,
+      "versionCode": 3,
+      "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.CAMERA",
-        "android.permission.READ_MEDIA_IMAGES"
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.REQUEST_INSTALL_PACKAGES"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -46,7 +48,16 @@
         }
       ],
       "expo-font",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#EFF6FF",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 180,
+          "resizeMode": "contain"
+        }
+      ]
     ]
   }
 }

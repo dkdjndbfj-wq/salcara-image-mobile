@@ -8,9 +8,14 @@ import Svg, { Defs, Mask, Path, Rect } from 'react-native-svg';
 import type { ReferenceImage } from '../domain';
 import { saveBase64Png } from '../storage/files';
 import { colors, radius, spacing } from '../theme';
+import { AppDialog } from './ui';
 
 type Point = { x: number; y: number };
 type Stroke = { id: number; mode: 'draw' | 'erase'; size: number; points: Point[] };
+
+const MIN_POINT_DISTANCE = 2.2;
+const MAX_POINTS_PER_STROKE = 1_200;
+const MASK_EXPORT_TIMEOUT_MS = 20_000;
 
 export function MaskEditor({
   visible,
@@ -33,19 +38,26 @@ export function MaskEditor({
   const [tool, setTool] = useState<'draw' | 'erase'>('draw');
   const [brushSize, setBrushSize] = useState(28);
   const [saving, setSaving] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const maskSvgRef = useRef<Svg>(null);
+  const frameRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!visible || !image) return;
     setStrokes([]);
     setRedo([]);
     setClearBackup(null);
+    setErrorMessage(null);
     if (image.width && image.height) {
       setSourceSize({ width: image.width, height: image.height });
     } else {
       Image.getSize(image.uri, (width, height) => setSourceSize({ width, height }), () => setSourceSize({ width: 1024, height: 1024 }));
     }
   }, [visible, image]);
+
+  useEffect(() => () => {
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+  }, []);
 
   const maxWidth = window.width - spacing.xl * 2;
   const maxHeight = Math.min(window.height * 0.56, 560);
@@ -57,11 +69,13 @@ export function MaskEditor({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
     onPanResponderGrant: (event) => {
+      const point = validPoint(event.nativeEvent.locationX, event.nativeEvent.locationY, canvasWidth, canvasHeight);
+      if (!point) return;
       const next: Stroke = {
         id: Date.now(),
         mode: tool,
         size: brushSize,
-        points: [{ x: event.nativeEvent.locationX, y: event.nativeEvent.locationY }],
+        points: [point],
       };
       activeRef.current = next;
       setActiveStroke(next);
@@ -69,21 +83,40 @@ export function MaskEditor({
       setClearBackup(null);
     },
     onPanResponderMove: (event) => {
-      if (!activeRef.current) return;
-      const next = { ...activeRef.current, points: [...activeRef.current.points, { x: event.nativeEvent.locationX, y: event.nativeEvent.locationY }] };
-      activeRef.current = next;
-      setActiveStroke(next);
+      const active = activeRef.current;
+      if (!active || active.points.length >= MAX_POINTS_PER_STROKE) return;
+      const point = validPoint(event.nativeEvent.locationX, event.nativeEvent.locationY, canvasWidth, canvasHeight);
+      if (!point) return;
+      const previous = active.points[active.points.length - 1];
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) < MIN_POINT_DISTANCE) return;
+      active.points.push(point);
+      if (frameRef.current !== null) return;
+      frameRef.current = requestAnimationFrame(() => {
+        frameRef.current = null;
+        if (activeRef.current) setActiveStroke({ ...activeRef.current, points: [...activeRef.current.points] });
+      });
     },
     onPanResponderRelease: () => {
-      if (activeRef.current) setStrokes((current) => [...current, activeRef.current as Stroke]);
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+      if (activeRef.current) {
+        const completed = { ...activeRef.current, points: [...activeRef.current.points] };
+        setStrokes((current) => [...current, completed]);
+      }
       activeRef.current = null;
       setActiveStroke(null);
     },
     onPanResponderTerminate: () => {
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
       activeRef.current = null;
       setActiveStroke(null);
     },
-  }), [tool, brushSize]);
+  }), [tool, brushSize, canvasWidth, canvasHeight]);
 
   const allStrokes = activeStroke ? [...strokes, activeStroke] : strokes;
   const undo = () => {
@@ -115,14 +148,20 @@ export function MaskEditor({
     }
     try {
       setSaving(true);
-      const base64 = await new Promise<string>((resolve, reject) => {
-        if (!maskSvgRef.current) {
-          reject(new Error('蒙版尚未准备好'));
-          return;
-        }
-        maskSvgRef.current.toDataURL(resolve, { width: sourceSize.width, height: sourceSize.height });
-      });
+      const base64 = await Promise.race([
+        new Promise<string>((resolve, reject) => {
+          if (!maskSvgRef.current) {
+            reject(new Error('蒙版尚未准备好'));
+            return;
+          }
+          maskSvgRef.current.toDataURL(resolve, { width: sourceSize.width, height: sourceSize.height });
+        }),
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error('蒙版导出超时，请缩短笔画后重试')), MASK_EXPORT_TIMEOUT_MS)),
+      ]);
+      if (!base64) throw new Error('蒙版导出失败，请重试');
       onConfirm(saveBase64Png(base64.replace(/^data:image\/png;base64,/, '')));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '蒙版保存失败，请重试。');
     } finally {
       setSaving(false);
     }
@@ -180,6 +219,7 @@ export function MaskEditor({
           </View>
         </View>
       </SafeAreaView>
+      <AppDialog visible={Boolean(errorMessage)} title="蒙版没有保存" message={errorMessage ?? ''} icon="alert-circle-outline" onClose={() => setErrorMessage(null)} />
     </Modal>
   );
 }
@@ -197,6 +237,11 @@ function pathFor(points: Point[]): string {
   if (!points.length) return '';
   if (points.length === 1) return `M ${points[0].x} ${points[0].y} L ${points[0].x + 0.1} ${points[0].y + 0.1}`;
   return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
+}
+
+function validPoint(x: number, y: number, width: number, height: number): Point | null {
+  if (!Number.isFinite(x) || !Number.isFinite(y) || width <= 0 || height <= 0) return null;
+  return { x: Math.max(0, Math.min(width, x)), y: Math.max(0, Math.min(height, y)) };
 }
 
 const styles = StyleSheet.create({

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { fetchImageModels } from '../api/image-api';
 import type { AspectRatio, ProviderProfile, Quality, ResolutionTier } from '../domain';
@@ -9,7 +9,7 @@ import { useApp } from '../state/AppContext';
 import { upsertProvider } from '../storage/database';
 import { getProviderKey, saveProviderKey } from '../storage/secure-keys';
 import { colors, radius, spacing } from '../theme';
-import { Chip, PrimaryButton, Sheet } from './ui';
+import { AppDialog, Chip, PrimaryButton, Sheet, type DialogAction } from './ui';
 
 const TIERS: ResolutionTier[] = ['1K', '2K', '4K'];
 
@@ -35,6 +35,7 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
   const [models, setModels] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [tested, setTested] = useState(false);
+  const [dialog, setDialog] = useState<{ title: string; message: string; actions?: DialogAction[] } | null>(null);
 
   useEffect(() => {
     if (!visible) {
@@ -69,10 +70,10 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       const nextModels = await fetchImageModels(baseUrl, key);
       setModels(nextModels);
       setTested(true);
-      Alert.alert('连接成功', nextModels.length ? `找到 ${nextModels.length} 个图片模型` : '接口可用，但没有返回 gpt-image 模型，请手动填写模型 ID');
+      setDialog({ title: '连接成功', message: nextModels.length ? `找到 ${nextModels.length} 个图片模型。` : '接口可用，但没有返回 gpt-image 模型，请手动填写模型 ID。' });
     } catch (error) {
       setTested(false);
-      Alert.alert('连接失败', error instanceof Error ? error.message : '请检查地址和密钥，也可以继续手动填写模型 ID');
+      setDialog({ title: '连接失败', message: error instanceof Error ? error.message : '请检查地址和密钥，也可以继续手动填写模型 ID。' });
     } finally {
       setBusy(false);
     }
@@ -110,7 +111,7 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       setTested(false);
       onClose();
     } catch (error) {
-      Alert.alert('无法保存', error instanceof Error ? error.message : '请检查配置');
+      setDialog({ title: '无法保存', message: error instanceof Error ? error.message : '请检查配置。' });
     }
   };
 
@@ -137,10 +138,14 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
                 </Pressable>
                 <Pressable
                   accessibilityLabel="删除服务商"
-                  onPress={() => Alert.alert('删除服务商？', `将同时删除“${provider.name}”的会话和本地图片。`, [
-                    { text: '取消', style: 'cancel' },
-                    { text: '删除', style: 'destructive', onPress: () => void removeProvider(provider.id) },
-                  ])}
+                  onPress={() => setDialog({
+                    title: '删除服务商？',
+                    message: `将同时删除“${provider.name}”的会话、本地图片和已保存密钥，此操作无法撤销。`,
+                    actions: [
+                      { label: '取消', tone: 'secondary', onPress: () => setDialog(null) },
+                      { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeProvider(provider.id); } },
+                    ],
+                  })}
                   style={styles.rowAction}
                 >
                   <Ionicons name="trash-outline" size={20} color={colors.danger} />
@@ -172,6 +177,7 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
           <PrimaryButton label="保存并使用" icon="checkmark" onPress={() => void save()} />
         </View>
       </View>
+      <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} actions={dialog?.actions} onClose={() => setDialog(null)} />
     </Sheet>
   );
 }

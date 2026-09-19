@@ -2,12 +2,14 @@ import * as DocumentPicker from 'expo-document-picker';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { File } from 'expo-file-system';
+import { Image } from 'react-native';
 
 import type { ReferenceImage } from './domain';
 import { createId } from './domain-utils';
 import { fileSize, persistReference } from './storage/files';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_MASK_SIDE = 2048;
 const VALID_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
 
 type InputAsset = {
@@ -77,6 +79,37 @@ export async function pickFromFiles(remaining: number): Promise<ReferenceImage[]
 
 export async function createReferenceFromGenerated(uri: string): Promise<ReferenceImage> {
   return prepareAsset({ uri, name: 'generated-reference.png', mimeType: 'image/png', fileSize: fileSize(uri) });
+}
+
+export async function prepareReferenceForMask(image: ReferenceImage): Promise<ReferenceImage> {
+  const dimensions = image.width && image.height
+    ? { width: image.width, height: image.height }
+    : await getImageSize(image.uri);
+  const knownMaxSide = Math.max(dimensions.width, dimensions.height);
+  if (image.mimeType === 'image/png' && knownMaxSide <= MAX_MASK_SIDE) return { ...image, ...dimensions };
+
+  const resize = knownMaxSide > MAX_MASK_SIDE
+    ? dimensions.width >= dimensions.height
+      ? { width: MAX_MASK_SIDE }
+      : { height: MAX_MASK_SIDE }
+    : undefined;
+  const result = await manipulateAsync(image.uri, resize ? [{ resize }] : [], { format: SaveFormat.PNG });
+  const persistedUri = await persistReference(result.uri, '.png');
+  return {
+    ...image,
+    uri: persistedUri,
+    name: `${image.name.replace(/\.[^.]+$/, '')}-mask-source.png`,
+    mimeType: 'image/png',
+    size: fileSize(persistedUri),
+    width: result.width,
+    height: result.height,
+  };
+}
+
+function getImageSize(uri: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    Image.getSize(uri, (width, height) => resolve({ width, height }), () => reject(new Error('无法读取主图尺寸')));
+  });
 }
 
 async function prepareAsset(asset: InputAsset): Promise<ReferenceImage> {

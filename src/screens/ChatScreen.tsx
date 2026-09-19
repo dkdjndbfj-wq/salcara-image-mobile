@@ -2,11 +2,9 @@ import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Image,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -26,17 +24,20 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import type { ChatMessage, ReferenceImage } from '../domain';
-import { createReferenceFromGenerated, pickFromFiles, pickFromGallery, takePhoto } from '../image-inputs';
+import { createReferenceFromGenerated, pickFromFiles, pickFromGallery, prepareReferenceForMask, takePhoto } from '../image-inputs';
 import { useApp } from '../state/AppContext';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
 import { colors, radius, spacing } from '../theme';
 import { ConversationDrawer } from '../components/ConversationDrawer';
+import { AboutSheet } from '../components/AboutSheet';
+import { ImagePreview } from '../components/ImagePreview';
 import { MaskEditor } from '../components/MaskEditor';
 import { MessageBubble } from '../components/MessageBubble';
 import { ProviderManager } from '../components/ProviderManager';
 import { ReferenceTray } from '../components/ReferenceTray';
 import { SettingsSheet } from '../components/SettingsSheet';
-import { IconButton, Sheet } from '../components/ui';
+import { UpdateManager } from '../components/UpdateManager';
+import { AppDialog, IconButton, Sheet, type DialogAction } from '../components/ui';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -49,9 +50,13 @@ export function ChatScreen() {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [providersVisible, setProvidersVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const [aboutVisible, setAboutVisible] = useState(false);
   const [attachmentsVisible, setAttachmentsVisible] = useState(false);
   const [maskVisible, setMaskVisible] = useState(false);
+  const [preparingMask, setPreparingMask] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const [updateCheckToken, setUpdateCheckToken] = useState(0);
+  const [dialog, setDialog] = useState<{ title: string; message: string; actions?: DialogAction[]; icon?: React.ComponentProps<typeof AppDialog>['icon'] } | null>(null);
   const sendScale = useSharedValue(1);
   const transparentProgress = useSharedValue(app.activeConversation?.transparent ? 1 : 0);
 
@@ -74,7 +79,7 @@ export function ChatScreen() {
   }, [app.messages.length]);
 
   if (!app.ready) {
-    return <SafeAreaView style={styles.loading}><ActivityIndicator size="large" color={colors.primary} /><Text style={styles.loadingText}>正在准备本地数据…</Text></SafeAreaView>;
+    return <SafeAreaView style={styles.loading}><Image source={require('../../assets/icon.png')} style={styles.loadingLogo} /><Text style={styles.loadingTitle}>Salcara Image</Text><Text style={styles.loadingText}>正在准备本地数据…</Text></SafeAreaView>;
   }
 
   const addReferences = async (source: 'gallery' | 'camera' | 'files') => {
@@ -85,7 +90,7 @@ export function ChatScreen() {
       const selected = source === 'gallery' ? await pickFromGallery(remaining) : source === 'camera' ? await takePhoto() : await pickFromFiles(remaining);
       setReferences((current) => [...current, ...selected].slice(0, 4));
     } catch (error) {
-      Alert.alert('无法添加图片', error instanceof Error ? error.message : '请选择 PNG、JPEG 或 WebP 图片');
+      setDialog({ title: '无法添加图片', message: error instanceof Error ? error.message : '请选择 PNG、JPEG 或 WebP 图片。', icon: 'image-outline' });
     }
   };
 
@@ -110,11 +115,11 @@ export function ChatScreen() {
       return;
     }
     if (!text) {
-      Alert.alert('还没有图片描述', '请先输入你希望生成或修改的内容。');
+      setDialog({ title: '还没有图片描述', message: '请先输入你希望生成或修改的内容。', icon: 'create-outline' });
       return;
     }
     if (app.generating) {
-      Alert.alert('正在生成', '请等待当前请求完成，或先取消。');
+      setDialog({ title: '正在生成', message: '请等待当前请求完成，或先取消。', icon: 'hourglass-outline' });
       return;
     }
     const sentReferences = references;
@@ -126,7 +131,7 @@ export function ChatScreen() {
       setPrompt(text);
       setReferences(sentReferences);
       setMaskUri(sentMask);
-      Alert.alert('无法发送', error instanceof Error ? error.message : '请检查服务商设置');
+      setDialog({ title: '无法发送', message: error instanceof Error ? error.message : '请检查服务商设置。', icon: 'alert-circle-outline' });
     });
   };
 
@@ -137,7 +142,7 @@ export function ChatScreen() {
       setReferences((current) => [...current, reference]);
       setPreviewUri(null);
     } catch (error) {
-      Alert.alert('无法用作参考图', error instanceof Error ? error.message : '图片读取失败');
+      setDialog({ title: '无法用作参考图', message: error instanceof Error ? error.message : '图片读取失败。', icon: 'images-outline' });
     }
   };
 
@@ -145,12 +150,32 @@ export function ChatScreen() {
     try {
       if (action === 'save') {
         await saveToGallery(uri);
-        Alert.alert('已保存', '图片已保存到系统相册。');
+        setDialog({ title: '图片已保存', message: '已保存到系统相册。', icon: 'checkmark-circle-outline' });
       } else {
         await shareImage(uri);
       }
     } catch (error) {
-      Alert.alert(action === 'save' ? '保存失败' : '分享失败', error instanceof Error ? error.message : '请稍后再试');
+      setDialog({ title: action === 'save' ? '保存失败' : '分享失败', message: error instanceof Error ? error.message : '请稍后再试。', icon: 'alert-circle-outline' });
+    }
+  };
+
+  const openMaskEditor = async () => {
+    const primary = references[0];
+    if (!primary || preparingMask) return;
+    try {
+      setPreparingMask(true);
+      const prepared = await prepareReferenceForMask(primary);
+      if (prepared.uri !== primary.uri) {
+        setReferences((current) => [prepared, ...current.slice(1)]);
+        deleteLocalFile(primary.uri);
+        if (maskUri) deleteLocalFile(maskUri);
+        setMaskUri(null);
+      }
+      setMaskVisible(true);
+    } catch (error) {
+      setDialog({ title: '无法打开蒙版编辑器', message: error instanceof Error ? error.message : '主图预处理失败。', icon: 'brush-outline' });
+    } finally {
+      setPreparingMask(false);
     }
   };
 
@@ -166,7 +191,7 @@ export function ChatScreen() {
         <IconButton icon="options-outline" label="生成设置" onPress={() => app.activeProvider ? setSettingsVisible(true) : setProvidersVisible(true)} />
       </View>
 
-      <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
         {app.messages.length === 0 ? (
           <Animated.View entering={FadeIn.duration(280)} style={styles.emptyState}>
             <View style={styles.logo}><Ionicons name="sparkles" size={30} color={colors.primaryStrong} /></View>
@@ -187,7 +212,7 @@ export function ChatScreen() {
                   message={item}
                   elapsedSeconds={app.elapsedSeconds}
                   onCancel={app.cancelGeneration}
-                  onRetry={() => void app.retryMessage(item)}
+                  onRetry={() => void app.retryMessage(item).catch((error) => setDialog({ title: '重试失败', message: error instanceof Error ? error.message : '请稍后再试。', icon: 'refresh-outline' }))}
                   onSave={() => item.imageUri && void handleImageAction('save', item.imageUri)}
                   onShare={() => item.imageUri && void handleImageAction('share', item.imageUri)}
                   onReuse={() => item.imageUri && void reuseImage(item.imageUri)}
@@ -199,9 +224,9 @@ export function ChatScreen() {
         )}
 
         <View style={styles.composerWrap}>
-          <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => setMaskVisible(true)} hasMask={Boolean(maskUri)} />
+          <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => void openMaskEditor()} hasMask={Boolean(maskUri)} />
           <View style={styles.quickSettings}>
-            <AnimatedPressable style={[styles.transparent, transparentAnimatedStyle]} disabled={!app.activeProvider} onPress={() => void app.toggleTransparent()}>
+            <AnimatedPressable style={[styles.transparent, transparentAnimatedStyle]} disabled={!app.activeProvider} onPress={() => void app.toggleTransparent().catch((error) => setDialog({ title: '无法切换透明背景', message: error instanceof Error ? error.message : '请稍后再试。' }))}>
               <Ionicons name="layers-outline" size={17} color={transparent ? colors.primaryStrong : colors.textMuted} />
               <Text style={[styles.transparentText, transparent && styles.transparentTextActive]}>透明背景</Text>
             </AnimatedPressable>
@@ -241,9 +266,15 @@ export function ChatScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      <ConversationDrawer visible={drawerVisible} onClose={() => setDrawerVisible(false)} onOpenProviders={() => { setDrawerVisible(false); setProvidersVisible(true); }} />
+      <ConversationDrawer
+        visible={drawerVisible}
+        onClose={() => setDrawerVisible(false)}
+        onOpenProviders={() => { setDrawerVisible(false); setProvidersVisible(true); }}
+        onOpenAbout={() => { setDrawerVisible(false); setAboutVisible(true); }}
+      />
       <ProviderManager visible={providersVisible} onClose={() => setProvidersVisible(false)} />
       <SettingsSheet visible={settingsVisible} onClose={() => setSettingsVisible(false)} />
+      <AboutSheet visible={aboutVisible} onClose={() => setAboutVisible(false)} onCheckUpdates={() => setUpdateCheckToken((value) => value + 1)} />
       <Sheet visible={attachmentsVisible} title="添加参考图" onClose={() => setAttachmentsVisible(false)} scroll={false}>
         <View style={styles.attachmentOptions}>
           <AttachmentOption icon="images-outline" title="从相册选择" subtitle="PNG、JPEG 或 WebP" onPress={() => void addReferences('gallery')} />
@@ -252,13 +283,12 @@ export function ChatScreen() {
         </View>
       </Sheet>
       <MaskEditor visible={maskVisible} image={references[0] ?? null} onCancel={() => setMaskVisible(false)} onConfirm={(uri) => { if (maskUri && maskUri !== uri) deleteLocalFile(maskUri); setMaskUri(uri); setMaskVisible(false); }} />
-      <Modal visible={Boolean(previewUri)} transparent animationType="fade" onRequestClose={() => setPreviewUri(null)} statusBarTranslucent>
-        <View style={styles.preview}>
-          <Pressable onPress={() => setPreviewUri(null)} style={styles.previewClose}><Ionicons name="close" size={26} color="#fff" /></Pressable>
-          {previewUri && <Image source={{ uri: previewUri }} style={styles.previewImage} resizeMode="contain" />}
-          {previewUri && <Pressable style={styles.previewReuse} onPress={() => void reuseImage(previewUri)}><Ionicons name="images-outline" size={18} color="#fff" /><Text style={styles.previewReuseText}>作为参考图</Text></Pressable>}
-        </View>
-      </Modal>
+      <ImagePreview uri={previewUri} onClose={() => setPreviewUri(null)} onReuse={(uri) => void reuseImage(uri)} />
+      <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} icon={dialog?.icon} actions={dialog?.actions} onClose={() => setDialog(null)} />
+      <AppDialog visible={preparingMask} title="正在准备蒙版" message="正在将主图安全转换为适合绘制的 PNG，请稍候。" icon="brush-outline" actions={[{ label: '处理中', disabled: true }]} dismissible={false} onClose={() => undefined}>
+        <ActivityIndicator color={colors.primaryStrong} />
+      </AppDialog>
+      <UpdateManager manualCheckToken={updateCheckToken} />
     </SafeAreaView>
   );
 }
@@ -270,6 +300,8 @@ function AttachmentOption({ icon, title, subtitle, onPress }: { icon: React.Comp
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md, backgroundColor: colors.background },
+  loadingLogo: { width: 108, height: 108, borderRadius: 30 },
+  loadingTitle: { color: colors.text, fontSize: 22, fontWeight: '800' },
   loadingText: { color: colors.textMuted },
   header: { minHeight: 66, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, gap: spacing.md, borderBottomWidth: 1, borderColor: colors.border },
   headerInfo: { flex: 1, alignItems: 'center', gap: 2 },
@@ -301,9 +333,4 @@ const styles = StyleSheet.create({
   attachmentIcon: { width: 44, height: 44, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.blueSurface },
   attachmentTitle: { color: colors.text, fontWeight: '700', fontSize: 15 },
   attachmentSubtitle: { color: colors.textMuted, marginTop: 3, fontSize: 12 },
-  preview: { flex: 1, backgroundColor: 'rgba(10,15,24,0.96)', alignItems: 'center', justifyContent: 'center' },
-  previewImage: { width: '100%', height: '82%' },
-  previewClose: { position: 'absolute', right: spacing.lg, top: 52, zIndex: 2, width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.14)' },
-  previewReuse: { position: 'absolute', bottom: 42, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.lg, borderRadius: radius.pill, backgroundColor: colors.primaryStrong },
-  previewReuseText: { color: '#fff', fontWeight: '700' },
 });

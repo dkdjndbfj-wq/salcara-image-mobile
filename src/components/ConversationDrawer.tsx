@@ -1,22 +1,46 @@
 import { Ionicons } from '@expo/vector-icons';
-import React from 'react';
-import { Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useState } from 'react';
+import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useApp } from '../state/AppContext';
 import { colors, radius, spacing } from '../theme';
+import { AppDialog, type DialogAction } from './ui';
 
 export function ConversationDrawer({
   visible,
   onClose,
   onOpenProviders,
+  onOpenAbout,
 }: {
   visible: boolean;
   onClose: () => void;
   onOpenProviders: () => void;
+  onOpenAbout: () => void;
 }) {
   const { conversations, activeConversation, providers, startConversation, selectConversation, removeConversation } = useApp();
+  const [dialog, setDialog] = useState<{ title: string; message: string; actions?: DialogAction[] } | null>(null);
   const providerName = (id: string) => providers.find((item) => item.id === id)?.name ?? '未知服务商';
+
+  const createConversation = async () => {
+    try {
+      await startConversation();
+      onClose();
+    } catch (error) {
+      setDialog({ title: '无法新建会话', message: error instanceof Error ? error.message : '请先检查服务商配置。' });
+    }
+  };
+
+  const confirmDelete = (conversationId: string) => {
+    setDialog({
+      title: '删除这个会话？',
+      message: '会话中的本地图片也会被删除，此操作无法撤销。',
+      actions: [
+        { label: '取消', tone: 'secondary', onPress: () => setDialog(null) },
+        { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeConversation(conversationId); } },
+      ],
+    });
+  };
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
@@ -28,7 +52,7 @@ export function ConversationDrawer({
           </View>
           <Pressable
             style={styles.newButton}
-            onPress={() => void startConversation().then(onClose).catch((error) => Alert.alert('无法新建', error.message))}
+            onPress={() => void createConversation()}
           >
             <Ionicons name="add" size={20} color={colors.primaryStrong} />
             <Text style={styles.newText}>新会话</Text>
@@ -48,10 +72,7 @@ export function ConversationDrawer({
                 </View>
                 <Pressable
                   accessibilityLabel="删除会话"
-                  onPress={() => Alert.alert('删除这个会话？', '会话中的本地图片也会被删除。', [
-                    { text: '取消', style: 'cancel' },
-                    { text: '删除', style: 'destructive', onPress: () => void removeConversation(conversation.id) },
-                  ])}
+                  onPress={() => confirmDelete(conversation.id)}
                   style={styles.delete}
                 >
                   <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
@@ -59,13 +80,20 @@ export function ConversationDrawer({
               </Pressable>
             ))}
           </View>
-          <Pressable style={styles.providerButton} onPress={onOpenProviders}>
-            <Ionicons name="server-outline" size={20} color={colors.text} />
-            <Text style={styles.providerText}>服务商管理</Text>
-          </Pressable>
+          <View style={styles.bottomActions}>
+            <Pressable style={styles.providerButton} onPress={onOpenProviders}>
+              <Ionicons name="server-outline" size={20} color={colors.text} />
+              <Text style={styles.providerText}>服务商管理</Text>
+            </Pressable>
+            <Pressable style={styles.providerButton} onPress={onOpenAbout}>
+              <Ionicons name="information-circle-outline" size={20} color={colors.text} />
+              <Text style={styles.providerText}>关于与更新</Text>
+            </Pressable>
+          </View>
         </SafeAreaView>
         <Pressable style={styles.dismiss} onPress={onClose} />
       </View>
+      <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} actions={dialog?.actions} onClose={() => setDialog(null)} />
     </Modal>
   );
 }
@@ -89,6 +117,7 @@ const styles = StyleSheet.create({
   title: { color: colors.text, fontWeight: '600', fontSize: 14 },
   meta: { color: colors.textMuted, fontSize: 11 },
   delete: { width: 42, height: 48, alignItems: 'center', justifyContent: 'center' },
-  providerButton: { minHeight: 50, flexDirection: 'row', alignItems: 'center', gap: spacing.md, borderTopWidth: 1, borderColor: colors.border, paddingTop: spacing.md },
+  bottomActions: { borderTopWidth: 1, borderColor: colors.border, paddingTop: spacing.sm },
+  providerButton: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   providerText: { color: colors.text, fontWeight: '700' },
 });

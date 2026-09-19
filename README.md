@@ -13,6 +13,9 @@
 - 主图蒙版：画笔、橡皮擦、笔刷大小、撤销、重做和清空
 - 一键透明背景、保存到相册、系统分享、历史图片复用
 - 10 分钟超时、实时等待时间、取消与手动重试
+- 启动时自动检查正式版本，可在应用内下载 APK 并打开 Android 安装界面
+- 图片预览支持双指缩放、拖动和双击复位
+- 统一的白色/浅蓝色弹窗与软件图标启动页
 - SQLite 保存会话；API 密钥只写入 Android Keystore/Expo SecureStore
 
 ## 安装
@@ -20,6 +23,8 @@
 1. 打开本仓库的 [Releases](../../releases) 页面。
 2. 下载最新的 `salcara-image-android-v*.apk` 和对应 `.sha256` 文件。
 3. 校验 SHA-256 后，在 Android 手机上允许“安装未知应用”并安装 APK。
+
+后续版本可在侧边栏进入“关于与更新”检查。发现新版本后，应用会显示版本和安装包大小；用户确认后才会下载，并交由 Android 系统安装器覆盖安装。覆盖安装会保留应用私有目录中的服务商、密钥、会话和图片。包名、签名证书或 `versionCode` 不满足覆盖条件时，发布流水线会直接失败。
 
 Windows 校验示例：
 
@@ -58,7 +63,7 @@ Get-FileHash .\salcara-image-android-v1.0.0.apk -Algorithm SHA256
 
 ## 本地开发
 
-要求 Node.js 20+、JDK 21 和 Android SDK。
+要求 Node.js 22.13+、JDK 21 和 Android SDK。
 
 ```bash
 npm ci
@@ -71,6 +76,8 @@ npx expo run:android
 ## 隐私与安全
 
 详见 [PRIVACY.md](./PRIVACY.md)。项目不提供账户、云同步、遥测或广告。服务商仍可按其隐私政策处理你主动提交的提示词和图片。
+
+联系 QQ：`2423034538`（应用内可一键复制）。
 
 ## 许可证
 
