@@ -205,9 +205,13 @@ export function ChatScreen() {
               <Ionicons name="layers-outline" size={17} color={transparent ? colors.primaryStrong : colors.textMuted} />
               <Text style={[styles.transparentText, transparent && styles.transparentTextActive]}>透明背景</Text>
             </AnimatedPressable>
-            {app.activeProvider?.quality && app.activeProvider.aspectRatio && app.activeProvider.resolutionTier && (
+            {app.activeProvider && (
               <Pressable onPress={() => setSettingsVisible(true)} style={styles.settingsSummary}>
-                <Text style={styles.settingsText}>{app.activeProvider.quality} · {app.activeProvider.aspectRatio} · {app.activeProvider.resolutionTier}</Text>
+                <Text style={styles.settingsText}>
+                  {app.activeProvider.quality && app.activeProvider.aspectRatio && app.activeProvider.resolutionTier
+                    ? `${app.activeProvider.quality} · ${app.activeProvider.aspectRatio} · ${app.activeProvider.resolutionTier}`
+                    : '设置生成参数'}
+                </Text>
               </Pressable>
             )}
           </View>

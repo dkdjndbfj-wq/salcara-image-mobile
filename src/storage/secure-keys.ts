@@ -1,6 +1,9 @@
 import * as SecureStore from 'expo-secure-store';
 
-const PREFIX = 'provider-key:';
+// SecureStore key names only allow letters, numbers, ".", "-" and "_".
+// Keep the provider id after a valid, stable prefix so Android does not
+// reject a newly-added provider before the API key can be saved.
+const PREFIX = 'provider-key-';
 
 export async function saveProviderKey(providerId: string, apiKey: string): Promise<void> {
   const trimmed = apiKey.trim();

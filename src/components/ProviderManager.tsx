@@ -11,7 +11,6 @@ import { getProviderKey, saveProviderKey } from '../storage/secure-keys';
 import { colors, radius, spacing } from '../theme';
 import { Chip, PrimaryButton, Sheet } from './ui';
 
-const RATIOS: AspectRatio[] = ['1:1', '16:9', '9:16'];
 const TIERS: ResolutionTier[] = ['1K', '2K', '4K'];
 
 type FormState = {
@@ -87,8 +86,8 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       const key = form.apiKey.trim() || (form.id ? await getProviderKey(form.id) : null);
       if (!name) throw new Error('请输入服务商名称');
       if (!key) throw new Error('请输入 API 密钥');
-      if (!model || !form.quality || !form.aspectRatio || !form.resolutionTier) {
-        throw new Error('首次使用必须选择模型、画质、比例和清晰度');
+      if (!model || !form.quality || !form.resolutionTier) {
+        throw new Error('首次使用必须选择模型、画质和清晰度');
       }
       const id = form.id ?? createId();
       const now = Date.now();
@@ -167,11 +166,9 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
 
           <Text style={styles.label}>画质</Text>
           <View style={styles.chips}>{allowedQualities.map((quality) => <Chip key={quality} label={quality} selected={form.quality === quality} onPress={() => setForm({ ...form, quality })} />)}</View>
-          <Text style={styles.label}>比例</Text>
-          <View style={styles.chips}>{RATIOS.map((aspectRatio) => <Chip key={aspectRatio} label={aspectRatio} selected={form.aspectRatio === aspectRatio} onPress={() => setForm({ ...form, aspectRatio })} />)}</View>
           <Text style={styles.label}>清晰度</Text>
           <View style={styles.chips}>{TIERS.map((resolutionTier) => <Chip key={resolutionTier} label={resolutionTier} selected={form.resolutionTier === resolutionTier} onPress={() => setForm({ ...form, resolutionTier })} />)}</View>
-          <Text style={styles.hint}>每个服务商分别记住上次选择。密钥只保存在 Android 安全存储中。</Text>
+          <Text style={styles.hint}>比例属于每次生成设置，可在对话框中调整。密钥只保存在 Android 安全存储中。</Text>
           <PrimaryButton label="保存并使用" icon="checkmark" onPress={() => void save()} />
         </View>
       </View>
