@@ -211,6 +211,7 @@ export function ChatScreen() {
               </Pressable>
             )}
           </View>
+          {transparent && <Text style={styles.compatibilityHint}>已请求透明 PNG，实际透明能力由服务商决定。</Text>}
           <View style={styles.composer}>
             <IconButton icon="add" label="添加参考图" disabled={references.length >= 4} onPress={() => setAttachmentsVisible(true)} />
             <TextInput
@@ -286,6 +287,7 @@ const styles = StyleSheet.create({
   transparentTextActive: { color: colors.primaryStrong },
   settingsSummary: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 9 },
   settingsText: { color: colors.textMuted, fontSize: 11, fontWeight: '600' },
+  compatibilityHint: { color: colors.textMuted, fontSize: 11, paddingHorizontal: spacing.md },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm, paddingHorizontal: spacing.md },
   input: { flex: 1, minHeight: 44, maxHeight: 120, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, color: colors.text, paddingHorizontal: 14, paddingTop: 11, paddingBottom: 10, fontSize: 15, backgroundColor: colors.surface },
   send: { width: 44, height: 44, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primary },

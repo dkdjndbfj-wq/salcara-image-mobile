@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import React from 'react';
+import React, { useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { ChatMessage } from '../domain';
@@ -24,6 +24,7 @@ export function MessageBubble({
   onReuse: () => void;
   onPreview: () => void;
 }) {
+  const [actualSize, setActualSize] = useState<string | null>(null);
   if (message.role === 'user') {
     return (
       <View style={styles.userWrap}>
@@ -72,9 +73,17 @@ export function MessageBubble({
   return (
     <View style={styles.assistantBlock}>
       <Pressable onPress={onPreview} style={styles.imageCard}>
-        <Image source={{ uri: message.imageUri }} style={styles.resultImage} resizeMode="cover" />
+        <Image
+          source={{ uri: message.imageUri }}
+          style={styles.resultImage}
+          resizeMode="cover"
+          onLoad={(event) => {
+            const { width, height } = event.nativeEvent.source;
+            if (width && height) setActualSize(`${Math.round(width)}x${Math.round(height)}`);
+          }}
+        />
       </Pressable>
-      <Text style={styles.meta}>{message.model} · {message.quality} · {message.size}{message.elapsedMs ? ` · ${formatDuration(Math.round(message.elapsedMs / 1000))}` : ''}</Text>
+      <Text style={styles.meta}>{message.model} · {message.quality} · 请求 {message.size}{actualSize && actualSize !== message.size ? ` · 实际 ${actualSize}` : ''}{message.elapsedMs ? ` · ${formatDuration(Math.round(message.elapsedMs / 1000))}` : ''}</Text>
       <View style={styles.actions}>
         <Action icon="download-outline" label="保存" onPress={onSave} />
         <Action icon="share-outline" label="分享" onPress={onShare} />

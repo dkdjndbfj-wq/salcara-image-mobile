@@ -44,6 +44,8 @@ Get-FileHash .\salcara-image-android-v1.0.0.apk -Algorithm SHA256
 - 固定发送 `n: 1` 与 `output_format: png`
 - 透明按钮开启时才发送 `background: transparent`
 
+透明背景和精确尺寸能否生效最终取决于服务商。应用会显示“请求尺寸”和图片加载后的“实际尺寸”；如果服务商忽略 `background: transparent`，应用不会伪造透明结果。
+
 ## 尺寸映射
 
 | 比例 | 1K | 2K | 4K |
