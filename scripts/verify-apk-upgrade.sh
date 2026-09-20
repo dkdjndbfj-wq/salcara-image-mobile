@@ -17,10 +17,16 @@ read_value() {
   sed -n "s/.*[[:space:]]$key='\([^']*\)'.*/\1/p" <<<"$line"
 }
 
+read_cert() {
+  local output
+  output="$("$apksigner" verify --print-certs "$1")"
+  sed -nE 's/.*SHA-256[^:]*:[[:space:]]*([0-9A-Fa-f]+).*/\1/p' <<<"$output" | head -n 1
+}
+
 current_badging="$(read_badging "$current_apk")"
 current_package="$(read_value "$current_badging" name)"
 current_code="$(read_value "$current_badging" versionCode)"
-current_cert="$("$apksigner" verify --print-certs "$current_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
+current_cert="$(read_cert "$current_apk")"
 
 echo "Current APK: package=$current_package versionCode=$current_code certificate=$current_cert"
 if [[ "$current_package" != 'top.salcara.image' || -z "$current_code" || -z "$current_cert" ]]; then
@@ -39,7 +45,7 @@ if [[ -n "$previous_apk" && -f "$previous_apk" ]]; then
   fi
   previous_package="$(read_value "$previous_badging" name)"
   previous_code="$(read_value "$previous_badging" versionCode)"
-  previous_cert="$("$apksigner" verify --print-certs "$previous_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
+  previous_cert="$(read_cert "$previous_apk")"
 
   echo "Previous APK: package=$previous_package versionCode=$previous_code certificate=$previous_cert"
   if [[ "$current_package" != "$previous_package" ]]; then
