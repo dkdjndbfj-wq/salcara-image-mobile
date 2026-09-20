@@ -39,6 +39,7 @@ type MessageRow = {
   size: string;
   transparent: number;
   image_uri: string | null;
+  remote_image_url: string | null;
   references_json: string;
   mask_uri: string | null;
   error: string | null;
@@ -85,6 +86,7 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
           size TEXT NOT NULL,
           transparent INTEGER NOT NULL DEFAULT 0,
           image_uri TEXT,
+          remote_image_url TEXT,
           references_json TEXT NOT NULL DEFAULT '[]',
           mask_uri TEXT,
           error TEXT,
@@ -99,6 +101,10 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
       `);
+      const messageColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(messages)');
+      if (!messageColumns.some((column) => column.name === 'remote_image_url')) {
+        await db.execAsync('ALTER TABLE messages ADD COLUMN remote_image_url TEXT;');
+      }
       await db.runAsync(
         `UPDATE messages SET status = 'interrupted', error = '应用在生成期间被关闭' WHERE status = 'pending'`,
       );
@@ -217,8 +223,8 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
   await (await getDatabase()).runAsync(
     `INSERT INTO messages
       (id, conversation_id, role, prompt, mode, status, provider_id, model, quality, size,
-       transparent, image_uri, references_json, mask_uri, error, elapsed_ms, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       transparent, image_uri, remote_image_url, references_json, mask_uri, error, elapsed_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     message.id,
     message.conversationId,
     message.role,
@@ -231,6 +237,7 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
     message.size,
     message.transparent ? 1 : 0,
     message.imageUri,
+    message.remoteImageUrl,
     JSON.stringify(message.references),
     message.maskUri,
     message.error,
@@ -241,10 +248,11 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
 
 export async function updateMessage(message: ChatMessage): Promise<void> {
   await (await getDatabase()).runAsync(
-    `UPDATE messages SET status = ?, image_uri = ?, error = ?, elapsed_ms = ?, references_json = ?, mask_uri = ?
+    `UPDATE messages SET status = ?, image_uri = ?, remote_image_url = ?, error = ?, elapsed_ms = ?, references_json = ?, mask_uri = ?
      WHERE id = ?`,
     message.status,
     message.imageUri,
+    message.remoteImageUrl,
     message.error,
     message.elapsedMs,
     JSON.stringify(message.references),
@@ -298,6 +306,7 @@ function mapMessage(row: MessageRow): ChatMessage {
     size: row.size,
     transparent: row.transparent === 1,
     imageUri: row.image_uri,
+    remoteImageUrl: row.remote_image_url,
     references,
     maskUri: row.mask_uri,
     error: row.error,

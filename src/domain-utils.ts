@@ -1,6 +1,6 @@
 import { randomUUID } from 'expo-crypto';
 
-import type { AspectRatio, Quality, ResolutionTier } from './domain';
+import type { AspectRatio, ChatMessage, Quality, ResolutionTier } from './domain';
 
 export const RESOLUTION_MAP: Record<AspectRatio, Record<ResolutionTier, string>> = {
   '1:1': { '1K': '1024x1024', '2K': '2048x2048', '4K': '2880x2880' },
@@ -76,6 +76,12 @@ export function createConversationTitle(prompt: string): string {
   const compact = prompt.trim().replace(/\s+/g, ' ');
   if (!compact) return '新会话';
   return compact.length > 24 ? `${compact.slice(0, 24)}…` : compact;
+}
+
+export function latestCompletedImage(messages: ChatMessage[]): ChatMessage | undefined {
+  return [...messages]
+    .reverse()
+    .find((message) => message.role === 'assistant' && message.status === 'complete' && Boolean(message.imageUri));
 }
 
 export function redactSensitiveText(text: string): string {

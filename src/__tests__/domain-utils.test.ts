@@ -1,5 +1,6 @@
 import {
   imageEndpoint,
+  latestCompletedImage,
   normalizeBaseUrl,
   parseImageModels,
   qualitiesForModel,
@@ -7,6 +8,7 @@ import {
   RESOLUTION_MAP,
   sizeFor,
 } from '../domain-utils';
+import type { ChatMessage } from '../domain';
 
 describe('domain utilities', () => {
   test.each([
@@ -50,5 +52,21 @@ describe('domain utilities', () => {
   test('redacts bearer tokens and API keys', () => {
     const text = redactSensitiveText('Bearer abc.def-123 sk-abcdefghijklmnopqrstuvwxyz');
     expect(text).toBe('Bearer *** sk-***');
+  });
+
+  test('continues from the latest completed assistant image only', () => {
+    const base: ChatMessage = {
+      id: 'one', conversationId: 'conversation', role: 'assistant', prompt: 'first', mode: 'generate',
+      status: 'complete', providerId: 'provider', model: 'gpt-image', quality: 'high', size: '1024x1024',
+      transparent: false, imageUri: 'file://first.png', remoteImageUrl: null, references: [], maskUri: null,
+      error: null, elapsedMs: 1000, createdAt: 1,
+    };
+    const latest = latestCompletedImage([
+      base,
+      { ...base, id: 'failed', status: 'error', imageUri: null, createdAt: 2 },
+      { ...base, id: 'two', imageUri: 'file://second.png', createdAt: 3 },
+      { ...base, id: 'user', role: 'user', imageUri: null, createdAt: 4 },
+    ]);
+    expect(latest?.imageUri).toBe('file://second.png');
   });
 });

@@ -3,7 +3,7 @@ jest.mock('../storage/files', () => ({
   downloadPng: jest.fn(async (url: string) => `file://download-${url.split('/').pop()}`),
 }));
 
-import { buildEditFields, buildGenerationBody, persistApiResult } from '../api/image-api';
+import { buildEditFields, buildGenerationBody, editImage, persistApiResult } from '../api/image-api';
 
 const common = {
   model: 'gpt-image-2.5-sunburst',
@@ -23,6 +23,46 @@ describe('OpenAI-compatible image payloads', () => {
 
   test('edit fields use multipart string values and fixed output', () => {
     expect(buildEditFields({ ...common, transparent: true })).toEqual({ ...common, n: '1', output_format: 'png', background: 'transparent' });
+  });
+
+  test('uploads reference images as Expo File parts supported by Android fetch', async () => {
+    const OriginalFormData = global.FormData;
+    class NativeFormDataStub {
+      _parts: Array<[string, unknown]> = [];
+      append(name: string, value: unknown) {
+        this._parts.push([name, value]);
+      }
+    }
+    Object.defineProperty(global, 'FormData', { configurable: true, value: NativeFormDataStub });
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ b64_json: 'YWJjZA==' }] }),
+    } as Response);
+
+    try {
+      await editImage({
+        baseUrl: 'https://salcara.top/v1',
+        apiKey: 'test-key',
+        ...common,
+        transparent: false,
+        references: [{
+          id: 'reference-1',
+          uri: 'file:///reference.png',
+          name: 'reference.png',
+          mimeType: 'image/png',
+          size: 4,
+        }],
+      });
+
+      const request = fetchMock.mock.calls[0]?.[1];
+      const parts = (request?.body as unknown as NativeFormDataStub)._parts;
+      const imagePart = parts.find(([name]) => name === 'image[]')?.[1] as { bytes?: unknown; uri?: string } | undefined;
+      expect(imagePart?.uri).toBe('file:///reference.png');
+      expect(typeof imagePart?.bytes).toBe('function');
+    } finally {
+      fetchMock.mockRestore();
+      Object.defineProperty(global, 'FormData', { configurable: true, value: OriginalFormData });
+    }
   });
 
   test('persists base64 responses', async () => {

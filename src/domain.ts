@@ -48,6 +48,7 @@ export interface ChatMessage {
   size: string;
   transparent: boolean;
   imageUri: string | null;
+  remoteImageUrl: string | null;
   references: ReferenceImage[];
   maskUri: string | null;
   error: string | null;

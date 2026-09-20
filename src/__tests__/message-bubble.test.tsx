@@ -24,6 +24,7 @@ const base: ChatMessage = {
   size: '1024x1024',
   transparent: false,
   imageUri: null,
+  remoteImageUrl: null,
   references: [],
   maskUri: null,
   error: null,
@@ -63,6 +64,16 @@ describe('MessageBubble', () => {
     const screen = await renderMessage({ ...base, status: 'error', error: '余额不足' }, { onRetry });
     expect(screen.getByText('余额不足')).toBeTruthy();
     await fireEvent.press(screen.getByText('手动重试'));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  test('offers a download-only retry when generation already returned a URL', async () => {
+    const onRetry = jest.fn();
+    const screen = await renderMessage(
+      { ...base, status: 'error', error: '图片下载失败', remoteImageUrl: 'https://cdn.example/result.png' },
+      { onRetry },
+    );
+    await fireEvent.press(screen.getByText('重新下载'));
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 

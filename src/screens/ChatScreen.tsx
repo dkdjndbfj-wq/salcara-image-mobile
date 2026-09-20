@@ -24,6 +24,7 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import type { ChatMessage, ReferenceImage } from '../domain';
+import { latestCompletedImage } from '../domain-utils';
 import { createReferenceFromGenerated, pickFromFiles, pickFromGallery, prepareReferenceForMask, takePhoto } from '../image-inputs';
 import { useApp } from '../state/AppContext';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
@@ -46,6 +47,7 @@ export function ChatScreen() {
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const [prompt, setPrompt] = useState('');
   const [references, setReferences] = useState<ReferenceImage[]>([]);
+  const [continueFromPrevious, setContinueFromPrevious] = useState(true);
   const [maskUri, setMaskUri] = useState<string | null>(null);
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [providersVisible, setProvidersVisible] = useState(false);
@@ -77,6 +79,10 @@ export function ChatScreen() {
   useEffect(() => {
     if (app.messages.length) setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 80);
   }, [app.messages.length]);
+
+  useEffect(() => {
+    setContinueFromPrevious(true);
+  }, [app.activeConversation?.id]);
 
   if (!app.ready) {
     return <SafeAreaView style={styles.loading}><Image source={require('../../assets/icon.png')} style={styles.loadingLogo} /><Text style={styles.loadingTitle}>Salcara Image</Text><Text style={styles.loadingText}>正在准备本地数据…</Text></SafeAreaView>;
@@ -124,13 +130,16 @@ export function ChatScreen() {
     }
     const sentReferences = references;
     const sentMask = maskUri;
+    const sentContinueFromPrevious = continueFromPrevious;
     setPrompt('');
     setReferences([]);
     setMaskUri(null);
-    void app.sendPrompt(text, sentReferences, sentMask).catch((error) => {
+    setContinueFromPrevious(true);
+    void app.sendPrompt(text, sentReferences, sentMask, sentContinueFromPrevious).catch((error) => {
       setPrompt(text);
       setReferences(sentReferences);
       setMaskUri(sentMask);
+      setContinueFromPrevious(sentContinueFromPrevious);
       setDialog({ title: '无法发送', message: error instanceof Error ? error.message : '请检查服务商设置。', icon: 'alert-circle-outline' });
     });
   };
@@ -180,6 +189,8 @@ export function ChatScreen() {
   };
 
   const transparent = app.activeConversation?.transparent ?? false;
+  const previousResult = latestCompletedImage(app.messages);
+  const continuingFromPrevious = Boolean(continueFromPrevious && references.length === 0 && previousResult?.imageUri);
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.header}>
@@ -224,6 +235,20 @@ export function ChatScreen() {
         )}
 
         <View style={styles.composerWrap}>
+          {continuingFromPrevious && previousResult?.imageUri && (
+            <View style={styles.continuationRow}>
+              <Pressable style={styles.continuationChip} onPress={() => setPreviewUri(previousResult.imageUri)}>
+                <Image source={{ uri: previousResult.imageUri }} style={styles.continuationImage} />
+                <View style={styles.continuationTextWrap}>
+                  <Text style={styles.continuationTitle}>续改上一张</Text>
+                  <Text style={styles.continuationHint}>本次会自动作为主图</Text>
+                </View>
+              </Pressable>
+              <Pressable accessibilityLabel="本次不使用上一张" style={styles.continuationClose} onPress={() => setContinueFromPrevious(false)}>
+                <Ionicons name="close" size={18} color={colors.textMuted} />
+              </Pressable>
+            </View>
+          )}
           <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => void openMaskEditor()} hasMask={Boolean(maskUri)} />
           <View style={styles.quickSettings}>
             <AnimatedPressable style={[styles.transparent, transparentAnimatedStyle]} disabled={!app.activeProvider} onPress={() => void app.toggleTransparent().catch((error) => setDialog({ title: '无法切换透明背景', message: error instanceof Error ? error.message : '请稍后再试。' }))}>
@@ -246,7 +271,7 @@ export function ChatScreen() {
             <TextInput
               value={prompt}
               onChangeText={setPrompt}
-              placeholder={references.length ? '描述如何修改图片…' : '描述你想生成的图片…'}
+              placeholder={references.length || continuingFromPrevious ? '描述如何修改图片…' : '描述你想生成的图片…'}
               placeholderTextColor={colors.textMuted}
               multiline
               maxLength={4000}
@@ -316,6 +341,13 @@ const styles = StyleSheet.create({
   setupText: { color: '#fff', fontWeight: '700' },
   messages: { paddingVertical: spacing.xl, gap: spacing.xl },
   composerWrap: { backgroundColor: colors.background, borderTopWidth: 1, borderColor: colors.border, paddingTop: spacing.sm, paddingBottom: spacing.sm, gap: spacing.sm },
+  continuationRow: { paddingHorizontal: spacing.md, flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  continuationChip: { flex: 1, minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: 5, paddingRight: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.blueSurface },
+  continuationImage: { width: 38, height: 38, borderRadius: radius.sm, backgroundColor: colors.surface },
+  continuationTextWrap: { flex: 1 },
+  continuationTitle: { color: colors.primaryStrong, fontSize: 12, fontWeight: '700' },
+  continuationHint: { color: colors.textMuted, fontSize: 10, marginTop: 2 },
+  continuationClose: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background },
   quickSettings: { minHeight: 34, paddingHorizontal: spacing.md, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
   transparent: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 11, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background },
   transparentActive: { backgroundColor: colors.blueSurface, borderColor: colors.primary },

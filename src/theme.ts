@@ -9,6 +9,8 @@ export const colors = {
   border: '#E5E7EB',
   danger: '#EF4444',
   dangerSurface: '#FEF2F2',
+  warningText: '#9A6700',
+  warningSurface: '#FFF7E6',
   success: '#16A34A',
   mask: 'rgba(239, 68, 68, 0.48)',
 } as const;

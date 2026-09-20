@@ -11,7 +11,8 @@ import type {
   ReferenceImage,
   ResolutionTier,
 } from '../domain';
-import { createConversationTitle, createId, sizeFor } from '../domain-utils';
+import { createConversationTitle, createId, latestCompletedImage, sizeFor } from '../domain-utils';
+import { createReferenceFromGenerated } from '../image-inputs';
 import {
   deleteConversationRecord,
   deleteProviderRecord,
@@ -27,7 +28,7 @@ import {
   updateMessage,
   upsertProvider,
 } from '../storage/database';
-import { deleteLocalFile } from '../storage/files';
+import { deleteLocalFile, downloadPng, RemoteImageDownloadError } from '../storage/files';
 import { deleteProviderKey, getProviderKey } from '../storage/secure-keys';
 
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
@@ -57,7 +58,12 @@ interface AppContextValue {
   selectConversation: (conversationId: string) => Promise<void>;
   removeConversation: (conversationId: string) => Promise<void>;
   toggleTransparent: () => Promise<void>;
-  sendPrompt: (prompt: string, references: ReferenceImage[], maskUri?: string | null) => Promise<void>;
+  sendPrompt: (
+    prompt: string,
+    references: ReferenceImage[],
+    maskUri?: string | null,
+    continueFromPrevious?: boolean,
+  ) => Promise<void>;
   cancelGeneration: () => void;
   retryMessage: (message: ChatMessage) => Promise<void>;
 }
@@ -238,8 +244,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     async (assistantMessage: ChatMessage, prompt: string, references: ReferenceImage[], maskUri?: string | null) => {
       const provider = providers.find((item) => item.id === assistantMessage.providerId);
       if (!provider) throw new Error('服务商配置已不存在');
-      const apiKey = await getProviderKey(provider.id);
-      if (!apiKey) throw new Error('没有找到该服务商的 API 密钥');
 
       const controller = new AbortController();
       abortControllerRef.current = controller;
@@ -249,23 +253,31 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setGenerating(true);
       await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
       try {
-        const common = {
-          baseUrl: provider.baseUrl,
-          apiKey,
-          model: assistantMessage.model,
-          prompt,
-          quality: assistantMessage.quality,
-          size: assistantMessage.size,
-          transparent: assistantMessage.transparent,
-          signal: controller.signal,
-        };
-        const imageUri = references.length
-          ? await editImage({ ...common, references, maskUri })
-          : await generateImage(common);
+        let imageUri: string;
+        if (assistantMessage.remoteImageUrl) {
+          imageUri = await downloadPng(assistantMessage.remoteImageUrl, controller.signal);
+        } else {
+          const apiKey = await getProviderKey(provider.id);
+          if (!apiKey) throw new Error('没有找到该服务商的 API 密钥');
+          const common = {
+            baseUrl: provider.baseUrl,
+            apiKey,
+            model: assistantMessage.model,
+            prompt,
+            quality: assistantMessage.quality,
+            size: assistantMessage.size,
+            transparent: assistantMessage.transparent,
+            signal: controller.signal,
+          };
+          imageUri = references.length
+            ? await editImage({ ...common, references, maskUri })
+            : await generateImage(common);
+        }
         const completed: ChatMessage = {
           ...assistantMessage,
           status: 'complete',
           imageUri,
+          remoteImageUrl: null,
           elapsedMs: Date.now() - requestStartedAtRef.current,
           error: null,
         };
@@ -278,6 +290,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           ...assistantMessage,
           status: cancelled ? 'cancelled' : 'error',
           error: cancelled ? '请求已取消或超过 10 分钟' : normalized.message,
+          remoteImageUrl:
+            error instanceof RemoteImageDownloadError ? error.remoteImageUrl : assistantMessage.remoteImageUrl,
           elapsedMs: Date.now() - requestStartedAtRef.current,
         };
         await updateMessage(failed);
@@ -293,7 +307,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const sendPrompt = useCallback(
-    async (prompt: string, references: ReferenceImage[], maskUri?: string | null) => {
+    async (
+      prompt: string,
+      references: ReferenceImage[],
+      maskUri?: string | null,
+      continueFromPrevious = true,
+    ) => {
       const provider = activeProvider;
       if (!provider) throw new Error('请先添加服务商');
       if (!provider.model || !provider.quality || !provider.aspectRatio || !provider.resolutionTier) {
@@ -301,6 +320,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       if (!prompt.trim()) throw new Error('请输入图片描述');
       if (generating) throw new Error('当前图片尚未生成完成');
+
+      let requestReferences = references;
+      if (continueFromPrevious && requestReferences.length === 0 && activeConversation) {
+        const previousResult = latestCompletedImage(messages);
+        if (previousResult?.imageUri) {
+          requestReferences = [await createReferenceFromGenerated(previousResult.imageUri)];
+        }
+      }
 
       let conversation = activeConversation;
       const now = Date.now();
@@ -329,13 +356,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const baseMessage = {
         conversationId: conversation.id,
         prompt: prompt.trim(),
-        mode: references.length ? ('edit' as const) : ('generate' as const),
+        mode: requestReferences.length ? ('edit' as const) : ('generate' as const),
         providerId: provider.id,
         model: provider.model,
         quality: provider.quality,
         size,
         transparent: conversation.transparent,
-        references,
+        references: requestReferences,
         maskUri: maskUri ?? null,
         error: null,
         elapsedMs: null,
@@ -347,6 +374,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         role: 'user',
         status: 'complete',
         imageUri: null,
+        remoteImageUrl: null,
       };
       const assistantMessage: ChatMessage = {
         ...baseMessage,
@@ -354,14 +382,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         role: 'assistant',
         status: 'pending',
         imageUri: null,
+        remoteImageUrl: null,
         createdAt: now + 1,
       };
       await insertMessage(userMessage);
       await insertMessage(assistantMessage);
       setMessages((current) => [...current, userMessage, assistantMessage]);
-      await executeRequest(assistantMessage, prompt.trim(), references, maskUri);
+      await executeRequest(assistantMessage, prompt.trim(), requestReferences, maskUri);
     },
-    [activeProvider, activeConversation, generating, messages.length, refreshConversations, executeRequest],
+    [activeProvider, activeConversation, generating, messages, refreshConversations, executeRequest],
   );
 
   const retryMessage = useCallback(

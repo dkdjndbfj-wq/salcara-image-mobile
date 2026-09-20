@@ -65,7 +65,7 @@ export function MessageBubble({
             <Text style={styles.errorText}>{message.error ?? '生成未完成'}</Text>
           </View>
         </View>
-        <Pressable onPress={onRetry} style={styles.retryButton}><Ionicons name="refresh" size={17} color={colors.primaryStrong} /><Text style={styles.retryText}>手动重试</Text></Pressable>
+        <Pressable onPress={onRetry} style={styles.retryButton}><Ionicons name="refresh" size={17} color={colors.primaryStrong} /><Text style={styles.retryText}>{message.remoteImageUrl ? '重新下载' : '手动重试'}</Text></Pressable>
       </View>
     );
   }
@@ -84,6 +84,12 @@ export function MessageBubble({
         />
       </Pressable>
       <Text style={styles.meta}>{message.model} · {message.quality} · 请求 {message.size}{actualSize && actualSize !== message.size ? ` · 实际 ${actualSize}` : ''}{message.elapsedMs ? ` · ${formatDuration(Math.round(message.elapsedMs / 1000))}` : ''}</Text>
+      {actualSize && actualSize !== message.size && (
+        <View style={styles.sizeWarning}>
+          <Ionicons name="information-circle-outline" size={16} color={colors.warningText} />
+          <Text style={styles.sizeWarningText}>上游未按请求尺寸返回，图片未在手机端缩放</Text>
+        </View>
+      )}
       <View style={styles.actions}>
         <Action icon="download-outline" label="保存" onPress={onSave} />
         <Action icon="share-outline" label="分享" onPress={onShare} />
@@ -122,6 +128,8 @@ const styles = StyleSheet.create({
   progressText: { flex: 1, gap: 4 },
   progressTitle: { color: colors.text, fontWeight: '700' },
   meta: { color: colors.textMuted, fontSize: 11, lineHeight: 16 },
+  sizeWarning: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 6, borderRadius: radius.sm, backgroundColor: colors.warningSurface },
+  sizeWarningText: { color: colors.warningText, fontSize: 11, lineHeight: 16 },
   cancelButton: { minHeight: 34, paddingHorizontal: 12, justifyContent: 'center', borderRadius: radius.pill, backgroundColor: colors.surface },
   cancelText: { color: colors.textMuted, fontWeight: '600', fontSize: 12 },
   errorCard: { width: '100%', flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md, backgroundColor: colors.dangerSurface, borderRadius: radius.lg, padding: spacing.md },

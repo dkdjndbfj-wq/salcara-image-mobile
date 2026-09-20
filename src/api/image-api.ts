@@ -1,3 +1,5 @@
+import { File } from 'expo-file-system';
+
 import type { ImageApiResponse, Quality, ReferenceImage } from '../domain';
 import { imageEndpoint, parseImageModels, redactSensitiveText } from '../domain-utils';
 import { downloadPng, saveBase64Png } from '../storage/files';
@@ -82,7 +84,7 @@ export async function generateImage(request: GenerateRequest): Promise<string> {
     body: JSON.stringify(buildGenerationBody(request)),
     signal: request.signal,
   });
-  return persistApiResult(await parseResponse(response));
+  return persistApiResult(await parseResponse(response), request.signal);
 }
 
 export async function editImage(request: EditRequest): Promise<string> {
@@ -94,20 +96,11 @@ export async function editImage(request: EditRequest): Promise<string> {
   Object.entries(fields).forEach(([key, value]) => form.append(key, value));
 
   request.references.forEach((reference, index) => {
-    form.append(
-      'image[]',
-      {
-        uri: reference.uri,
-        name: reference.name || `reference-${index + 1}.png`,
-        type: reference.mimeType,
-      } as unknown as Blob,
-    );
+    const file = new File(reference.uri);
+    form.append('image[]', file, reference.name || `reference-${index + 1}${file.extension || '.png'}`);
   });
   if (request.maskUri) {
-    form.append(
-      'mask',
-      { uri: request.maskUri, name: 'mask.png', type: 'image/png' } as unknown as Blob,
-    );
+    form.append('mask', new File(request.maskUri), 'mask.png');
   }
 
   const response = await fetch(imageEndpoint(request.baseUrl, 'images/edits'), {
@@ -116,7 +109,7 @@ export async function editImage(request: EditRequest): Promise<string> {
     body: form,
     signal: request.signal,
   });
-  return persistApiResult(await parseResponse(response));
+  return persistApiResult(await parseResponse(response), request.signal);
 }
 
 function authorizationHeaders(apiKey: string): Record<string, string> {
@@ -139,10 +132,13 @@ async function parseResponse(response: Response): Promise<ImageApiResponse | Rec
   return payload;
 }
 
-export async function persistApiResult(payload: ImageApiResponse | Record<string, unknown>): Promise<string> {
+export async function persistApiResult(
+  payload: ImageApiResponse | Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<string> {
   const image = (payload as ImageApiResponse).data?.[0];
   if (image?.b64_json) return saveBase64Png(image.b64_json);
-  if (image?.url) return downloadPng(image.url);
+  if (image?.url) return downloadPng(image.url, signal);
   throw new ImageApiError('接口返回成功，但没有找到图片数据');
 }
 
