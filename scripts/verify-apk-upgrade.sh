@@ -14,7 +14,7 @@ read_badging() {
 read_value() {
   local line="$1"
   local key="$2"
-  sed -n "s/.*${key}='\([^']*\)'.*/\1/p" <<<"$line"
+  sed -n "s/.*[[:space:]]$key='\([^']*\)'.*/\1/p" <<<"$line"
 }
 
 current_badging="$(read_badging "$current_apk")"
