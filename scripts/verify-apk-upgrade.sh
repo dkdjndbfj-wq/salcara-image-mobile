@@ -22,9 +22,11 @@ current_package="$(read_value "$current_badging" name)"
 current_code="$(read_value "$current_badging" versionCode)"
 current_cert="$("$apksigner" verify --print-certs "$current_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
 
-test "$current_package" = 'top.salcara.image'
-test -n "$current_code"
-test -n "$current_cert"
+echo "Current APK: package=$current_package versionCode=$current_code certificate=$current_cert"
+if [[ "$current_package" != 'top.salcara.image' || -z "$current_code" || -z "$current_cert" ]]; then
+  echo "Current APK metadata/signature is invalid." >&2
+  exit 1
+fi
 
 if [[ -n "$previous_apk" && -f "$previous_apk" ]]; then
   if [[ ! -s "$previous_apk" ]]; then
@@ -39,8 +41,15 @@ if [[ -n "$previous_apk" && -f "$previous_apk" ]]; then
   previous_code="$(read_value "$previous_badging" versionCode)"
   previous_cert="$("$apksigner" verify --print-certs "$previous_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
 
-  test "$current_package" = "$previous_package"
-  test "$current_cert" = "$previous_cert"
+  echo "Previous APK: package=$previous_package versionCode=$previous_code certificate=$previous_cert"
+  if [[ "$current_package" != "$previous_package" ]]; then
+    echo "Package name changed: previous=$previous_package current=$current_package" >&2
+    exit 1
+  fi
+  if [[ "$current_cert" != "$previous_cert" ]]; then
+    echo "Signing certificate changed; overwrite installation would be blocked." >&2
+    exit 1
+  fi
   if (( current_code <= previous_code )); then
     echo "versionCode must increase: previous=$previous_code current=$current_code" >&2
     exit 1
