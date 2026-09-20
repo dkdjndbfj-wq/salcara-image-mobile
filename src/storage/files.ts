@@ -35,14 +35,16 @@ export async function downloadPng(url: string, signal?: AbortSignal): Promise<st
   for (let attempt = 0; attempt <= DOWNLOAD_RETRY_DELAYS_MS.length; attempt += 1) {
     if (signal?.aborted) throw createAbortError();
     try {
-      const downloaded = await File.downloadFileAsync(url, destination, {
-        idempotent: true,
-        signal,
-        headers: {
-          Accept: 'image/png,image/jpeg,image/webp,image/*;q=0.9,*/*;q=0.5',
-          'User-Agent': 'Salcara-Image-Android/1.1.1',
-        },
-      });
+      // The native downloader streams large images efficiently. Some Android/network
+      // combinations time out inside that native module even though ordinary fetch
+      // still works, so use fetch as the final, non-billable fallback attempt.
+      const downloaded = attempt === DOWNLOAD_RETRY_DELAYS_MS.length
+        ? await downloadWithFetch(url, destination, signal)
+        : await File.downloadFileAsync(url, destination, {
+            idempotent: true,
+            signal,
+            headers: imageDownloadHeaders(),
+          });
       if (!downloaded.exists || (downloaded.size ?? 0) === 0) {
         throw new Error('Downloaded image is empty');
       }
@@ -56,6 +58,23 @@ export async function downloadPng(url: string, signal?: AbortSignal): Promise<st
   }
 
   throw new RemoteImageDownloadError(url);
+}
+
+function imageDownloadHeaders(): Record<string, string> {
+  return {
+    Accept: 'image/png,image/jpeg,image/webp,image/*;q=0.9,*/*;q=0.5',
+    'User-Agent': 'Salcara-Image-Android/1.1.2',
+  };
+}
+
+async function downloadWithFetch(url: string, destination: File, signal?: AbortSignal): Promise<File> {
+  const response = await fetch(url, { headers: imageDownloadHeaders(), signal });
+  if (!response.ok) throw new Error(`Image download failed (HTTP ${response.status})`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength === 0) throw new Error('Downloaded image is empty');
+  destination.create({ overwrite: true, intermediates: true });
+  destination.write(bytes);
+  return destination;
 }
 
 function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -108,9 +127,29 @@ export function deleteLocalFile(uri: string | null | undefined): void {
 }
 
 export async function saveToGallery(uri: string): Promise<void> {
-  const permission = await MediaLibrary.requestPermissionsAsync();
-  if (!permission.granted) throw new Error('需要相册权限才能保存图片');
-  await MediaLibrary.saveToLibraryAsync(uri);
+  const file = new File(uri);
+  if (!file.exists || (file.size ?? 0) === 0) {
+    throw new Error('本地图片文件不存在，请先重新下载图片。');
+  }
+
+  // Only request permission to add a photo. Requesting full read access on
+  // Android 13+ is unnecessary and can make saving fail after the user chooses
+  // limited/denied access.
+  const permission = await MediaLibrary.requestPermissionsAsync(true, ['photo']);
+  if (!permission.granted) {
+    throw new Error(permission.canAskAgain
+      ? '需要允许“保存图片”权限才能写入系统相册。'
+      : '相册保存权限已被关闭，请到系统设置中允许 Salcara Image 保存图片。');
+  }
+
+  try {
+    // Expo 57 removed the old saveToLibraryAsync implementation. Asset.create
+    // writes through Android MediaStore and works with scoped storage.
+    await MediaLibrary.Asset.create(file.uri);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : '';
+    throw new Error(detail ? `写入系统相册失败：${detail}` : '写入系统相册失败，请检查存储空间后重试。');
+  }
 }
 
 export async function shareImage(uri: string): Promise<void> {

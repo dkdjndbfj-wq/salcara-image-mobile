@@ -48,7 +48,7 @@ export function AboutSheet({ visible, onClose, onCheckUpdates }: { visible: bool
         </View>
 
         <PrimaryButton label="检查软件更新" icon="cloud-download-outline" onPress={() => { onClose(); onCheckUpdates(); }} />
-        <Text style={styles.hint}>更新包只从 Salcara Image 官方 GitHub Releases 获取。覆盖安装会保留本机的服务商、会话和图片数据。</Text>
+        <Text style={styles.hint}>启动时会通过 GitHub 与备用 CDN 自动检查正式版本。更新包仍只从官方 GitHub Releases 获取；应用内下载失败时可改用系统浏览器。覆盖安装会保留本机数据。</Text>
       </View>
     </Sheet>
   );

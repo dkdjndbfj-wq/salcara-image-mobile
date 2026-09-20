@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import React, { useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import type { ChatMessage } from '../domain';
 import { colors, radius, spacing } from '../theme';
@@ -25,6 +25,15 @@ export function MessageBubble({
   onPreview: () => void;
 }) {
   const [actualSize, setActualSize] = useState<string | null>(null);
+  const [imageRatio, setImageRatio] = useState(() => ratioFromSize(message.size));
+  const window = useWindowDimensions();
+
+  useEffect(() => {
+    setActualSize(null);
+    setImageRatio(ratioFromSize(message.size));
+  }, [message.imageUri, message.size]);
+
+  const imageLayout = fitImageCard(imageRatio, window.width - spacing.lg * 2, Math.min(window.height * 0.62, 560));
   if (message.role === 'user') {
     return (
       <View style={styles.userWrap}>
@@ -72,14 +81,17 @@ export function MessageBubble({
 
   return (
     <View style={styles.assistantBlock}>
-      <Pressable onPress={onPreview} style={styles.imageCard}>
+      <Pressable onPress={onPreview} style={[styles.imageCard, imageLayout]}>
         <Image
           source={{ uri: message.imageUri }}
           style={styles.resultImage}
-          resizeMode="cover"
+          resizeMode="contain"
           onLoad={(event) => {
             const { width, height } = event.nativeEvent.source;
-            if (width && height) setActualSize(`${Math.round(width)}x${Math.round(height)}`);
+            if (width && height) {
+              setActualSize(`${Math.round(width)}x${Math.round(height)}`);
+              setImageRatio(width / height);
+            }
           }}
         />
       </Pressable>
@@ -115,6 +127,21 @@ function formatDuration(totalSeconds: number): string {
   return minutes ? `${minutes}分${seconds.toString().padStart(2, '0')}秒` : `${seconds}秒`;
 }
 
+function ratioFromSize(size: string): number {
+  const match = size.match(/(\d+)\s*[x×]\s*(\d+)/i);
+  if (!match) return 1;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? width / height : 1;
+}
+
+function fitImageCard(ratio: number, maxWidth: number, maxHeight: number): { width: number; height: number } {
+  const safeRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+  const heightAtFullWidth = maxWidth / safeRatio;
+  if (heightAtFullWidth <= maxHeight) return { width: maxWidth, height: heightAtFullWidth };
+  return { width: maxHeight * safeRatio, height: maxHeight };
+}
+
 const styles = StyleSheet.create({
   userWrap: { alignItems: 'flex-end', paddingHorizontal: spacing.lg, gap: spacing.sm },
   userBubble: { maxWidth: '84%', backgroundColor: colors.blueSurface, borderRadius: radius.lg, borderBottomRightRadius: 5, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
@@ -137,7 +164,7 @@ const styles = StyleSheet.create({
   errorText: { color: colors.text, lineHeight: 19, fontSize: 13 },
   retryButton: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 36, paddingHorizontal: 12, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.primary },
   retryText: { color: colors.primaryStrong, fontWeight: '700', fontSize: 12 },
-  imageCard: { width: '100%', aspectRatio: 1, maxHeight: 430, overflow: 'hidden', borderRadius: radius.lg, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  imageCard: { overflow: 'hidden', borderRadius: radius.lg, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   resultImage: { width: '100%', height: '100%' },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   action: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border },

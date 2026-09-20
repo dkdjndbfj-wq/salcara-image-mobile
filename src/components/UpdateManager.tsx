@@ -5,7 +5,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, spacing } from '../theme';
-import { type AppRelease, compareVersions, fetchLatestRelease, formatBytes } from '../update';
+import { type AppRelease, compareVersions, fetchLatestRelease, formatBytes, latestReleasePageUrl } from '../update';
 import { AppDialog, type DialogAction } from './ui';
 
 type Phase = 'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'permission' | 'error';
@@ -87,7 +87,12 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
       setProgress(0);
       setPhase('downloading');
       await FileSystem.deleteAsync(destination, { idempotent: true });
-      const task = FileSystem.createDownloadResumable(release.apk.url, destination, {}, ({ totalBytesWritten, totalBytesExpectedToWrite }) => {
+      const task = FileSystem.createDownloadResumable(release.apk.url, destination, {
+        headers: {
+          Accept: 'application/vnd.android.package-archive,application/octet-stream,*/*',
+          'User-Agent': 'Salcara-Image-Android/1.1.2',
+        },
+      }, ({ totalBytesWritten, totalBytesExpectedToWrite }) => {
         if (totalBytesExpectedToWrite > 0) setProgress(Math.min(1, totalBytesWritten / totalBytesExpectedToWrite));
       });
       downloadRef.current = task;
@@ -111,7 +116,19 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
         setPhase('available');
         return;
       }
-      setMessage(error instanceof Error ? error.message : '更新包下载失败，请稍后重试。');
+      const detail = error instanceof Error ? error.message : '连接下载服务器失败';
+      setMessage(`应用内下载失败：${detail}\n\n可点击“浏览器下载”，交给系统浏览器或下载工具完成。`);
+      setPhase('error');
+    }
+  };
+
+  const downloadInBrowser = async () => {
+    const url = release?.apk.url ?? latestReleasePageUrl();
+    try {
+      await Linking.openURL(url);
+      setPhase('idle');
+    } catch (error) {
+      setMessage(error instanceof Error ? `无法打开系统浏览器：${error.message}` : '无法打开系统浏览器。');
       setPhase('error');
     }
   };
@@ -158,7 +175,8 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     description = `当前版本 ${currentVersion} · 安装包 ${formatBytes(release.apk.size)}\n\n${release.notes.slice(0, 420)}`;
     actions = [
       { label: '稍后', tone: 'secondary', onPress: close },
-      { label: '下载并安装', tone: 'primary', onPress: () => void downloadAndInstall() },
+      { label: '浏览器下载', tone: 'secondary', onPress: () => void downloadInBrowser() },
+      { label: '应用内下载', tone: 'primary', onPress: () => void downloadAndInstall() },
     ];
   } else if (phase === 'up-to-date') {
     title = '已经是最新版本';
@@ -184,6 +202,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     icon = 'alert-circle-outline';
     actions = [
       { label: '关闭', tone: 'secondary', onPress: close },
+      { label: '浏览器下载', tone: 'secondary', onPress: () => void downloadInBrowser() },
       { label: '重新检查', tone: 'primary', onPress: () => void check(true) },
     ];
   }

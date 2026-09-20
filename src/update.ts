@@ -1,4 +1,10 @@
-const RELEASE_API_URL = 'https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/latest';
+const REPOSITORY = 'dkdjndbfj-wq/salcara-image-mobile';
+const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
+const RELEASE_PAGE_URL = `https://github.com/${REPOSITORY}/releases/latest`;
+const VERSION_FALLBACK_URLS = [
+  `https://cdn.jsdelivr.net/gh/${REPOSITORY}@main/app.json`,
+  `https://raw.githubusercontent.com/${REPOSITORY}/main/app.json`,
+] as const;
 
 type GitHubAsset = {
   name?: string;
@@ -17,6 +23,10 @@ type GitHubRelease = {
   prerelease?: boolean;
   draft?: boolean;
   assets?: GitHubAsset[];
+};
+
+type ExpoAppConfig = {
+  expo?: { version?: string };
 };
 
 export type AppRelease = {
@@ -50,9 +60,12 @@ export function compareVersions(left: string, right: string): number {
   return 0;
 }
 
-export async function fetchLatestRelease(signal?: AbortSignal): Promise<AppRelease> {
+async function fetchGitHubRelease(signal?: AbortSignal): Promise<AppRelease> {
   const response = await fetch(RELEASE_API_URL, {
-    headers: { Accept: 'application/vnd.github+json' },
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'Salcara-Image-Android/1.1.2',
+    },
     signal,
   });
   if (!response.ok) throw new Error(`检查更新失败（HTTP ${response.status}）`);
@@ -70,7 +83,7 @@ export async function fetchLatestRelease(signal?: AbortSignal): Promise<AppRelea
     tagName,
     title: release.name?.trim() || `Salcara Image ${tagName}`,
     notes: release.body?.trim() || '本次版本包含体验优化与问题修复。',
-    pageUrl: release.html_url ?? 'https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/latest',
+    pageUrl: release.html_url ?? RELEASE_PAGE_URL,
     publishedAt: release.published_at ?? null,
     apk: {
       name: asset.name,
@@ -79,6 +92,81 @@ export async function fetchLatestRelease(signal?: AbortSignal): Promise<AppRelea
       digest: asset.digest ?? null,
     },
   };
+}
+
+async function fetchVersionFallback(url: string, signal?: AbortSignal): Promise<AppRelease> {
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json', 'User-Agent': 'Salcara-Image-Android/1.1.2' },
+    signal,
+  });
+  if (!response.ok) throw new Error(`备用更新入口失败（HTTP ${response.status}）`);
+  const version = normalizeVersion(((await response.json()) as ExpoAppConfig).expo?.version ?? '');
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('备用更新入口返回的版本号无效');
+  const tagName = `v${version}`;
+  const name = `salcara-image-android-${tagName}.apk`;
+  return {
+    version,
+    tagName,
+    title: `Salcara Image ${tagName}`,
+    notes: '检测到新版本。版本说明及 SHA-256 校验文件可在官方发布页查看。',
+    pageUrl: RELEASE_PAGE_URL,
+    publishedAt: null,
+    apk: {
+      name,
+      url: `https://github.com/${REPOSITORY}/releases/download/${tagName}/${name}`,
+      size: 0,
+      digest: null,
+    },
+  };
+}
+
+/**
+ * Check multiple independent front doors concurrently. GitHub API, GitHub raw
+ * files and jsDelivr have different reachability across mobile networks, so a
+ * single blocked host no longer makes automatic update detection silently fail.
+ */
+export async function fetchLatestRelease(signal?: AbortSignal): Promise<AppRelease> {
+  const results = await Promise.allSettled([
+    withEndpointTimeout((endpointSignal) => fetchGitHubRelease(endpointSignal), signal),
+    ...VERSION_FALLBACK_URLS.map((url) =>
+      withEndpointTimeout((endpointSignal) => fetchVersionFallback(url, endpointSignal), signal)),
+  ]);
+  const releases = results
+    .filter((result): result is PromiseFulfilledResult<AppRelease> => result.status === 'fulfilled')
+    .map((result) => result.value);
+  if (releases.length > 0) {
+    // CDN copies may be briefly stale. Compare every reachable source instead
+    // of trusting whichever network happens to answer first.
+    return releases.reduce((latest, candidate) =>
+      compareVersions(candidate.version, latest.version) > 0 ? candidate : latest);
+  }
+  if (signal?.aborted) {
+    const aborted = new Error('连接更新服务器超时，请切换网络后重试。');
+    aborted.name = 'AbortError';
+    throw aborted;
+  }
+  throw new Error('GitHub 与备用更新入口均无法连接，请检查网络或稍后重试。');
+}
+
+async function withEndpointTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  parentSignal?: AbortSignal,
+): Promise<T> {
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort();
+  if (parentSignal?.aborted) controller.abort();
+  else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+  const timer = setTimeout(() => controller.abort(), 8_000);
+  try {
+    return await operation(controller.signal);
+  } finally {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener('abort', onParentAbort);
+  }
+}
+
+export function latestReleasePageUrl(): string {
+  return RELEASE_PAGE_URL;
 }
 
 export function formatBytes(bytes: number): string {

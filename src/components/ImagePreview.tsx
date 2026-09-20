@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 
 import { colors, radius, spacing } from '../theme';
@@ -74,29 +74,34 @@ export function ImagePreview({ uri, onClose, onReuse }: { uri: string | null; on
 
   return (
     <Modal visible={Boolean(uri)} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
-      <View style={styles.preview}>
-        <View style={styles.topBar}>
-          <Pressable accessibilityLabel="关闭预览" onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={25} color="#fff" /></Pressable>
-          <View style={styles.tip}><Ionicons name="expand-outline" size={15} color="#D7E9FF" /><Text style={styles.tipText}>双指缩放 · 拖动查看 · 双击复位</Text></View>
-          <View style={styles.iconSpacer} />
+      {/* Android renders a Modal in a separate native root. It needs its own
+          GestureHandlerRootView; the one around App does not receive these touches. */}
+      <GestureHandlerRootView style={styles.modalRoot}>
+        <View style={styles.preview}>
+          <View style={styles.topBar}>
+            <Pressable accessibilityLabel="关闭预览" onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={25} color="#fff" /></Pressable>
+            <View style={styles.tip}><Ionicons name="expand-outline" size={15} color="#D7E9FF" /><Text style={styles.tipText}>双指缩放 · 放大后拖动 · 双击切换</Text></View>
+            <View style={styles.iconSpacer} />
+          </View>
+          <GestureDetector gesture={gesture}>
+            <Animated.View style={styles.imageStage}>
+              {uri && <Animated.Image source={{ uri }} style={[styles.previewImage, imageStyle]} resizeMode="contain" />}
+            </Animated.View>
+          </GestureDetector>
+          {uri && (
+            <Pressable style={({ pressed }) => [styles.previewReuse, pressed && styles.pressed]} onPress={() => onReuse(uri)}>
+              <Ionicons name="images-outline" size={18} color="#fff" />
+              <Text style={styles.previewReuseText}>作为参考图</Text>
+            </Pressable>
+          )}
         </View>
-        <GestureDetector gesture={gesture}>
-          <Animated.View style={styles.imageStage}>
-            {uri && <Animated.Image source={{ uri }} style={[styles.previewImage, imageStyle]} resizeMode="contain" />}
-          </Animated.View>
-        </GestureDetector>
-        {uri && (
-          <Pressable style={({ pressed }) => [styles.previewReuse, pressed && styles.pressed]} onPress={() => onReuse(uri)}>
-            <Ionicons name="images-outline" size={18} color="#fff" />
-            <Text style={styles.previewReuseText}>作为参考图</Text>
-          </Pressable>
-        )}
-      </View>
+      </GestureHandlerRootView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
+  modalRoot: { flex: 1 },
   preview: { flex: 1, backgroundColor: 'rgba(10,15,24,0.98)', alignItems: 'center' },
   topBar: { width: '100%', minHeight: 104, paddingTop: 44, paddingHorizontal: spacing.lg, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 2 },
   iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.14)' },
