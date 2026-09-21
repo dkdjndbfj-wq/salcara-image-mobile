@@ -2,10 +2,13 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 import { editImage, generateImage, normalizeError } from '../api/image-api';
+import { prepareImagePrompt, sendChat } from '../api/chat-api';
+import { validateAttachments } from '../document-inputs';
 import type {
   AspectRatio,
   ChatMessage,
   Conversation,
+  DocumentAttachment,
   ProviderProfile,
   Quality,
   ReferenceImage,
@@ -35,10 +38,13 @@ const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const KEEP_AWAKE_TAG = 'salcara-generation';
 
 type ProviderSettings = {
-  model: string;
-  quality: Quality;
-  aspectRatio: AspectRatio;
-  resolutionTier: ResolutionTier;
+  model?: string;
+  quality?: Quality;
+  aspectRatio?: AspectRatio;
+  resolutionTier?: ResolutionTier;
+  chatModel?: string;
+  chatApi?: 'chat-completions' | 'responses';
+  analysisProviderId?: string | null;
 };
 
 interface AppContextValue {
@@ -50,6 +56,9 @@ interface AppContextValue {
   messages: ChatMessage[];
   generating: boolean;
   elapsedSeconds: number;
+  requestStage: string;
+  composerMode: 'image' | 'chat';
+  setComposerMode: (mode: 'image' | 'chat') => Promise<void>;
   reloadProviders: () => Promise<void>;
   activateProvider: (providerId: string) => Promise<void>;
   updateActiveProviderSettings: (settings: ProviderSettings) => Promise<void>;
@@ -63,6 +72,7 @@ interface AppContextValue {
     references: ReferenceImage[],
     maskUri?: string | null,
     continueFromPrevious?: boolean,
+    documents?: DocumentAttachment[],
   ) => Promise<void>;
   cancelGeneration: () => void;
   retryMessage: (message: ChatMessage) => Promise<void>;
@@ -79,6 +89,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [generating, setGenerating] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [requestStage, setRequestStage] = useState('');
+  const [composerMode, setComposerModeState] = useState<'image' | 'chat'>('image');
+  const requestLockRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const requestStartedAtRef = useRef(0);
 
@@ -118,8 +131,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setActiveProviderIdState(providerId);
       const latestConversation = loadedConversations.find((conversation) => conversation.providerId === providerId);
       if (latestConversation) {
+        setComposerModeState(latestConversation.mode ?? 'image');
         setActiveConversationId(latestConversation.id);
         setMessages(await listMessages(latestConversation.id));
+      } else if (loadedProviders.find((item) => item.id === providerId)?.chatModel && !loadedProviders.find((item) => item.id === providerId)?.model) {
+        setComposerModeState('chat');
       }
       setReady(true);
     })();
@@ -134,15 +150,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [generating]);
 
   const activateProvider = useCallback(async (providerId: string) => {
+    if (requestLockRef.current) throw new Error('请先等待或取消当前请求，再切换服务商');
     setActiveProviderIdState(providerId);
     await setActiveProviderId(providerId);
     const latest = (await listConversations()).find((conversation) => conversation.providerId === providerId);
     setActiveConversationId(latest?.id ?? null);
     setMessages(latest ? await listMessages(latest.id) : []);
+    const profile = (await listProviders()).find((item) => item.id === providerId);
+    setComposerModeState(latest?.mode ?? (profile?.chatModel && !profile?.model ? 'chat' : 'image'));
   }, []);
+
+  const setComposerMode = useCallback(async (mode: 'image' | 'chat') => {
+    if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
+    if (activeConversation) {
+      await updateConversation({ ...activeConversation, mode, updatedAt: Date.now() });
+      await refreshConversations();
+    }
+    setComposerModeState(mode);
+  }, [activeConversation, refreshConversations]);
 
   const updateActiveProviderSettings = useCallback(
     async (settings: ProviderSettings) => {
+      if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
       if (!activeProvider) throw new Error('请先添加服务商');
       const updated: ProviderProfile = { ...activeProvider, ...settings, updatedAt: Date.now() };
       await upsertProvider(updated);
@@ -152,6 +181,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const startConversation = useCallback(async () => {
+    if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
     if (!activeProvider) throw new Error('请先添加服务商');
     const now = Date.now();
     const conversation: Conversation = {
@@ -159,6 +189,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       title: '新会话',
       providerId: activeProvider.id,
       transparent: false,
+      mode: composerMode,
       createdAt: now,
       updatedAt: now,
     };
@@ -166,10 +197,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     await refreshConversations();
     setActiveConversationId(conversation.id);
     setMessages([]);
-  }, [activeProvider, refreshConversations]);
+  }, [activeProvider, refreshConversations, composerMode]);
 
   const selectConversation = useCallback(
     async (conversationId: string) => {
+      if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
       const conversation = conversations.find((item) => item.id === conversationId);
       if (!conversation) return;
       if (conversation.providerId !== activeProviderIdState) {
@@ -178,30 +210,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       setActiveConversationId(conversationId);
       setMessages(await listMessages(conversationId));
+      setComposerModeState(conversation.mode ?? 'image');
     },
     [conversations, activeProviderIdState],
   );
 
   const removeConversation = useCallback(
     async (conversationId: string) => {
+      if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
       const removedMessages = await deleteConversationRecord(conversationId);
       for (const message of removedMessages) {
         deleteLocalFile(message.imageUri);
         deleteLocalFile(message.maskUri);
         message.references.forEach((reference) => deleteLocalFile(reference.uri));
+        message.documents?.forEach((document) => deleteLocalFile(document.uri));
       }
       const next = await refreshConversations();
       if (conversationId === activeConversationId) {
         const latest = next.find((conversation) => conversation.providerId === activeProviderIdState);
         setActiveConversationId(latest?.id ?? null);
         setMessages(latest ? await listMessages(latest.id) : []);
+        setComposerModeState(latest?.mode ?? composerMode);
       }
     },
-    [refreshConversations, activeConversationId, activeProviderIdState],
+    [refreshConversations, activeConversationId, activeProviderIdState, composerMode],
   );
 
   const removeProvider = useCallback(
     async (providerId: string) => {
+      if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
       const owned = conversations.filter((conversation) => conversation.providerId === providerId);
       for (const conversation of owned) await removeConversation(conversation.id);
       await deleteProviderRecord(providerId);
@@ -218,6 +255,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const toggleTransparent = useCallback(async () => {
+    if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
     if (!activeConversation) {
       if (!activeProvider) throw new Error('请先添加服务商');
       const now = Date.now();
@@ -241,7 +279,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [activeConversation, activeProvider, refreshConversations]);
 
   const executeRequest = useCallback(
-    async (assistantMessage: ChatMessage, prompt: string, references: ReferenceImage[], maskUri?: string | null) => {
+    async (assistantMessage: ChatMessage, prompt: string, references: ReferenceImage[], maskUri?: string | null, history: ChatMessage[] = []) => {
       const provider = providers.find((item) => item.id === assistantMessage.providerId);
       if (!provider) throw new Error('服务商配置已不存在');
 
@@ -251,19 +289,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       requestStartedAtRef.current = Date.now();
       setElapsedSeconds(0);
       setGenerating(true);
-      await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+      let workingMessage = assistantMessage;
       try {
-        let imageUri: string;
+        await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+        let imageUri: string | null = null;
+        let text: string | null = null;
         if (assistantMessage.remoteImageUrl) {
+          setRequestStage('正在下载已生成的图片');
           imageUri = await downloadPng(assistantMessage.remoteImageUrl, controller.signal);
         } else {
           const apiKey = await getProviderKey(provider.id);
           if (!apiKey) throw new Error('没有找到该服务商的 API 密钥');
+          if (assistantMessage.mode === 'chat') {
+            setRequestStage('正在理解内容并回答');
+            text = await sendChat({
+              baseUrl: provider.baseUrl, apiKey, model: assistantMessage.model,
+              api: assistantMessage.requestApi ?? provider.chatApi,
+              history, prompt, references, documents: assistantMessage.documents,
+              signal: controller.signal,
+            });
+          } else {
+          if (assistantMessage.documents?.length && !workingMessage.preparedPrompt) {
+            const analyst = providers.find((item) => item.id === assistantMessage.analysisProviderId);
+            if (!analyst || !assistantMessage.analysisModel) throw new Error('请先配置用于解析文件的对话服务商和模型');
+            const analysisKey = await getProviderKey(analyst.id);
+            if (!analysisKey) throw new Error('解析服务商的 API 密钥不存在');
+            setRequestStage('正在解析附件并整理生图需求');
+            const preparedPrompt = await prepareImagePrompt({
+              baseUrl: analyst.baseUrl, apiKey: analysisKey, model: assistantMessage.analysisModel,
+              api: assistantMessage.analysisApi ?? analyst.chatApi,
+              history, prompt, references, documents: assistantMessage.documents,
+              signal: controller.signal,
+            });
+            workingMessage = { ...workingMessage, preparedPrompt };
+            // Persist the analysis before the paid image call so a manual retry
+            // can reuse it without charging for the same document analysis again.
+            await updateMessage(workingMessage);
+            setMessages((current) => current.map((message) => message.id === workingMessage.id ? workingMessage : message));
+          }
+          setRequestStage(references.length ? '正在编辑图片' : '正在生成图片');
           const common = {
             baseUrl: provider.baseUrl,
             apiKey,
             model: assistantMessage.model,
-            prompt,
+            prompt: workingMessage.preparedPrompt || prompt,
             quality: assistantMessage.quality,
             size: assistantMessage.size,
             transparent: assistantMessage.transparent,
@@ -272,11 +341,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           imageUri = references.length
             ? await editImage({ ...common, references, maskUri })
             : await generateImage(common);
+          }
         }
         const completed: ChatMessage = {
-          ...assistantMessage,
+          ...workingMessage,
           status: 'complete',
           imageUri,
+          text,
           remoteImageUrl: null,
           elapsedMs: Date.now() - requestStartedAtRef.current,
           error: null,
@@ -287,9 +358,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const normalized = normalizeError(error);
         const cancelled = controller.signal.aborted;
         const failed: ChatMessage = {
-          ...assistantMessage,
+          ...workingMessage,
           status: cancelled ? 'cancelled' : 'error',
-          error: cancelled ? '请求已取消或超过 10 分钟' : normalized.message,
+          error: error instanceof RemoteImageDownloadError ? normalized.message : cancelled ? '请求已取消或超过 10 分钟' : normalized.message,
           remoteImageUrl:
             error instanceof RemoteImageDownloadError ? error.remoteImageUrl : assistantMessage.remoteImageUrl,
           elapsedMs: Date.now() - requestStartedAtRef.current,
@@ -300,7 +371,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         clearTimeout(timeout);
         abortControllerRef.current = null;
         setGenerating(false);
-        await deactivateKeepAwake(KEEP_AWAKE_TAG);
+        requestLockRef.current = false;
+        setRequestStage('');
+        try { await deactivateKeepAwake(KEEP_AWAKE_TAG); } catch { /* The activity may already have closed. */ }
       }
     },
     [providers],
@@ -312,22 +385,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       references: ReferenceImage[],
       maskUri?: string | null,
       continueFromPrevious = true,
+      documents: DocumentAttachment[] = [],
     ) => {
       const provider = activeProvider;
       if (!provider) throw new Error('请先添加服务商');
-      if (!provider.model || !provider.quality || !provider.aspectRatio || !provider.resolutionTier) {
+      const isChat = composerMode === 'chat';
+      const chatProvider = providers.find((item) => item.id === (provider.analysisProviderId || provider.id));
+      if (!isChat && (!provider.model || !provider.quality || !provider.aspectRatio || !provider.resolutionTier)) {
         throw new Error('请先选择模型、画质、比例和清晰度');
       }
-      if (!prompt.trim()) throw new Error('请输入图片描述');
-      if (generating) throw new Error('当前图片尚未生成完成');
+      if (isChat && !chatProvider?.chatModel) throw new Error('请在对话设置中选择已配置对话模型的服务商');
+      if (!prompt.trim()) throw new Error('请输入希望 AI 完成的内容');
+      if (requestLockRef.current) throw new Error('当前请求尚未完成');
+      validateAttachments(documents, references);
+      const analyst = documents.length && !isChat
+        ? providers.find((item) => item.id === (provider.analysisProviderId || provider.id))
+        : undefined;
+      if (documents.length && !isChat && !analyst?.chatModel) throw new Error('文件辅助生图需要对话模型。请在生成设置中选择解析服务商。');
+      requestLockRef.current = true;
+      setGenerating(true);
+      try {
 
       let requestReferences = references;
-      if (continueFromPrevious && requestReferences.length === 0 && activeConversation) {
+      if (!isChat && continueFromPrevious && requestReferences.length === 0 && activeConversation) {
         const previousResult = latestCompletedImage(messages);
         if (previousResult?.imageUri) {
           requestReferences = [await createReferenceFromGenerated(previousResult.imageUri)];
         }
       }
+      validateAttachments(documents, requestReferences);
 
       let conversation = activeConversation;
       const now = Date.now();
@@ -337,6 +423,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           title: createConversationTitle(prompt),
           providerId: provider.id,
           transparent: false,
+          mode: composerMode,
           createdAt: now,
           updatedAt: now,
         };
@@ -347,23 +434,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           ...conversation,
           title: messages.length === 0 ? createConversationTitle(prompt) : conversation.title,
           updatedAt: now,
+          mode: composerMode,
         };
         await updateConversation(conversation);
       }
       await refreshConversations();
 
-      const size = sizeFor(provider.aspectRatio, provider.resolutionTier);
+      const size = !isChat && provider.aspectRatio && provider.resolutionTier ? sizeFor(provider.aspectRatio, provider.resolutionTier) : '';
       const baseMessage = {
         conversationId: conversation.id,
         prompt: prompt.trim(),
-        mode: requestReferences.length ? ('edit' as const) : ('generate' as const),
-        providerId: provider.id,
-        model: provider.model,
-        quality: provider.quality,
+        mode: isChat ? ('chat' as const) : requestReferences.length ? ('edit' as const) : ('generate' as const),
+        providerId: isChat ? chatProvider!.id : provider.id,
+        model: (isChat ? chatProvider!.chatModel : provider.model)!,
+        quality: provider.quality ?? 'auto',
         size,
         transparent: conversation.transparent,
         references: requestReferences,
-        maskUri: maskUri ?? null,
+        documents,
+        requestApi: (isChat ? chatProvider!.chatApi : provider.chatApi) ?? 'chat-completions',
+        analysisProviderId: analyst?.id ?? null,
+        analysisModel: analyst?.chatModel ?? null,
+        analysisApi: analyst?.chatApi ?? 'chat-completions',
+        maskUri: isChat ? null : maskUri ?? null,
         error: null,
         elapsedMs: null,
         createdAt: now,
@@ -388,20 +481,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       await insertMessage(userMessage);
       await insertMessage(assistantMessage);
       setMessages((current) => [...current, userMessage, assistantMessage]);
-      await executeRequest(assistantMessage, prompt.trim(), requestReferences, maskUri);
+      await executeRequest(assistantMessage, prompt.trim(), requestReferences, isChat ? null : maskUri, messages);
+      } finally {
+        requestLockRef.current = false;
+        setGenerating(false);
+      }
     },
-    [activeProvider, activeConversation, generating, messages, refreshConversations, executeRequest],
+    [activeProvider, activeConversation, composerMode, providers, messages, refreshConversations, executeRequest],
   );
 
   const retryMessage = useCallback(
     async (message: ChatMessage) => {
-      if (generating) throw new Error('当前图片尚未生成完成');
+      if (requestLockRef.current) throw new Error('当前请求尚未完成');
+      requestLockRef.current = true;
+      setGenerating(true);
+      try {
       const pending: ChatMessage = { ...message, status: 'pending', error: null, imageUri: null, elapsedMs: null };
       await updateMessage(pending);
       setMessages((current) => current.map((item) => (item.id === pending.id ? pending : item)));
-      await executeRequest(pending, pending.prompt, pending.references, pending.maskUri);
+      const history = messages.filter((item) => item.createdAt < message.createdAt - 1);
+      await executeRequest(pending, pending.prompt, pending.references, pending.maskUri, history);
+      } finally {
+        requestLockRef.current = false;
+        setGenerating(false);
+      }
     },
-    [generating, executeRequest],
+    [messages, executeRequest],
   );
 
   const cancelGeneration = useCallback(() => abortControllerRef.current?.abort(), []);
@@ -416,6 +521,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       messages,
       generating,
       elapsedSeconds,
+      requestStage,
+      composerMode,
+      setComposerMode,
       reloadProviders,
       activateProvider,
       updateActiveProviderSettings,
@@ -437,6 +545,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       messages,
       generating,
       elapsedSeconds,
+      requestStage,
+      composerMode,
+      setComposerMode,
       reloadProviders,
       activateProvider,
       updateActiveProviderSettings,

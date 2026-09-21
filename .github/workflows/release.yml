@@ -51,15 +51,20 @@ jobs:
         shell: bash
         run: |
           mkdir -p previous-release
-          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease --jq 'map(select(.isDraft == false and .isPrerelease == false))[0].tagName')"
-          if [[ -n "$previous_tag" && "$previous_tag" != "$GITHUB_REF_NAME" ]]; then
-            gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" --pattern '*.apk' --dir previous-release || true
+          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease | jq -r --arg current "$GITHUB_REF_NAME" 'map(select(.isDraft == false and .isPrerelease == false and .tagName != $current))[0].tagName // empty')"
+          echo "SALCARA_PREVIOUS_TAG=$previous_tag" >> "$GITHUB_ENV"
+          if [[ -n "$previous_tag" ]]; then
+            gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" --pattern '*.apk' --dir previous-release
           fi
           find previous-release -maxdepth 1 -type f -name '*.apk' -size +1k -print
       - name: Verify overwrite-install compatibility
         shell: bash
         run: |
           previous_apk="$(find previous-release -maxdepth 1 -type f -name '*.apk' -size +1k -print -quit)"
+          if [[ -n "$SALCARA_PREVIOUS_TAG" && -z "$previous_apk" ]]; then
+            echo "Previous release exists, but its signed APK could not be retrieved. Refusing to skip upgrade verification."
+            exit 1
+          fi
           bash scripts/verify-apk-upgrade.sh android/app/build/outputs/apk/release/app-release.apk "$previous_apk"
       - name: Name APK and checksum
         shell: bash
@@ -78,3 +83,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara Image $GITHUB_REF_NAME" --generate-notes --notes "Android 签名 APK 与 SHA-256 校验文件。安装和服务商配置方法见仓库 README；隐私说明见 PRIVACY.md。"
+      - name: Publish released-only update manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-update-manifest.mjs

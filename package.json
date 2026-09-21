@@ -1,8 +1,9 @@
 {
   "name": "salcara-image-mobile",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "main": "index.ts",
   "dependencies": {
+    "@noble/hashes": "2.4.0",
     "@expo/vector-icons": "^15.0.2",
     "@react-native-community/slider": "5.2.0",
     "expo": "~57.0.24",
@@ -57,6 +58,11 @@
   "private": true,
   "jest": {
     "preset": "jest-expo",
+    "transformIgnorePatterns": [
+      "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|@noble/hashes))",
+      "/node_modules/react-native-reanimated/plugin/",
+      "/node_modules/@react-native/babel-preset/"
+    ],
     "testPathIgnorePatterns": [
       "/node_modules/",
       "/android/",

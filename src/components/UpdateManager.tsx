@@ -1,12 +1,16 @@
 import * as Application from 'expo-application';
 import * as FileSystem from 'expo-file-system/legacy';
+import { File } from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
+import { fetch } from 'expo/fetch';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Linking, Platform, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, spacing } from '../theme';
 import { type AppRelease, compareVersions, fetchLatestRelease, formatBytes, latestReleasePageUrl } from '../update';
 import { AppDialog, type DialogAction } from './ui';
+import { networkFailureMessage } from '../api/network';
+import { copyVerifiedApk } from '../apk-download';
 
 type Phase = 'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'permission' | 'error';
 
@@ -20,11 +24,25 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
   const [message, setMessage] = useState('');
   const [progress, setProgress] = useState(0);
   const downloadedUriRef = useRef<string | null>(null);
-  const downloadRef = useRef<FileSystem.DownloadResumable | null>(null);
-  const autoCheckedRef = useRef(false);
+  const downloadRef = useRef<AbortController | null>(null);
+  const checkingRef = useRef(false);
+  const manualRequestedRef = useRef(false);
+  const lastCheckAtRef = useRef(0);
+  const nextAutoCheckDelayRef = useRef(15 * 60_000);
   const lastManualTokenRef = useRef(0);
 
   const check = useCallback(async (manual: boolean) => {
+    if (downloadRef.current) return;
+    if (checkingRef.current) {
+      if (manual) {
+        manualRequestedRef.current = true;
+        setPhase('checking');
+      }
+      return;
+    }
+    checkingRef.current = true;
+    manualRequestedRef.current = manual;
+    lastCheckAtRef.current = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 12_000);
     if (manual) {
@@ -33,27 +51,32 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     }
     try {
       const latest = await fetchLatestRelease(controller.signal);
+      nextAutoCheckDelayRef.current = 6 * 60 * 60_000;
       setRelease(latest);
       if (compareVersions(latest.version, currentVersion) > 0) {
         setPhase('available');
-      } else if (manual) {
+      } else if (manualRequestedRef.current) {
         setPhase('up-to-date');
       }
     } catch (error) {
-      if (manual) {
+      nextAutoCheckDelayRef.current = 15 * 60_000;
+      if (manualRequestedRef.current) {
         setMessage(error instanceof Error && error.name === 'AbortError' ? '连接超时，请检查网络后重试。' : error instanceof Error ? error.message : '暂时无法检查新版本。');
         setPhase('error');
       }
     } finally {
+      checkingRef.current = false;
+      manualRequestedRef.current = false;
       clearTimeout(timeout);
     }
   }, [currentVersion]);
 
   useEffect(() => {
-    if (autoCheckedRef.current) return;
-    autoCheckedRef.current = true;
     const timer = setTimeout(() => void check(false), 1_200);
-    return () => clearTimeout(timer);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && Date.now() - lastCheckAtRef.current >= nextAutoCheckDelayRef.current) void check(false);
+    });
+    return () => { clearTimeout(timer); subscription.remove(); downloadRef.current?.abort(); };
   }, [check]);
 
   useEffect(() => {
@@ -76,49 +99,61 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
   }, [release]);
 
   const downloadAndInstall = async () => {
-    if (!release) return;
+    if (!release || downloadRef.current) return;
     if (!FileSystem.cacheDirectory) {
       setMessage('设备没有可用的更新缓存目录。');
       setPhase('error');
       return;
     }
     const destination = `${FileSystem.cacheDirectory}salcara-image-update-${release.version}.apk`;
+    const controller = new AbortController();
+    downloadRef.current = controller;
+    const timeout = setTimeout(() => controller.abort('timeout'), 10 * 60_000);
     try {
       setProgress(0);
       setPhase('downloading');
       await FileSystem.deleteAsync(destination, { idempotent: true });
-      const task = FileSystem.createDownloadResumable(release.apk.url, destination, {
+      const response = await fetch(release.apk.url, {
+        signal: controller.signal,
+        credentials: 'omit',
         headers: {
           Accept: 'application/vnd.android.package-archive,application/octet-stream,*/*',
-          'User-Agent': 'Salcara-Image-Android/1.1.2',
+          'User-Agent': 'Salcara-Image-Android',
         },
-      }, ({ totalBytesWritten, totalBytesExpectedToWrite }) => {
-        if (totalBytesExpectedToWrite > 0) setProgress(Math.min(1, totalBytesWritten / totalBytesExpectedToWrite));
       });
-      downloadRef.current = task;
-      const result = await task.downloadAsync();
-      downloadRef.current = null;
-      if (!result?.uri) throw new Error('更新包下载未完成');
-      const info = await FileSystem.getInfoAsync(result.uri);
+      if (!response.ok) throw new Error(`下载服务器返回 HTTP ${response.status}`);
+      if (!response.body) throw new Error('更新包下载为空');
+      const file = new File(destination);
+      file.create({ overwrite: true, intermediates: true });
+      await copyVerifiedApk(response.body, file.writableStream(), release.apk, controller.signal, setProgress);
+      const info = await FileSystem.getInfoAsync(destination);
       if (!info.exists || !info.size) throw new Error('下载的更新包为空');
       if (release.apk.size > 0 && info.size !== release.apk.size) throw new Error('更新包大小校验失败，请重新下载');
-      downloadedUriRef.current = result.uri;
+      if (controller.signal.aborted) throw new Error('下载已取消');
+      downloadedUriRef.current = destination;
       setPhase('idle');
       try {
-        await launchInstaller(result.uri);
+        await launchInstaller(destination);
       } catch {
         setMessage('Android 阻止了安装请求。请先允许 Salcara Image“安装未知应用”，返回后会继续打开安装界面。');
         setPhase('permission');
       }
     } catch (error) {
-      downloadRef.current = null;
-      if (error instanceof Error && /cancel/i.test(error.message)) {
+      await FileSystem.deleteAsync(destination, { idempotent: true }).catch(() => undefined);
+      if (controller.signal.aborted && controller.signal.reason !== 'timeout') {
         setPhase('available');
         return;
       }
-      const detail = error instanceof Error ? error.message : '连接下载服务器失败';
-      setMessage(`应用内下载失败：${detail}\n\n可点击“浏览器下载”，交给系统浏览器或下载工具完成。`);
+      const detail = controller.signal.reason === 'timeout'
+        ? '更新包下载超过 10 分钟，已暂停。'
+        : error instanceof Error && /^(下载服务器返回 HTTP|下载的更新包为空|更新包)/.test(error.message)
+          ? error.message
+          : networkFailureMessage(release.apk.url, '更新包下载', error);
+      setMessage(`${detail}\n\n更新包托管在 GitHub，与 API 网站使用不同的网络。可点击“浏览器下载”交给系统浏览器。`);
       setPhase('error');
+    } finally {
+      clearTimeout(timeout);
+      downloadRef.current = null;
     }
   };
 
@@ -134,10 +169,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
   };
 
   const cancelDownload = async () => {
-    const task = downloadRef.current;
-    downloadRef.current = null;
-    if (task) await task.cancelAsync().catch(() => undefined);
-    setPhase('available');
+    downloadRef.current?.abort();
   };
 
   const allowAndInstall = async () => {

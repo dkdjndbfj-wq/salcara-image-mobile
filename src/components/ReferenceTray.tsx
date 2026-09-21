@@ -11,11 +11,13 @@ export function ReferenceTray({
   onChange,
   onEditMask,
   hasMask,
+  allowMask = true,
 }: {
   images: ReferenceImage[];
   onChange: (images: ReferenceImage[]) => void;
   onEditMask: () => void;
   hasMask: boolean;
+  allowMask?: boolean;
 }) {
   if (images.length === 0) return null;
   return (
@@ -42,11 +44,11 @@ export function ReferenceTray({
           );
         }}
       />
-      <Pressable style={[styles.maskButton, hasMask && styles.maskActive]} onPress={onEditMask}>
+      {allowMask && <Pressable style={[styles.maskButton, hasMask && styles.maskActive]} onPress={onEditMask}>
         <Ionicons name="brush-outline" size={18} color={hasMask ? colors.primaryStrong : colors.textMuted} />
         <Text style={[styles.maskText, hasMask && styles.maskTextActive]}>{hasMask ? '已加蒙版' : '编辑蒙版'}</Text>
-      </Pressable>
-      <Text style={styles.hint}>长按拖动排序；蒙版只作用于第一张主图。</Text>
+      </Pressable>}
+      <Text style={styles.hint}>{allowMask ? '长按拖动排序；蒙版只作用于第一张主图。' : '长按拖动排序；图片将发送给所选对话模型分析。'}</Text>
     </View>
   );
 }

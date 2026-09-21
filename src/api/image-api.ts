@@ -1,8 +1,10 @@
 import { File } from 'expo-file-system';
+import { fetch } from 'expo/fetch';
 
 import type { ImageApiResponse, Quality, ReferenceImage } from '../domain';
 import { imageEndpoint, parseImageModels, redactSensitiveText } from '../domain-utils';
 import { downloadPng, saveBase64Png } from '../storage/files';
+import { isAbortError, networkFailureMessage } from './network';
 
 export interface GenerateRequest {
   baseUrl: string;
@@ -61,6 +63,8 @@ export async function fetchImageModels(baseUrl: string, apiKey: string): Promise
   try {
     const response = await fetch(imageEndpoint(baseUrl, 'models'), {
       method: 'GET',
+      redirect: 'error',
+      credentials: 'omit',
       headers: authorizationHeaders(apiKey),
       signal: controller.signal,
     });
@@ -68,14 +72,15 @@ export async function fetchImageModels(baseUrl: string, apiKey: string): Promise
     return parseImageModels(payload);
   } catch (error) {
     if (isAbortError(error)) throw new ImageApiError('连接测试超时，请检查 API 地址');
-    throw normalizeError(error);
+    if (error instanceof ImageApiError) throw error;
+    throw new ImageApiError(networkFailureMessage(baseUrl, '模型列表', error));
   } finally {
     clearTimeout(timer);
   }
 }
 
 export async function generateImage(request: GenerateRequest): Promise<string> {
-  const response = await fetch(imageEndpoint(request.baseUrl, 'images/generations'), {
+  const payload = await requestImageApi(imageEndpoint(request.baseUrl, 'images/generations'), {
     method: 'POST',
     headers: {
       ...authorizationHeaders(request.apiKey),
@@ -84,7 +89,7 @@ export async function generateImage(request: GenerateRequest): Promise<string> {
     body: JSON.stringify(buildGenerationBody(request)),
     signal: request.signal,
   });
-  return persistApiResult(await parseResponse(response), request.signal);
+  return persistApiResult(payload, request.signal);
 }
 
 export async function editImage(request: EditRequest): Promise<string> {
@@ -103,13 +108,22 @@ export async function editImage(request: EditRequest): Promise<string> {
     form.append('mask', new File(request.maskUri), 'mask.png');
   }
 
-  const response = await fetch(imageEndpoint(request.baseUrl, 'images/edits'), {
+  const payload = await requestImageApi(imageEndpoint(request.baseUrl, 'images/edits'), {
     method: 'POST',
     headers: authorizationHeaders(request.apiKey),
     body: form,
     signal: request.signal,
   });
-  return persistApiResult(await parseResponse(response), request.signal);
+  return persistApiResult(payload, request.signal);
+}
+
+async function requestImageApi(url: string, options: Parameters<typeof fetch>[1]) {
+  try {
+    return await parseResponse(await fetch(url, { ...options, redirect: 'error', credentials: 'omit' }));
+  } catch (error) {
+    if (error instanceof ImageApiError || isAbortError(error)) throw error;
+    throw new ImageApiError(networkFailureMessage(url, '生图接口', error));
+  }
 }
 
 function authorizationHeaders(apiKey: string): Record<string, string> {
@@ -138,6 +152,11 @@ export async function persistApiResult(
 ): Promise<string> {
   const image = (payload as ImageApiResponse).data?.[0];
   if (image?.b64_json) return saveBase64Png(image.b64_json);
+  if (image?.url?.startsWith('data:image/')) {
+    const encoded = /^data:image\/(?:png|jpeg|webp);base64,(.+)$/s.exec(image.url)?.[1];
+    if (!encoded) throw new ImageApiError('接口返回的内嵌图片格式不受支持');
+    return saveBase64Png(encoded);
+  }
   if (image?.url) return downloadPng(image.url, signal);
   throw new ImageApiError('接口返回成功，但没有找到图片数据');
 }
@@ -156,8 +175,4 @@ export function normalizeError(error: unknown): ImageApiError {
   if (isAbortError(error)) return new ImageApiError('请求已取消或超时');
   if (error instanceof Error) return new ImageApiError(error.message);
   return new ImageApiError('发生未知错误');
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
 }

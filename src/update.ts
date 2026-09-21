@@ -1,9 +1,12 @@
+import { fetch } from 'expo/fetch';
+import { MAX_APK_BYTES } from './apk-download';
+
 const REPOSITORY = 'dkdjndbfj-wq/salcara-image-mobile';
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const RELEASE_PAGE_URL = `https://github.com/${REPOSITORY}/releases/latest`;
-const VERSION_FALLBACK_URLS = [
-  `https://cdn.jsdelivr.net/gh/${REPOSITORY}@main/app.json`,
-  `https://raw.githubusercontent.com/${REPOSITORY}/main/app.json`,
+const RELEASE_MANIFEST_URLS = [
+  `https://cdn.jsdelivr.net/gh/${REPOSITORY}@updates/latest.json`,
+  `https://raw.githubusercontent.com/${REPOSITORY}/updates/latest.json`,
 ] as const;
 
 type GitHubAsset = {
@@ -23,10 +26,6 @@ type GitHubRelease = {
   prerelease?: boolean;
   draft?: boolean;
   assets?: GitHubAsset[];
-};
-
-type ExpoAppConfig = {
-  expo?: { version?: string };
 };
 
 export type AppRelease = {
@@ -62,9 +61,10 @@ export function compareVersions(left: string, right: string): number {
 
 async function fetchGitHubRelease(signal?: AbortSignal): Promise<AppRelease> {
   const response = await fetch(RELEASE_API_URL, {
+    credentials: 'omit',
     headers: {
       Accept: 'application/vnd.github+json',
-      'User-Agent': 'Salcara-Image-Android/1.1.2',
+      'User-Agent': 'Salcara-Image-Android',
     },
     signal,
   });
@@ -78,7 +78,7 @@ async function fetchGitHubRelease(signal?: AbortSignal): Promise<AppRelease> {
     throw new Error('最新版本没有可安装的 Android APK');
   }
 
-  return {
+  return parseReleaseManifest({
     version: normalizeVersion(tagName),
     tagName,
     title: release.name?.trim() || `Salcara Image ${tagName}`,
@@ -91,33 +91,38 @@ async function fetchGitHubRelease(signal?: AbortSignal): Promise<AppRelease> {
       size: asset.size ?? 0,
       digest: asset.digest ?? null,
     },
-  };
+  });
 }
 
-async function fetchVersionFallback(url: string, signal?: AbortSignal): Promise<AppRelease> {
+async function fetchReleaseManifest(url: string, signal?: AbortSignal): Promise<AppRelease> {
   const response = await fetch(url, {
-    headers: { Accept: 'application/json', 'User-Agent': 'Salcara-Image-Android/1.1.2' },
+    credentials: 'omit',
+    headers: { Accept: 'application/json', 'User-Agent': 'Salcara-Image-Android', 'Cache-Control': 'no-cache' },
     signal,
   });
   if (!response.ok) throw new Error(`备用更新入口失败（HTTP ${response.status}）`);
-  const version = normalizeVersion(((await response.json()) as ExpoAppConfig).expo?.version ?? '');
-  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('备用更新入口返回的版本号无效');
-  const tagName = `v${version}`;
-  const name = `salcara-image-android-${tagName}.apk`;
+  return parseReleaseManifest(await response.json());
+}
+
+/** Only a manifest written after successful release publication is installable. */
+export function parseReleaseManifest(payload: unknown): AppRelease {
+  const release = payload as Partial<AppRelease> | null;
+  if (!release || typeof release.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(release.version)
+    || release.tagName !== `v${release.version}` || !release.publishedAt
+    || !Number.isFinite(Date.parse(release.publishedAt))
+    || release.apk?.name !== `salcara-image-android-${release.tagName}.apk`
+    || typeof release.apk.url !== 'string'
+    || release.apk.url !== `https://github.com/${REPOSITORY}/releases/download/${release.tagName}/${release.apk.name}`
+    || !Number.isSafeInteger(release.apk.size) || release.apk.size <= 0 || release.apk.size > MAX_APK_BYTES
+    || !/^sha256:[a-f0-9]{64}$/i.test(release.apk.digest ?? '')) {
+    throw new Error('更新清单不完整，无法确认已发布的安装包');
+  }
   return {
-    version,
-    tagName,
-    title: `Salcara Image ${tagName}`,
-    notes: '检测到新版本。版本说明及 SHA-256 校验文件可在官方发布页查看。',
-    pageUrl: RELEASE_PAGE_URL,
-    publishedAt: null,
-    apk: {
-      name,
-      url: `https://github.com/${REPOSITORY}/releases/download/${tagName}/${name}`,
-      size: 0,
-      digest: null,
-    },
-  };
+    ...release,
+    title: typeof release.title === 'string' ? release.title : `Salcara Image ${release.tagName}`,
+    notes: typeof release.notes === 'string' ? release.notes : '体验优化与问题修复。',
+    pageUrl: `https://github.com/${REPOSITORY}/releases/tag/${release.tagName}`,
+  } as AppRelease;
 }
 
 /**
@@ -128,8 +133,8 @@ async function fetchVersionFallback(url: string, signal?: AbortSignal): Promise<
 export async function fetchLatestRelease(signal?: AbortSignal): Promise<AppRelease> {
   const results = await Promise.allSettled([
     withEndpointTimeout((endpointSignal) => fetchGitHubRelease(endpointSignal), signal),
-    ...VERSION_FALLBACK_URLS.map((url) =>
-      withEndpointTimeout((endpointSignal) => fetchVersionFallback(url, endpointSignal), signal)),
+    ...RELEASE_MANIFEST_URLS.map((url) =>
+      withEndpointTimeout((endpointSignal) => fetchReleaseManifest(url, endpointSignal), signal)),
   ]);
   const releases = results
     .filter((result): result is PromiseFulfilledResult<AppRelease> => result.status === 'fulfilled')

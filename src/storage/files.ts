@@ -1,8 +1,10 @@
 import { Directory, File, Paths } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import * as Sharing from 'expo-sharing';
+import { fetch } from 'expo/fetch';
 
 import { createId } from '../domain-utils';
+import { networkFailureMessage, networkHost } from '../api/network';
 
 const imageDirectory = new Directory(Paths.document, 'generated-images');
 const referenceDirectory = new Directory(Paths.document, 'reference-images');
@@ -22,9 +24,15 @@ export function saveBase64Png(base64: string): string {
 
 const DOWNLOAD_RETRY_DELAYS_MS = [700, 1_800] as const;
 
+class ImageDownloadHttpError extends Error {
+  constructor(public readonly status: number) { super(`HTTP ${status}`); }
+}
+
 export class RemoteImageDownloadError extends Error {
-  constructor(public readonly remoteImageUrl: string) {
-    super('图片已生成，但连接图片服务器失败。请切换网络后点击“重新下载”，不会重复生成或扣费。');
+  constructor(public readonly remoteImageUrl: string, public readonly cancelled = false, detail?: string) {
+    super(cancelled
+      ? '图片已生成，下载已暂停。点击“重新下载”继续获取这张图片，不会重复生成或扣费。'
+      : `${detail || `图片下载失败（${networkHost(remoteImageUrl)}）`}\n图片已生成，点击“重新下载”只获取原图，不会重复生成或扣费。如果网站可用但此图片域名无法连接，请联系服务商启用图片内嵌返回。`);
     this.name = 'RemoteImageDownloadError';
   }
 }
@@ -32,48 +40,71 @@ export class RemoteImageDownloadError extends Error {
 export async function downloadPng(url: string, signal?: AbortSignal): Promise<string> {
   ensureDirectories();
   const destination = new File(imageDirectory, `${createId()}.png`);
+  let detail: string | undefined;
   for (let attempt = 0; attempt <= DOWNLOAD_RETRY_DELAYS_MS.length; attempt += 1) {
-    if (signal?.aborted) throw createAbortError();
+    if (signal?.aborted) throw new RemoteImageDownloadError(url, true);
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(), 90_000);
     try {
-      // The native downloader streams large images efficiently. Some Android/network
-      // combinations time out inside that native module even though ordinary fetch
-      // still works, so use fetch as the final, non-billable fallback attempt.
+      // Use Expo's explicitly selected streaming transport, instead of relying on
+      // the global fetch polyfill or buffering a large 4K image entirely in JS.
+      // Keep the native downloader as the last non-billable alternate transport.
       const downloaded = attempt === DOWNLOAD_RETRY_DELAYS_MS.length
-        ? await downloadWithFetch(url, destination, signal)
-        : await File.downloadFileAsync(url, destination, {
+        ? await File.downloadFileAsync(url, destination, {
             idempotent: true,
-            signal,
+            signal: controller.signal,
             headers: imageDownloadHeaders(),
-          });
+          })
+        : await downloadWithFetch(url, destination, controller.signal);
       if (!downloaded.exists || (downloaded.size ?? 0) === 0) {
         throw new Error('Downloaded image is empty');
       }
       return downloaded.uri;
     } catch (error) {
-      if (signal?.aborted || isAbortError(error)) throw error;
+      deleteLocalFile(destination.uri);
+      if (signal?.aborted) throw new RemoteImageDownloadError(url, true);
+      if (error instanceof ImageDownloadHttpError && [400, 401, 403, 404, 410].includes(error.status)) {
+        throw new RemoteImageDownloadError(url, false,
+          `图片服务器 ${networkHost(url)} 返回 HTTP ${error.status}，图片地址可能已过期或被拒绝访问。`);
+      }
+      detail = controller.signal.aborted
+        ? `图片下载超时（${networkHost(url)}）。`
+        : networkFailureMessage(url, '图片服务器', error);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
+    try {
       if (attempt < DOWNLOAD_RETRY_DELAYS_MS.length) {
         await delay(DOWNLOAD_RETRY_DELAYS_MS[attempt], signal);
       }
+    } catch {
+      throw new RemoteImageDownloadError(url, true);
     }
   }
 
-  throw new RemoteImageDownloadError(url);
+  throw new RemoteImageDownloadError(url, false, detail);
 }
 
 function imageDownloadHeaders(): Record<string, string> {
   return {
     Accept: 'image/png,image/jpeg,image/webp,image/*;q=0.9,*/*;q=0.5',
-    'User-Agent': 'Salcara-Image-Android/1.1.2',
+    'User-Agent': 'Salcara-Image-Android',
   };
 }
 
 async function downloadWithFetch(url: string, destination: File, signal?: AbortSignal): Promise<File> {
-  const response = await fetch(url, { headers: imageDownloadHeaders(), signal });
-  if (!response.ok) throw new Error(`Image download failed (HTTP ${response.status})`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength === 0) throw new Error('Downloaded image is empty');
+  const response = await fetch(url, { headers: imageDownloadHeaders(), signal, credentials: 'omit' });
+  if (!response.ok) throw new ImageDownloadHttpError(response.status);
+  const contentType = response.headers.get('content-type')?.split(';')[0].toLowerCase();
+  if (contentType && !contentType.startsWith('image/') && contentType !== 'application/octet-stream') {
+    throw new Error('图片服务器没有返回图片');
+  }
+  if (!response.body) throw new Error('Downloaded image is empty');
   destination.create({ overwrite: true, intermediates: true });
-  destination.write(bytes);
+  await response.body.pipeTo(destination.writableStream(), { signal });
   return destination;
 }
 
@@ -99,10 +130,6 @@ function createAbortError(): Error {
   const error = new Error('The operation was aborted');
   error.name = 'AbortError';
   return error;
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
 }
 
 export async function persistReference(uri: string, extension = '.png'): Promise<string> {

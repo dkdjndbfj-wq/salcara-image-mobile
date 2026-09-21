@@ -1,3 +1,5 @@
+jest.mock('expo/fetch', () => ({ fetch: (...args: Parameters<typeof fetch>) => global.fetch(...args) }));
+
 jest.mock('../storage/files', () => ({
   saveBase64Png: jest.fn((value: string) => `file://base64-${value.slice(0, 4)}.png`),
   downloadPng: jest.fn(async (url: string) => `file://download-${url.split('/').pop()}`),
@@ -55,6 +57,7 @@ describe('OpenAI-compatible image payloads', () => {
       });
 
       const request = fetchMock.mock.calls[0]?.[1];
+      expect(request).toMatchObject({ redirect: 'error', credentials: 'omit' });
       const parts = (request?.body as unknown as NativeFormDataStub)._parts;
       const imagePart = parts.find(([name]) => name === 'image[]')?.[1] as { bytes?: unknown; uri?: string } | undefined;
       expect(imagePart?.uri).toBe('file:///reference.png');
@@ -71,6 +74,10 @@ describe('OpenAI-compatible image payloads', () => {
 
   test('downloads URL responses', async () => {
     await expect(persistApiResult({ data: [{ url: 'https://cdn.example/result.png' }] })).resolves.toBe('file://download-result.png');
+  });
+
+  test('uses inline data URLs without another network dependency', async () => {
+    await expect(persistApiResult({ data: [{ url: 'data:image/png;base64,YWJjZA==' }] })).resolves.toBe('file://base64-YWJj.png');
   });
 
   test('rejects successful responses with no image', async () => {

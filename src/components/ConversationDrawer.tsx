@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import React, { useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useApp } from '../state/AppContext';
@@ -12,11 +12,13 @@ export function ConversationDrawer({
   onClose,
   onOpenProviders,
   onOpenAbout,
+  onOpenNetwork,
 }: {
   visible: boolean;
   onClose: () => void;
   onOpenProviders: () => void;
   onOpenAbout: () => void;
+  onOpenNetwork: () => void;
 }) {
   const { conversations, activeConversation, providers, startConversation, selectConversation, removeConversation } = useApp();
   const [dialog, setDialog] = useState<{ title: string; message: string; actions?: DialogAction[] } | null>(null);
@@ -34,10 +36,10 @@ export function ConversationDrawer({
   const confirmDelete = (conversationId: string) => {
     setDialog({
       title: '删除这个会话？',
-      message: '会话中的本地图片也会被删除，此操作无法撤销。',
+      message: '会话中的本地图片和文档也会被删除，此操作无法撤销。',
       actions: [
         { label: '取消', tone: 'secondary', onPress: () => setDialog(null) },
-        { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeConversation(conversationId); } },
+        { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeConversation(conversationId).catch((error) => setDialog({ title: '无法删除', message: error.message })); } },
       ],
     });
   };
@@ -47,7 +49,7 @@ export function ConversationDrawer({
       <View style={styles.overlay}>
         <SafeAreaView style={styles.drawer} edges={['top', 'bottom']}>
           <View style={styles.header}>
-            <View><Text style={styles.brand}>Salcara Image</Text><Text style={styles.subtitle}>本地图片工作台</Text></View>
+            <View><Text style={styles.brand}>Salcara Image</Text><Text style={styles.subtitle}>图片创作与多模态对话</Text></View>
             <Pressable onPress={onClose} style={styles.icon}><Ionicons name="close" size={22} color={colors.text} /></Pressable>
           </View>
           <Pressable
@@ -57,18 +59,18 @@ export function ConversationDrawer({
             <Ionicons name="add" size={20} color={colors.primaryStrong} />
             <Text style={styles.newText}>新会话</Text>
           </Pressable>
-          <View style={styles.list}>
+          <ScrollView style={styles.list} contentContainerStyle={{ gap: spacing.sm }}>
             <Text style={styles.sectionLabel}>最近会话</Text>
-            {conversations.length === 0 && <Text style={styles.empty}>生成第一张图片后，会话会显示在这里。</Text>}
+            {conversations.length === 0 && <Text style={styles.empty}>开始对话后，会话会显示在这里。</Text>}
             {conversations.map((conversation) => (
               <Pressable
                 key={conversation.id}
-                onPress={() => void selectConversation(conversation.id).then(onClose)}
+                onPress={() => void selectConversation(conversation.id).then(onClose).catch((error) => setDialog({ title: '无法切换', message: error.message }))}
                 style={[styles.row, conversation.id === activeConversation?.id && styles.activeRow]}
               >
                 <View style={styles.rowBody}>
                   <Text style={styles.title} numberOfLines={1}>{conversation.title}</Text>
-                  <Text style={styles.meta}>{providerName(conversation.providerId)}</Text>
+                  <Text style={styles.meta}>{conversation.mode === 'chat' ? '对话' : '生图'} · {providerName(conversation.providerId)}</Text>
                 </View>
                 <Pressable
                   accessibilityLabel="删除会话"
@@ -79,8 +81,12 @@ export function ConversationDrawer({
                 </Pressable>
               </Pressable>
             ))}
-          </View>
+          </ScrollView>
           <View style={styles.bottomActions}>
+            <Pressable style={styles.providerButton} onPress={onOpenNetwork}>
+              <Ionicons name="pulse-outline" size={20} color={colors.text} />
+              <Text style={styles.providerText}>网络诊断</Text>
+            </Pressable>
             <Pressable style={styles.providerButton} onPress={onOpenProviders}>
               <Ionicons name="server-outline" size={20} color={colors.text} />
               <Text style={styles.providerText}>服务商管理</Text>

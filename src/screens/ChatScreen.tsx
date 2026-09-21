@@ -7,6 +7,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -23,7 +24,8 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-import type { ChatMessage, ReferenceImage } from '../domain';
+import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
+import { pickDocuments, validateAttachments } from '../document-inputs';
 import { latestCompletedImage } from '../domain-utils';
 import { createReferenceFromGenerated, pickFromFiles, pickFromGallery, prepareReferenceForMask, takePhoto } from '../image-inputs';
 import { useApp } from '../state/AppContext';
@@ -34,11 +36,12 @@ import { AboutSheet } from '../components/AboutSheet';
 import { ImagePreview } from '../components/ImagePreview';
 import { MaskEditor } from '../components/MaskEditor';
 import { MessageBubble } from '../components/MessageBubble';
+import { NetworkDiagnostics } from '../components/NetworkDiagnostics';
 import { ProviderManager } from '../components/ProviderManager';
 import { ReferenceTray } from '../components/ReferenceTray';
 import { SettingsSheet } from '../components/SettingsSheet';
 import { UpdateManager } from '../components/UpdateManager';
-import { AppDialog, IconButton, Sheet, type DialogAction } from '../components/ui';
+import { AppDialog, Chip, IconButton, Sheet, type DialogAction } from '../components/ui';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -47,12 +50,16 @@ export function ChatScreen() {
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const [prompt, setPrompt] = useState('');
   const [references, setReferences] = useState<ReferenceImage[]>([]);
+  const [documents, setDocuments] = useState<DocumentAttachment[]>([]);
+  const isChat = app.composerMode === 'chat';
+  const analyst = app.providers.find((item) => item.id === (app.activeProvider?.analysisProviderId || app.activeProvider?.id));
   const [continueFromPrevious, setContinueFromPrevious] = useState(true);
   const [maskUri, setMaskUri] = useState<string | null>(null);
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [providersVisible, setProvidersVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [aboutVisible, setAboutVisible] = useState(false);
+  const [networkVisible, setNetworkVisible] = useState(false);
   const [attachmentsVisible, setAttachmentsVisible] = useState(false);
   const [maskVisible, setMaskVisible] = useState(false);
   const [preparingMask, setPreparingMask] = useState(false);
@@ -80,9 +87,22 @@ export function ChatScreen() {
     if (app.messages.length) setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 80);
   }, [app.messages.length]);
 
+  // A draft belongs to one conversation/provider. Never leak its private files into another.
+  const draftRef = useRef({ references, documents, maskUri });
+  const previousDraftOwner = useRef({ conversationId: app.activeConversation?.id, providerId: app.activeProvider?.id });
+  draftRef.current = { references, documents, maskUri };
   useEffect(() => {
+    const previous = previousDraftOwner.current;
+    previousDraftOwner.current = { conversationId: app.activeConversation?.id, providerId: app.activeProvider?.id };
     setContinueFromPrevious(true);
-  }, [app.activeConversation?.id]);
+    // Toggling transparency can materialize an empty conversation. Keep its draft.
+    if (!previous.conversationId && previous.providerId === app.activeProvider?.id) return;
+    setPrompt('');
+    draftRef.current.references.forEach((item) => deleteLocalFile(item.uri));
+    draftRef.current.documents.forEach((item) => deleteLocalFile(item.uri));
+    deleteLocalFile(draftRef.current.maskUri);
+    setReferences([]); setDocuments([]); setMaskUri(null);
+  }, [app.activeConversation?.id, app.activeProvider?.id]);
 
   if (!app.ready) {
     return <SafeAreaView style={styles.loading}><Image source={require('../../assets/icon.png')} style={styles.loadingLogo} /><Text style={styles.loadingTitle}>Salcara Image</Text><Text style={styles.loadingText}>正在准备本地数据…</Text></SafeAreaView>;
@@ -94,9 +114,23 @@ export function ChatScreen() {
       if (remaining <= 0) throw new Error('一次最多使用 4 张参考图');
       setAttachmentsVisible(false);
       const selected = source === 'gallery' ? await pickFromGallery(remaining) : source === 'camera' ? await takePhoto() : await pickFromFiles(remaining);
+      try { validateAttachments(documents, [...references, ...selected]); }
+      catch (error) { selected.forEach((item) => deleteLocalFile(item.uri)); throw error; }
       setReferences((current) => [...current, ...selected].slice(0, 4));
     } catch (error) {
       setDialog({ title: '无法添加图片', message: error instanceof Error ? error.message : '请选择 PNG、JPEG 或 WebP 图片。', icon: 'image-outline' });
+    }
+  };
+
+  const addDocuments = async () => {
+    try {
+      setAttachmentsVisible(false);
+      const selected = await pickDocuments(4 - documents.length);
+      try { validateAttachments([...documents, ...selected], references); }
+      catch (error) { selected.forEach((item) => deleteLocalFile(item.uri)); throw error; }
+      setDocuments((current) => [...current, ...selected]);
+    } catch (error) {
+      setDialog({ title: '无法添加文档', message: error instanceof Error ? error.message : '文档读取失败。', icon: 'document-text-outline' });
     }
   };
 
@@ -116,12 +150,12 @@ export function ChatScreen() {
       setProvidersVisible(true);
       return;
     }
-    if (!app.activeProvider.model || !app.activeProvider.quality || !app.activeProvider.aspectRatio || !app.activeProvider.resolutionTier) {
+    if (isChat ? !analyst?.chatModel : !app.activeProvider.model || !app.activeProvider.quality || !app.activeProvider.aspectRatio || !app.activeProvider.resolutionTier) {
       setSettingsVisible(true);
       return;
     }
     if (!text) {
-      setDialog({ title: '还没有图片描述', message: '请先输入你希望生成或修改的内容。', icon: 'create-outline' });
+      setDialog({ title: '还没有输入内容', message: '请先输入你希望 AI 完成的内容。', icon: 'create-outline' });
       return;
     }
     if (app.generating) {
@@ -129,15 +163,20 @@ export function ChatScreen() {
       return;
     }
     const sentReferences = references;
+    const sentDocuments = documents;
     const sentMask = maskUri;
     const sentContinueFromPrevious = continueFromPrevious;
     setPrompt('');
     setReferences([]);
+    setDocuments([]);
+    // Transfer ownership to the pending message before its conversation is created.
+    draftRef.current = { references: [], documents: [], maskUri: null };
     setMaskUri(null);
     setContinueFromPrevious(true);
-    void app.sendPrompt(text, sentReferences, sentMask, sentContinueFromPrevious).catch((error) => {
+    void app.sendPrompt(text, sentReferences, sentMask, sentContinueFromPrevious, sentDocuments).catch((error) => {
       setPrompt(text);
       setReferences(sentReferences);
+      setDocuments(sentDocuments);
       setMaskUri(sentMask);
       setContinueFromPrevious(sentContinueFromPrevious);
       setDialog({ title: '无法发送', message: error instanceof Error ? error.message : '请检查服务商设置。', icon: 'alert-circle-outline' });
@@ -148,6 +187,8 @@ export function ChatScreen() {
     try {
       if (references.length >= 4) throw new Error('一次最多使用 4 张参考图');
       const reference = await createReferenceFromGenerated(uri);
+      try { validateAttachments(documents, [...references, reference]); }
+      catch (error) { deleteLocalFile(reference.uri); throw error; }
       setReferences((current) => [...current, reference]);
       setPreviewUri(null);
     } catch (error) {
@@ -190,24 +231,27 @@ export function ChatScreen() {
 
   const transparent = app.activeConversation?.transparent ?? false;
   const previousResult = latestCompletedImage(app.messages);
-  const continuingFromPrevious = Boolean(continueFromPrevious && references.length === 0 && previousResult?.imageUri);
+  const continuingFromPrevious = Boolean(!isChat && continueFromPrevious && references.length === 0 && previousResult?.imageUri);
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.header}>
         <IconButton icon="menu" label="打开会话" onPress={() => setDrawerVisible(true)} />
         <Pressable style={styles.headerInfo} onPress={() => setProvidersVisible(true)}>
           <Text style={styles.providerName} numberOfLines={1}>{app.activeProvider?.name ?? '添加服务商'}</Text>
-          <Text style={styles.modelName} numberOfLines={1}>{app.activeProvider?.model ?? '尚未配置模型'}</Text>
+          <Text style={styles.modelName} numberOfLines={1}>{(isChat ? analyst?.chatModel : app.activeProvider?.model) ?? '尚未配置模型'}</Text>
         </Pressable>
-        <IconButton icon="options-outline" label="生成设置" onPress={() => app.activeProvider ? setSettingsVisible(true) : setProvidersVisible(true)} />
+        <IconButton icon="options-outline" label={isChat ? '对话设置' : '生成设置'} onPress={() => app.activeProvider ? setSettingsVisible(true) : setProvidersVisible(true)} />
+      </View>
+      <View style={styles.modeRow}>
+        {(['image', 'chat'] as const).map((mode) => <Chip key={mode} label={mode === 'image' ? '图片创作' : '对话 · 解析'} selected={app.composerMode === mode} onPress={() => void app.setComposerMode(mode).catch((error) => setDialog({ title: '暂时无法切换', message: error.message }))} />)}
       </View>
 
       <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
         {app.messages.length === 0 ? (
           <Animated.View entering={FadeIn.duration(280)} style={styles.emptyState}>
             <View style={styles.logo}><Ionicons name="sparkles" size={30} color={colors.primaryStrong} /></View>
-            <Text style={styles.emptyTitle}>描述你想看到的画面</Text>
-            <Text style={styles.emptyText}>{app.activeProvider ? '直接输入提示词，或添加最多四张参考图。生成参数可随时切换。' : '先添加一个 OpenAI 兼容服务商，再开始生成图片。'}</Text>
+            <Text style={styles.emptyTitle}>{isChat ? '聊想法，也能读懂图片与文件' : '描述你想看到的画面'}</Text>
+            <Text style={styles.emptyText}>{app.activeProvider ? isChat ? '支持文字、图片与 PDF 等文档。自动携带最近 12 轮成功对话，能力取决于所选模型。' : '添加参考图进行修改，也可上传 PDF 整理生图需求。生成参数可随时切换。' : '先添加一个 OpenAI 兼容服务商，再开始使用。'}</Text>
             {!app.activeProvider && <Pressable style={styles.setupButton} onPress={() => setProvidersVisible(true)}><Text style={styles.setupText}>添加服务商</Text></Pressable>}
           </Animated.View>
         ) : (
@@ -222,6 +266,7 @@ export function ChatScreen() {
                 <MessageBubble
                   message={item}
                   elapsedSeconds={app.elapsedSeconds}
+                  requestStage={app.requestStage}
                   onCancel={app.cancelGeneration}
                   onRetry={() => void app.retryMessage(item).catch((error) => setDialog({ title: '重试失败', message: error instanceof Error ? error.message : '请稍后再试。', icon: 'refresh-outline' }))}
                   onSave={() => item.imageUri && void handleImageAction('save', item.imageUri)}
@@ -249,29 +294,38 @@ export function ChatScreen() {
               </Pressable>
             </View>
           )}
-          <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => void openMaskEditor()} hasMask={Boolean(maskUri)} />
+          <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => void openMaskEditor()} hasMask={Boolean(maskUri)} allowMask={!isChat} />
+          {documents.length > 0 && <ScrollView horizontal style={styles.documentTray} contentContainerStyle={{ gap: 8 }}>
+            {documents.map((document) => <View key={document.id} style={styles.documentChip}>
+              <Ionicons name="document-text-outline" size={20} color={colors.primaryStrong} />
+              <View style={{ maxWidth: 150 }}><Text numberOfLines={1} style={styles.documentName}>{document.name}</Text><Text style={styles.compatibilityHint}>{(document.size / 1024 / 1024).toFixed(1)} MB</Text></View>
+              <Pressable accessibilityLabel={`移除 ${document.name}`} onPress={() => { setDocuments((current) => current.filter((item) => item.id !== document.id)); deleteLocalFile(document.uri); }}><Ionicons name="close" size={18} color={colors.textMuted} /></Pressable>
+            </View>)}
+          </ScrollView>}
           <View style={styles.quickSettings}>
-            <AnimatedPressable style={[styles.transparent, transparentAnimatedStyle]} disabled={!app.activeProvider} onPress={() => void app.toggleTransparent().catch((error) => setDialog({ title: '无法切换透明背景', message: error instanceof Error ? error.message : '请稍后再试。' }))}>
+            {!isChat && <AnimatedPressable style={[styles.transparent, transparentAnimatedStyle]} disabled={!app.activeProvider || app.generating} onPress={() => void app.toggleTransparent().catch((error) => setDialog({ title: '无法切换透明背景', message: error instanceof Error ? error.message : '请稍后再试。' }))}>
               <Ionicons name="layers-outline" size={17} color={transparent ? colors.primaryStrong : colors.textMuted} />
               <Text style={[styles.transparentText, transparent && styles.transparentTextActive]}>透明背景</Text>
-            </AnimatedPressable>
+            </AnimatedPressable>}
             {app.activeProvider && (
               <Pressable onPress={() => setSettingsVisible(true)} style={styles.settingsSummary}>
                 <Text style={styles.settingsText}>
-                  {app.activeProvider.quality && app.activeProvider.aspectRatio && app.activeProvider.resolutionTier
+                  {isChat ? `${analyst?.name ?? '选择服务商'} · ${analyst?.chatModel || '选择对话模型'}` : app.activeProvider.quality && app.activeProvider.aspectRatio && app.activeProvider.resolutionTier
                     ? `${app.activeProvider.quality} · ${app.activeProvider.aspectRatio} · ${app.activeProvider.resolutionTier}`
                     : '设置生成参数'}
                 </Text>
               </Pressable>
             )}
           </View>
-          {transparent && <Text style={styles.compatibilityHint}>已请求透明 PNG，实际透明能力由服务商决定。</Text>}
+          {!isChat && transparent && <Text style={styles.compatibilityHint}>已请求透明 PNG，实际透明能力由服务商决定。</Text>}
+          {!isChat && documents.length > 0 && <Text style={styles.compatibilityHint}>将通过 {analyst?.chatModel ? `${analyst.name} / ${analyst.chatModel}` : '待配置的对话模型'} 解析文件后生图；解析与生图分别计费。</Text>}
+          {isChat && (documents.length > 0 || references.length > 0) && <Text style={styles.compatibilityHint}>附件将发送到 {analyst?.name ?? '所选对话服务商'}；请确认模型支持图片／PDF。</Text>}
           <View style={styles.composer}>
-            <IconButton icon="add" label="添加参考图" disabled={references.length >= 4} onPress={() => setAttachmentsVisible(true)} />
+            <IconButton icon="add" label="添加图片或文档" disabled={app.generating} onPress={() => setAttachmentsVisible(true)} />
             <TextInput
               value={prompt}
               onChangeText={setPrompt}
-              placeholder={references.length || continuingFromPrevious ? '描述如何修改图片…' : '描述你想生成的图片…'}
+              placeholder={isChat ? '输入问题，或让我分析附件…' : documents.length ? '描述如何根据文件生成图片…' : references.length || continuingFromPrevious ? '描述如何修改图片…' : '描述你想生成的图片…'}
               placeholderTextColor={colors.textMuted}
               multiline
               maxLength={4000}
@@ -296,15 +350,18 @@ export function ChatScreen() {
         onClose={() => setDrawerVisible(false)}
         onOpenProviders={() => { setDrawerVisible(false); setProvidersVisible(true); }}
         onOpenAbout={() => { setDrawerVisible(false); setAboutVisible(true); }}
+        onOpenNetwork={() => { setDrawerVisible(false); setNetworkVisible(true); }}
       />
       <ProviderManager visible={providersVisible} onClose={() => setProvidersVisible(false)} />
       <SettingsSheet visible={settingsVisible} onClose={() => setSettingsVisible(false)} />
       <AboutSheet visible={aboutVisible} onClose={() => setAboutVisible(false)} onCheckUpdates={() => setUpdateCheckToken((value) => value + 1)} />
-      <Sheet visible={attachmentsVisible} title="添加参考图" onClose={() => setAttachmentsVisible(false)} scroll={false}>
+      <Sheet visible={attachmentsVisible} title="添加图片或文档" onClose={() => setAttachmentsVisible(false)}>
         <View style={styles.attachmentOptions}>
           <AttachmentOption icon="images-outline" title="从相册选择" subtitle="PNG、JPEG 或 WebP" onPress={() => void addReferences('gallery')} />
           <AttachmentOption icon="camera-outline" title="拍照" subtitle="使用相机拍摄主图" onPress={() => void addReferences('camera')} />
           <AttachmentOption icon="folder-open-outline" title="从文件选择" subtitle="仅支持图片文件" onPress={() => void addReferences('files')} />
+          <AttachmentOption icon="document-text-outline" title="添加文档" subtitle="PDF、TXT、Markdown、CSV · 最多 4 份" onPress={() => void addDocuments()} />
+          <Text style={styles.compatibilityHint}>每个附件不超过 20MB，本次图片和文档合计不超过 30MB。PDF 图表内容由所选多模态模型理解。</Text>
         </View>
       </Sheet>
       <MaskEditor visible={maskVisible} image={references[0] ?? null} onCancel={() => setMaskVisible(false)} onConfirm={(uri) => { if (maskUri && maskUri !== uri) deleteLocalFile(maskUri); setMaskUri(uri); setMaskVisible(false); }} />
@@ -314,6 +371,7 @@ export function ChatScreen() {
         <ActivityIndicator color={colors.primaryStrong} />
       </AppDialog>
       <UpdateManager manualCheckToken={updateCheckToken} />
+      <NetworkDiagnostics visible={networkVisible} onClose={() => setNetworkVisible(false)} providerId={(isChat ? analyst?.id : app.activeProvider?.id) ?? ''} baseUrl={(isChat ? analyst?.baseUrl : app.activeProvider?.baseUrl) ?? ''} imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
     </SafeAreaView>
   );
 }
@@ -330,6 +388,10 @@ const styles = StyleSheet.create({
   loadingText: { color: colors.textMuted },
   header: { minHeight: 66, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, gap: spacing.md, borderBottomWidth: 1, borderColor: colors.border },
   headerInfo: { flex: 1, alignItems: 'center', gap: 2 },
+  modeRow: { flexDirection: 'row', gap: 8, justifyContent: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: colors.border },
+  documentTray: { flexGrow: 0, marginHorizontal: spacing.md, marginTop: 8, maxHeight: 64 },
+  documentChip: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderRadius: radius.md, backgroundColor: colors.blueSurface },
+  documentName: { color: colors.text, fontSize: 12, fontWeight: '600' },
   providerName: { color: colors.text, fontWeight: '700', fontSize: 15 },
   modelName: { color: colors.textMuted, fontSize: 11, maxWidth: '92%' },
   body: { flex: 1 },

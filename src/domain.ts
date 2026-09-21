@@ -2,7 +2,8 @@ export type Quality = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type AspectRatio = '1:1' | '16:9' | '9:16';
 export type ResolutionTier = '1K' | '2K' | '4K';
 export type MessageStatus = 'pending' | 'complete' | 'error' | 'cancelled' | 'interrupted';
-export type MessageMode = 'generate' | 'edit';
+export type MessageMode = 'generate' | 'edit' | 'chat';
+export type ChatApi = 'chat-completions' | 'responses';
 
 export interface ProviderProfile {
   id: string;
@@ -12,6 +13,9 @@ export interface ProviderProfile {
   quality: Quality | null;
   aspectRatio: AspectRatio | null;
   resolutionTier: ResolutionTier | null;
+  chatModel?: string | null;
+  chatApi?: ChatApi;
+  analysisProviderId?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -21,6 +25,7 @@ export interface Conversation {
   title: string;
   providerId: string;
   transparent: boolean;
+  mode?: 'image' | 'chat';
   createdAt: number;
   updatedAt: number;
 }
@@ -33,6 +38,14 @@ export interface ReferenceImage {
   size: number;
   width?: number;
   height?: number;
+}
+
+export interface DocumentAttachment {
+  id: string;
+  uri: string;
+  name: string;
+  mimeType: 'application/pdf' | 'text/plain' | 'text/markdown' | 'text/csv';
+  size: number;
 }
 
 export interface ChatMessage {
@@ -50,6 +63,13 @@ export interface ChatMessage {
   imageUri: string | null;
   remoteImageUrl: string | null;
   references: ReferenceImage[];
+  documents?: DocumentAttachment[];
+  text?: string | null;
+  preparedPrompt?: string | null;
+  analysisModel?: string | null;
+  analysisProviderId?: string | null;
+  requestApi?: ChatApi;
+  analysisApi?: ChatApi;
   maskUri: string | null;
   error: string | null;
   elapsedMs: number | null;

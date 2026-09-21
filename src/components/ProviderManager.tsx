@@ -1,8 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { fetchImageModels } from '../api/image-api';
+import { fetchChatModels } from '../api/chat-api';
 import type { AspectRatio, ProviderProfile, Quality, ResolutionTier } from '../domain';
 import { ALL_QUALITIES, createId, normalizeBaseUrl, qualitiesForModel } from '../domain-utils';
 import { useApp } from '../state/AppContext';
@@ -19,6 +19,9 @@ type FormState = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  chatModel: string;
+  chatApi: 'chat-completions' | 'responses';
+  analysisProviderId: string | null;
   quality: Quality | null;
   aspectRatio: AspectRatio | null;
   resolutionTier: ResolutionTier | null;
@@ -26,14 +29,16 @@ type FormState = {
 };
 
 function emptyForm(): FormState {
-  return { id: null, name: '', baseUrl: '', apiKey: '', model: '', quality: null, aspectRatio: null, resolutionTier: null, createdAt: Date.now() };
+  return { id: null, name: '', baseUrl: '', apiKey: '', model: '', chatModel: '', chatApi: 'chat-completions', analysisProviderId: null, quality: null, aspectRatio: null, resolutionTier: null, createdAt: Date.now() };
 }
 
 export function ProviderManager({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-  const { providers, activeProvider, reloadProviders, activateProvider, removeProvider } = useApp();
+  const { providers, activeProvider, reloadProviders, activateProvider, removeProvider, generating } = useApp();
   const [form, setForm] = useState<FormState>(emptyForm);
   const [models, setModels] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const saveLock = useRef(false);
   const [tested, setTested] = useState(false);
   const [dialog, setDialog] = useState<{ title: string; message: string; actions?: DialogAction[] } | null>(null);
 
@@ -52,12 +57,15 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       baseUrl: provider.baseUrl,
       apiKey: '',
       model: provider.model ?? '',
+      chatModel: provider.chatModel ?? '',
+      chatApi: provider.chatApi ?? 'chat-completions',
+      analysisProviderId: provider.analysisProviderId ?? null,
       quality: provider.quality,
       aspectRatio: provider.aspectRatio,
       resolutionTier: provider.resolutionTier,
       createdAt: provider.createdAt,
     });
-    setModels(provider.model ? [provider.model] : []);
+    setModels([provider.model, provider.chatModel].filter((value): value is string => Boolean(value)));
     setTested(false);
   };
 
@@ -67,10 +75,10 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       const baseUrl = normalizeBaseUrl(form.baseUrl);
       const key = form.apiKey.trim() || (form.id ? await getProviderKey(form.id) : null);
       if (!key) throw new Error('请输入 API 密钥');
-      const nextModels = await fetchImageModels(baseUrl, key);
+      const nextModels = await fetchChatModels(baseUrl, key);
       setModels(nextModels);
       setTested(true);
-      setDialog({ title: '连接成功', message: nextModels.length ? `找到 ${nextModels.length} 个图片模型。` : '接口可用，但没有返回 gpt-image 模型，请手动填写模型 ID。' });
+      setDialog({ title: '连接成功', message: nextModels.length ? `读取到 ${nextModels.length} 个模型。请选择生图或对话模型；图片／PDF 理解能力以服务商实际支持为准。` : '接口可用，但没有返回模型，请手动填写模型 ID。' });
     } catch (error) {
       setTested(false);
       setDialog({ title: '连接失败', message: error instanceof Error ? error.message : '请检查地址和密钥，也可以继续手动填写模型 ID。' });
@@ -80,23 +88,33 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
   };
 
   const save = async () => {
+    if (saveLock.current) return;
+    saveLock.current = true;
+    setSaving(true);
     try {
+      if (generating) throw new Error('请先等待或取消当前请求，再修改服务商');
       const name = form.name.trim();
       const baseUrl = normalizeBaseUrl(form.baseUrl);
       const model = form.model.trim();
+      const chatModel = form.chatModel.trim();
       const key = form.apiKey.trim() || (form.id ? await getProviderKey(form.id) : null);
       if (!name) throw new Error('请输入服务商名称');
       if (!key) throw new Error('请输入 API 密钥');
-      if (!model || !form.quality || !form.resolutionTier) {
-        throw new Error('首次使用必须选择模型、画质和清晰度');
+      if (!model && !chatModel) throw new Error('至少填写一个生图模型或对话模型');
+      if (model && (!form.quality || !form.resolutionTier)) {
+        throw new Error('使用生图功能时必须选择画质和清晰度');
       }
+      if (model && form.quality && !qualitiesForModel(model).includes(form.quality)) throw new Error('此模型不支持所选画质');
       const id = form.id ?? createId();
       const now = Date.now();
       await upsertProvider({
         id,
         name,
         baseUrl,
-        model,
+        model: model || null,
+        chatModel: chatModel || null,
+        chatApi: form.chatApi,
+        analysisProviderId: form.analysisProviderId,
         quality: form.quality,
         aspectRatio: form.aspectRatio,
         resolutionTier: form.resolutionTier,
@@ -112,6 +130,9 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       onClose();
     } catch (error) {
       setDialog({ title: '无法保存', message: error instanceof Error ? error.message : '请检查配置。' });
+    } finally {
+      saveLock.current = false;
+      setSaving(false);
     }
   };
 
@@ -126,12 +147,13 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
             {providers.map((provider) => (
               <Pressable
                 key={provider.id}
-                onPress={() => void activateProvider(provider.id)}
+                disabled={generating}
+                onPress={() => void activateProvider(provider.id).then(onClose).catch((error) => setDialog({ title: '无法切换', message: error.message }))}
                 style={[styles.providerRow, provider.id === activeProvider?.id && styles.providerActive]}
               >
                 <View style={styles.providerInfo}>
                   <Text style={styles.providerName}>{provider.name}</Text>
-                  <Text style={styles.providerMeta} numberOfLines={1}>{provider.model ?? '尚未选择模型'} · {provider.baseUrl}</Text>
+                  <Text style={styles.providerMeta} numberOfLines={1}>{[provider.model && '生图', provider.chatModel && '对话'].filter(Boolean).join(' / ')} · {provider.baseUrl}</Text>
                 </View>
                 <Pressable accessibilityLabel="编辑服务商" onPress={() => void editProvider(provider)} style={styles.rowAction}>
                   <Ionicons name="create-outline" size={20} color={colors.textMuted} />
@@ -140,10 +162,10 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
                   accessibilityLabel="删除服务商"
                   onPress={() => setDialog({
                     title: '删除服务商？',
-                    message: `将同时删除“${provider.name}”的会话、本地图片和已保存密钥，此操作无法撤销。`,
+                    message: `将同时删除“${provider.name}”的会话、本地图片、文档和已保存密钥，此操作无法撤销。`,
                     actions: [
                       { label: '取消', tone: 'secondary', onPress: () => setDialog(null) },
-                      { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeProvider(provider.id); } },
+                      { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeProvider(provider.id).catch((error) => setDialog({ title: '无法删除', message: error.message })); } },
                     ],
                   })}
                   style={styles.rowAction}
@@ -165,16 +187,30 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
           <Field label="API 密钥" value={form.apiKey} placeholder={form.id ? '留空则保留原密钥' : 'sk-…'} secureTextEntry autoCapitalize="none" onChangeText={(apiKey) => setForm({ ...form, apiKey })} />
           <PrimaryButton label={tested ? '重新测试并读取模型' : '测试连接并读取模型'} icon="pulse-outline" loading={busy} onPress={() => void testConnection()} />
 
-          <Text style={styles.label}>模型</Text>
-          {models.length > 0 && <View style={styles.chips}>{models.map((model) => <Chip key={model} label={model} selected={form.model === model} onPress={() => setForm({ ...form, model, quality: null })} />)}</View>}
-          <TextInput value={form.model} onChangeText={(model) => setForm({ ...form, model, quality: null })} placeholder="也可手动填写模型 ID" placeholderTextColor={colors.textMuted} autoCapitalize="none" style={styles.input} />
+          <Text style={styles.label}>生图模型（可留空）</Text>
+          <View style={styles.chips}>{models.filter((model) => /image|dall-e|flux/i.test(model)).map((model) => <Chip key={model} label={model} selected={form.model === model} onPress={() => setForm({ ...form, model, quality: null })} />)}</View>
+          <TextInput value={form.model} onChangeText={(model) => setForm({ ...form, model, quality: null })} placeholder="兼容 Images API 的模型 ID" placeholderTextColor={colors.textMuted} autoCapitalize="none" style={styles.input} />
 
+          {Boolean(form.model) && <>
           <Text style={styles.label}>画质</Text>
           <View style={styles.chips}>{allowedQualities.map((quality) => <Chip key={quality} label={quality} selected={form.quality === quality} onPress={() => setForm({ ...form, quality })} />)}</View>
           <Text style={styles.label}>清晰度</Text>
           <View style={styles.chips}>{TIERS.map((resolutionTier) => <Chip key={resolutionTier} label={resolutionTier} selected={form.resolutionTier === resolutionTier} onPress={() => setForm({ ...form, resolutionTier })} />)}</View>
+          </>}
+          <Text style={styles.label}>对话／图片与文件解析模型（可留空）</Text>
+          <View style={styles.chips}>{models.filter((model) => !/image|dall-e|flux/i.test(model)).slice(0, 24).map((chatModel) => <Chip key={chatModel} label={chatModel} selected={form.chatModel === chatModel} onPress={() => setForm({ ...form, chatModel })} />)}</View>
+          {models.length > 24 && <Text style={styles.hint}>显示部分模型，其他模型可手动填写完整 ID。</Text>}
+          <TextInput value={form.chatModel} onChangeText={(chatModel) => setForm({ ...form, chatModel })} placeholder="输入支持对话的模型 ID" placeholderTextColor={colors.textMuted} autoCapitalize="none" style={styles.input} />
+          {Boolean(form.chatModel) && <>
+            <Text style={styles.label}>对话接口</Text>
+            <View style={styles.chips}>
+              <Chip label="Chat Completions" selected={form.chatApi === 'chat-completions'} onPress={() => setForm({ ...form, chatApi: 'chat-completions' })} />
+              <Chip label="Responses" selected={form.chatApi === 'responses'} onPress={() => setForm({ ...form, chatApi: 'responses' })} />
+            </View>
+            <Text style={styles.hint}>按服务商文档选择。识图和 PDF 需要多模态模型，仅模型列表无法确认支持情况。</Text>
+          </>}
           <Text style={styles.hint}>比例属于每次生成设置，可在对话框中调整。密钥只保存在 Android 安全存储中。</Text>
-          <PrimaryButton label="保存并使用" icon="checkmark" onPress={() => void save()} />
+          <PrimaryButton label="保存并使用" icon="checkmark" loading={saving} disabled={generating || busy} onPress={() => void save()} />
         </View>
       </View>
       <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} actions={dialog?.actions} onClose={() => setDialog(null)} />

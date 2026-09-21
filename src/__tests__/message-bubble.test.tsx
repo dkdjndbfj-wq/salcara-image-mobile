@@ -1,5 +1,8 @@
 import { fireEvent, render } from '@testing-library/react-native';
 import React from 'react';
+import * as Clipboard from 'expo-clipboard';
+
+jest.mock('expo-clipboard', () => ({ setStringAsync: jest.fn(async () => {}) }));
 
 jest.mock('@expo/vector-icons', () => {
   const ReactModule = require('react');
@@ -88,5 +91,34 @@ describe('MessageBubble', () => {
     expect(onSave).toHaveBeenCalledTimes(1);
     expect(onShare).toHaveBeenCalledTimes(1);
     expect(onReuse).toHaveBeenCalledTimes(1);
+  });
+
+  test('renders and copies a successful text answer without showing an image failure', async () => {
+    const screen = await renderMessage({ ...base, mode: 'chat', status: 'complete', text: '足球场的两侧是蓝色看台。', size: '' });
+    expect(screen.getByText('足球场的两侧是蓝色看台。')).toBeTruthy();
+    expect(screen.queryByText('请求失败')).toBeNull();
+    expect(screen.queryByText('生成失败')).toBeNull();
+    expect(screen.queryByText('保存')).toBeNull();
+    await fireEvent.press(screen.getByText('复制回答'));
+    expect(Clipboard.setStringAsync).toHaveBeenCalledWith('足球场的两侧是蓝色看台。');
+    expect(screen.getByText('已复制')).toBeTruthy();
+  });
+
+  test('shows document names beside the user prompt', async () => {
+    const screen = await renderMessage({ ...base, role: 'user', status: 'complete', documents: [{ id: 'pdf', uri: 'file:///scheme.pdf', name: '足球场设计方案.pdf', mimeType: 'application/pdf', size: 128 }] });
+    expect(screen.getByText('足球场设计方案.pdf')).toBeTruthy();
+    expect(screen.getByText('奥特曼打怪兽')).toBeTruthy();
+  });
+
+  test('explains the analysis stage and expands the prompt used for image generation', async () => {
+    const pending = await renderMessage({ ...base, documents: [] }, { requestStage: '正在解析附件并整理生图需求' });
+    expect(pending.getByText('正在解析附件并整理生图需求')).toBeTruthy();
+    await pending.unmount();
+    const result = await renderMessage({ ...base, status: 'complete', imageUri: 'file:///result.png', preparedPrompt: '保留 PDF 中的场地尺寸与配色。' });
+    expect(result.queryByText('保留 PDF 中的场地尺寸与配色。')).toBeNull();
+    await fireEvent.press(result.getByText('查看文件解析后的提示词'));
+    expect(result.getByText('保留 PDF 中的场地尺寸与配色。')).toBeTruthy();
+    await fireEvent.press(result.getByText('收起文件解析结果'));
+    expect(result.queryByText('保留 PDF 中的场地尺寸与配色。')).toBeNull();
   });
 });

@@ -36,12 +36,12 @@ fi
 
 if [[ -n "$previous_apk" && -f "$previous_apk" ]]; then
   if [[ ! -s "$previous_apk" ]]; then
-    echo "Previous APK is empty; skipping previous-version comparison: $previous_apk" >&2
-    exit 0
+    echo "Previous APK is empty; cannot verify upgrade compatibility: $previous_apk" >&2
+    exit 1
   fi
   if ! previous_badging="$(read_badging "$previous_apk")"; then
-    echo "Previous APK is not a readable Android package; skipping previous-version comparison: $previous_apk" >&2
-    exit 0
+    echo "Previous APK is unreadable; cannot verify upgrade compatibility: $previous_apk" >&2
+    exit 1
   fi
   previous_package="$(read_value "$previous_badging" name)"
   previous_code="$(read_value "$previous_badging" versionCode)"

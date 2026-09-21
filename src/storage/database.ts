@@ -1,6 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 
-import type { ChatMessage, Conversation, ProviderProfile, ReferenceImage } from '../domain';
+import type { ChatMessage, Conversation, DocumentAttachment, ProviderProfile, ReferenceImage } from '../domain';
 
 const DATABASE_NAME = 'salcara-image.db';
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -13,6 +13,9 @@ type ProviderRow = {
   quality: ProviderProfile['quality'];
   aspect_ratio: ProviderProfile['aspectRatio'];
   resolution_tier: ProviderProfile['resolutionTier'];
+  chat_model: string | null;
+  chat_api: ProviderProfile['chatApi'];
+  analysis_provider_id: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -22,6 +25,7 @@ type ConversationRow = {
   title: string;
   provider_id: string;
   transparent: number;
+  mode: Conversation['mode'];
   created_at: number;
   updated_at: number;
 };
@@ -41,6 +45,13 @@ type MessageRow = {
   image_uri: string | null;
   remote_image_url: string | null;
   references_json: string;
+  documents_json: string;
+  text: string | null;
+  prepared_prompt: string | null;
+  analysis_model: string | null;
+  analysis_provider_id: string | null;
+  request_api: ChatMessage['requestApi'];
+  analysis_api: ChatMessage['analysisApi'];
   mask_uri: string | null;
   error: string | null;
   elapsed_ms: number | null;
@@ -101,10 +112,22 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
       `);
-      const messageColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(messages)');
-      if (!messageColumns.some((column) => column.name === 'remote_image_url')) {
-        await db.execAsync('ALTER TABLE messages ADD COLUMN remote_image_url TEXT;');
-      }
+      await addMissingColumns(db, 'providers', {
+        chat_model: 'TEXT',
+        chat_api: "TEXT NOT NULL DEFAULT 'chat-completions'",
+        analysis_provider_id: 'TEXT',
+      });
+      await addMissingColumns(db, 'conversations', { mode: "TEXT NOT NULL DEFAULT 'image'" });
+      await addMissingColumns(db, 'messages', {
+        remote_image_url: 'TEXT',
+        documents_json: "TEXT NOT NULL DEFAULT '[]'",
+        text: 'TEXT',
+        prepared_prompt: 'TEXT',
+        analysis_model: 'TEXT',
+        analysis_provider_id: 'TEXT',
+        request_api: 'TEXT',
+        analysis_api: 'TEXT',
+      });
       await db.runAsync(
         `UPDATE messages SET status = 'interrupted', error = '应用在生成期间被关闭' WHERE status = 'pending'`,
       );
@@ -112,6 +135,19 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
     });
   }
   return databasePromise;
+}
+
+async function addMissingColumns(
+  db: SQLite.SQLiteDatabase,
+  table: 'providers' | 'conversations' | 'messages',
+  columns: Record<string, string>,
+): Promise<void> {
+  const existing = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
+  for (const [name, definition] of Object.entries(columns)) {
+    if (!existing.some((column) => column.name === name)) {
+      await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition};`);
+    }
+  }
 }
 
 export async function initializeDatabase(): Promise<void> {
@@ -127,8 +163,8 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
   const db = await getDatabase();
   await db.runAsync(
     `INSERT INTO providers
-      (id, name, base_url, model, quality, aspect_ratio, resolution_tier, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, base_url, model, quality, aspect_ratio, resolution_tier, chat_model, chat_api, analysis_provider_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       base_url = excluded.base_url,
@@ -136,6 +172,9 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
       quality = excluded.quality,
       aspect_ratio = excluded.aspect_ratio,
       resolution_tier = excluded.resolution_tier,
+      chat_model = excluded.chat_model,
+      chat_api = excluded.chat_api,
+      analysis_provider_id = excluded.analysis_provider_id,
       updated_at = excluded.updated_at`,
     profile.id,
     profile.name,
@@ -144,6 +183,9 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
     profile.quality,
     profile.aspectRatio,
     profile.resolutionTier,
+    profile.chatModel ?? null,
+    profile.chatApi ?? 'chat-completions',
+    profile.analysisProviderId ?? null,
     profile.createdAt,
     profile.updatedAt,
   );
@@ -182,12 +224,13 @@ export async function listConversations(): Promise<Conversation[]> {
 
 export async function insertConversation(conversation: Conversation): Promise<void> {
   await (await getDatabase()).runAsync(
-    `INSERT INTO conversations (id, title, provider_id, transparent, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO conversations (id, title, provider_id, transparent, mode, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     conversation.id,
     conversation.title,
     conversation.providerId,
     conversation.transparent ? 1 : 0,
+    conversation.mode ?? 'image',
     conversation.createdAt,
     conversation.updatedAt,
   );
@@ -195,10 +238,11 @@ export async function insertConversation(conversation: Conversation): Promise<vo
 
 export async function updateConversation(conversation: Conversation): Promise<void> {
   await (await getDatabase()).runAsync(
-    `UPDATE conversations SET title = ?, provider_id = ?, transparent = ?, updated_at = ? WHERE id = ?`,
+    `UPDATE conversations SET title = ?, provider_id = ?, transparent = ?, mode = ?, updated_at = ? WHERE id = ?`,
     conversation.title,
     conversation.providerId,
     conversation.transparent ? 1 : 0,
+    conversation.mode ?? 'image',
     conversation.updatedAt,
     conversation.id,
   );
@@ -223,8 +267,9 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
   await (await getDatabase()).runAsync(
     `INSERT INTO messages
       (id, conversation_id, role, prompt, mode, status, provider_id, model, quality, size,
-       transparent, image_uri, remote_image_url, references_json, mask_uri, error, elapsed_ms, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       transparent, image_uri, remote_image_url, references_json, mask_uri, error, elapsed_ms, created_at,
+       documents_json, text, prepared_prompt, analysis_model, analysis_provider_id, request_api, analysis_api)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     message.id,
     message.conversationId,
     message.role,
@@ -243,12 +288,20 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
     message.error,
     message.elapsedMs,
     message.createdAt,
+    JSON.stringify(message.documents ?? []),
+    message.text ?? null,
+    message.preparedPrompt ?? null,
+    message.analysisModel ?? null,
+    message.analysisProviderId ?? null,
+    message.requestApi ?? null,
+    message.analysisApi ?? null,
   );
 }
 
 export async function updateMessage(message: ChatMessage): Promise<void> {
   await (await getDatabase()).runAsync(
-    `UPDATE messages SET status = ?, image_uri = ?, remote_image_url = ?, error = ?, elapsed_ms = ?, references_json = ?, mask_uri = ?
+    `UPDATE messages SET status = ?, image_uri = ?, remote_image_url = ?, error = ?, elapsed_ms = ?, references_json = ?, mask_uri = ?,
+       documents_json = ?, text = ?, prepared_prompt = ?, analysis_model = ?, analysis_provider_id = ?, request_api = ?, analysis_api = ?
      WHERE id = ?`,
     message.status,
     message.imageUri,
@@ -257,6 +310,13 @@ export async function updateMessage(message: ChatMessage): Promise<void> {
     message.elapsedMs,
     JSON.stringify(message.references),
     message.maskUri,
+    JSON.stringify(message.documents ?? []),
+    message.text ?? null,
+    message.preparedPrompt ?? null,
+    message.analysisModel ?? null,
+    message.analysisProviderId ?? null,
+    message.requestApi ?? null,
+    message.analysisApi ?? null,
     message.id,
   );
 }
@@ -270,6 +330,9 @@ function mapProvider(row: ProviderRow): ProviderProfile {
     quality: row.quality,
     aspectRatio: row.aspect_ratio,
     resolutionTier: row.resolution_tier,
+    chatModel: row.chat_model ?? null,
+    chatApi: row.chat_api === 'responses' ? 'responses' : 'chat-completions',
+    analysisProviderId: row.analysis_provider_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -281,6 +344,7 @@ function mapConversation(row: ConversationRow): Conversation {
     title: row.title,
     providerId: row.provider_id,
     transparent: row.transparent === 1,
+    mode: row.mode === 'chat' ? 'chat' : 'image',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -292,6 +356,13 @@ function mapMessage(row: MessageRow): ChatMessage {
     references = JSON.parse(row.references_json) as ReferenceImage[];
   } catch {
     references = [];
+  }
+  let documents: DocumentAttachment[] = [];
+  try {
+    const parsed: unknown = JSON.parse(row.documents_json || '[]');
+    documents = Array.isArray(parsed) ? parsed as DocumentAttachment[] : [];
+  } catch {
+    documents = [];
   }
   return {
     id: row.id,
@@ -308,6 +379,13 @@ function mapMessage(row: MessageRow): ChatMessage {
     imageUri: row.image_uri,
     remoteImageUrl: row.remote_image_url,
     references,
+    documents,
+    text: row.text ?? null,
+    preparedPrompt: row.prepared_prompt ?? null,
+    analysisModel: row.analysis_model ?? null,
+    analysisProviderId: row.analysis_provider_id ?? null,
+    requestApi: row.request_api ?? undefined,
+    analysisApi: row.analysis_api ?? undefined,
     maskUri: row.mask_uri,
     error: row.error,
     elapsedMs: row.elapsed_ms,

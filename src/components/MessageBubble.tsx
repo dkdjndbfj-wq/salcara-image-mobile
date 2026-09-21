@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as Clipboard from 'expo-clipboard';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
@@ -8,6 +9,7 @@ import { colors, radius, spacing } from '../theme';
 export function MessageBubble({
   message,
   elapsedSeconds,
+  requestStage,
   onCancel,
   onRetry,
   onSave,
@@ -17,6 +19,7 @@ export function MessageBubble({
 }: {
   message: ChatMessage;
   elapsedSeconds: number;
+  requestStage?: string;
   onCancel: () => void;
   onRetry: () => void;
   onSave: () => void;
@@ -25,6 +28,8 @@ export function MessageBubble({
   onPreview: () => void;
 }) {
   const [actualSize, setActualSize] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [showAnalysis, setShowAnalysis] = useState(false);
   const [imageRatio, setImageRatio] = useState(() => ratioFromSize(message.size));
   const window = useWindowDimensions();
 
@@ -47,7 +52,8 @@ export function MessageBubble({
             ))}
           </View>
         )}
-        <View style={styles.userBubble}><Text style={styles.userText}>{message.prompt}</Text></View>
+        {!!message.documents?.length && <View style={styles.referenceRow}>{message.documents.map((document) => <View key={document.id} style={styles.document}><Ionicons name="document-text-outline" size={16} color={colors.primaryStrong} /><Text numberOfLines={2} style={styles.documentText}>{document.name}</Text></View>)}</View>}
+        <View style={styles.userBubble}><Text selectable style={styles.userText}>{message.prompt}</Text></View>
       </View>
     );
   }
@@ -57,11 +63,19 @@ export function MessageBubble({
       <View style={styles.assistantBlock}>
         <View style={styles.progressCard}>
           <ActivityIndicator color={colors.primaryStrong} />
-          <View style={styles.progressText}><Text style={styles.progressTitle}>{message.mode === 'edit' ? '正在编辑图片' : '正在生成图片'}</Text><Text style={styles.meta}>已等待 {formatDuration(elapsedSeconds)} · 最长 10 分钟</Text></View>
+          <View style={styles.progressText}><Text style={styles.progressTitle}>{requestStage || (message.mode === 'chat' ? '正在回答' : message.mode === 'edit' ? '正在编辑图片' : '正在生成图片')}</Text><Text style={styles.meta}>已等待 {formatDuration(elapsedSeconds)} · 最长 10 分钟</Text></View>
           <Pressable onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelText}>取消</Text></Pressable>
         </View>
       </View>
     );
+  }
+
+  if (message.status === 'complete' && message.mode === 'chat' && message.text) {
+    return <View style={styles.assistantBlock}>
+      <Text selectable style={styles.answer}>{message.text}</Text>
+      <Text style={styles.meta}>{message.model}{message.elapsedMs ? ` · ${formatDuration(Math.round(message.elapsedMs / 1000))}` : ''}</Text>
+      <Action icon="copy-outline" label={copied ? '已复制' : '复制回答'} onPress={() => void Clipboard.setStringAsync(message.text!).then(() => setCopied(true)).catch(() => setCopied(false))} />
+    </View>;
   }
 
   if (message.status !== 'complete' || !message.imageUri) {
@@ -71,7 +85,7 @@ export function MessageBubble({
           <Ionicons name="alert-circle-outline" size={22} color={colors.danger} />
           <View style={styles.progressText}>
             <Text style={styles.errorTitle}>{statusTitle(message.status)}</Text>
-            <Text style={styles.errorText}>{message.error ?? '生成未完成'}</Text>
+            <Text selectable style={styles.errorText}>{message.error ?? '请求未完成'}</Text>
           </View>
         </View>
         <Pressable onPress={onRetry} style={styles.retryButton}><Ionicons name="refresh" size={17} color={colors.primaryStrong} /><Text style={styles.retryText}>{message.remoteImageUrl ? '重新下载' : '手动重试'}</Text></Pressable>
@@ -107,6 +121,10 @@ export function MessageBubble({
         <Action icon="share-outline" label="分享" onPress={onShare} />
         <Action icon="images-outline" label="作为参考图" onPress={onReuse} />
       </View>
+      {message.preparedPrompt && <>
+        <Action icon="document-text-outline" label={showAnalysis ? '收起文件解析结果' : '查看文件解析后的提示词'} onPress={() => setShowAnalysis((value) => !value)} />
+        {showAnalysis && <Text selectable style={styles.analysis}>{message.preparedPrompt}</Text>}
+      </>}
     </View>
   );
 }
@@ -117,8 +135,8 @@ function Action({ icon, label, onPress }: { icon: React.ComponentProps<typeof Io
 
 function statusTitle(status: ChatMessage['status']): string {
   if (status === 'cancelled') return '已取消';
-  if (status === 'interrupted') return '生成已中断';
-  return '生成失败';
+  if (status === 'interrupted') return '请求已中断';
+  return '请求失败';
 }
 
 function formatDuration(totalSeconds: number): string {
@@ -146,6 +164,10 @@ const styles = StyleSheet.create({
   userWrap: { alignItems: 'flex-end', paddingHorizontal: spacing.lg, gap: spacing.sm },
   userBubble: { maxWidth: '84%', backgroundColor: colors.blueSurface, borderRadius: radius.lg, borderBottomRightRadius: 5, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
   userText: { color: colors.text, fontSize: 15, lineHeight: 22 },
+  answer: { color: colors.text, fontSize: 16, lineHeight: 26, paddingVertical: 4 },
+  analysis: { color: colors.textMuted, fontSize: 13, lineHeight: 21, padding: 12, backgroundColor: colors.surface, borderRadius: radius.md },
+  document: { flexDirection: 'row', alignItems: 'center', gap: 6, maxWidth: '100%', borderRadius: radius.md, padding: 10, backgroundColor: colors.surface },
+  documentText: { flexShrink: 1, color: colors.text, fontSize: 12 },
   referenceRow: { maxWidth: '90%', flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 },
   referenceItem: { width: 58, height: 58, borderRadius: radius.sm, overflow: 'hidden', backgroundColor: colors.surface },
   referenceImage: { width: 58, height: 58 },
