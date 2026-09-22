@@ -15,6 +15,9 @@ export function networkFailureMessage(url: string, stage: string, error: unknown
   if (/resolve|unknownhost|dns/i.test(detail)) {
     return `${stage}无法解析服务器地址（${host}）。请检查手机的私人 DNS、网络或服务商域名配置。`;
   }
+  if (/streamresetexception|stream was reset|\bCANCEL\b|econnreset|connection reset|socket(?:exception| closed)|network request failed/i.test(detail)) {
+    return `${stage}连接被服务商中途重置（${host}）。如果这是图片下载，请点击“重新下载”，不会重复生成；如果发生在生图请求中，请先查看上游记录再手动重试，以免重复扣费。`;
+  }
   if (/timeout|timed out/i.test(detail)) {
     return `${stage}连接超时（${host}）。请稍后重试；网站和图片下载可能使用不同的服务器。`;
   }

@@ -86,7 +86,7 @@ export function MessageBubble({
         <View style={styles.errorCard}>
           <Ionicons name="alert-circle-outline" size={22} color={colors.danger} />
           <View style={styles.progressText}>
-            <Text style={styles.errorTitle}>{statusTitle(message.status)}</Text>
+            <Text style={styles.errorTitle}>{statusTitle(message.status, Boolean(message.remoteImageUrl))}</Text>
             <Text selectable style={styles.errorText}>{message.error ?? '请求未完成'}</Text>
           </View>
         </View>
@@ -135,7 +135,8 @@ function Action({ icon, label, onPress }: { icon: React.ComponentProps<typeof Io
   return <Pressable onPress={onPress} style={styles.action}><Ionicons name={icon} size={17} color={colors.textMuted} /><Text style={styles.actionText}>{label}</Text></Pressable>;
 }
 
-function statusTitle(status: ChatMessage['status']): string {
+function statusTitle(status: ChatMessage['status'], hasRemoteImage = false): string {
+  if (hasRemoteImage && status === 'error') return '图片已生成，但下载失败';
   if (status === 'cancelled') return '已取消';
   if (status === 'interrupted') return '请求已中断';
   return '请求失败';
@@ -165,8 +166,8 @@ function fitImageCard(ratio: number, maxWidth: number, maxHeight: number): { wid
 const styles = StyleSheet.create({
   userWrap: { alignItems: 'flex-end', paddingHorizontal: spacing.lg, gap: spacing.sm },
   userBubble: { maxWidth: '84%', backgroundColor: colors.blueSurface, borderRadius: radius.lg, borderBottomRightRadius: 5, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
-  userText: { color: colors.text, fontSize: 15, lineHeight: 22 },
-  answer: { color: colors.text, fontSize: 16, lineHeight: 26, paddingVertical: 4 },
+  userText: { color: colors.text, fontSize: 14, lineHeight: 21 },
+  answer: { color: colors.text, fontSize: 15, lineHeight: 23, paddingVertical: 4 },
   analysis: { color: colors.textMuted, fontSize: 13, lineHeight: 21, padding: 12, backgroundColor: colors.surface, borderRadius: radius.md },
   document: { flexDirection: 'row', alignItems: 'center', gap: 6, maxWidth: '100%', borderRadius: radius.md, padding: 10, backgroundColor: colors.surface },
   documentTextWrap: { flexShrink: 1, gap: 2 },

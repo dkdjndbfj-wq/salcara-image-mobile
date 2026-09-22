@@ -5,7 +5,7 @@ jest.mock('../storage/files', () => ({
   downloadPng: jest.fn(async (url: string) => `file://download-${url.split('/').pop()}`),
 }));
 
-import { buildEditFields, buildGenerationBody, editImage, persistApiResult } from '../api/image-api';
+import { buildEditFields, buildGenerationBody, editImage, findImagePayload, persistApiResult } from '../api/image-api';
 
 const common = {
   model: 'gpt-image-2.5-sunburst',
@@ -80,7 +80,19 @@ describe('OpenAI-compatible image payloads', () => {
     await expect(persistApiResult({ data: [{ url: 'data:image/png;base64,YWJjZA==' }] })).resolves.toBe('file://base64-YWJj.png');
   });
 
+  test('accepts common gateway wrappers and image aliases', async () => {
+    expect(findImagePayload({ result: { images: [{ base64: 'YWJjZA==' }] } })).toEqual({ base64: 'YWJjZA==' });
+    expect(findImagePayload({ output: [{ image_url: { url: 'https://cdn.example/result' } }] })).toEqual({ url: 'https://cdn.example/result' });
+    expect(findImagePayload({ data: [{ url: 'https://cdn.example/expiring' }, { partial_image_b64: 'YWJjZA==' }] })).toEqual({ base64: 'YWJjZA==' });
+    expect(findImagePayload({ data: [{ revised_prompt: '普通文本，不是图片' }] })).toBeNull();
+  });
+
+  test('accepts a chat-style content image URL returned by a proxy', async () => {
+    await expect(persistApiResult({ choices: [{ message: { content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,YWJjZA==' } }] } }] })).resolves.toBe('file://base64-YWJj.png');
+  });
+
   test('rejects successful responses with no image', async () => {
     await expect(persistApiResult({ data: [] })).rejects.toThrow('没有找到图片数据');
+    await expect(persistApiResult({ data: [] })).rejects.toThrow('URL 转 base64');
   });
 });

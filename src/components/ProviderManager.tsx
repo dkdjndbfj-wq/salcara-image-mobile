@@ -12,6 +12,7 @@ import { colors, radius, spacing } from '../theme';
 import { AppDialog, Chip, PrimaryButton, Sheet, type DialogAction } from './ui';
 
 const TIERS: ResolutionTier[] = ['1K', '2K', '4K'];
+type ProviderPurpose = 'chat' | 'image' | 'both';
 
 type FormState = {
   id: string | null;
@@ -39,6 +40,7 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [purpose, setPurpose] = useState<ProviderPurpose>('chat');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const saveLock = useRef(false);
   const [tested, setTested] = useState(false);
@@ -46,13 +48,13 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
 
   useEffect(() => {
     if (!visible) {
-      setForm(emptyForm()); setModels([]); setTested(false); setEditorOpen(false); setAdvancedOpen(false);
+      setForm(emptyForm()); setModels([]); setTested(false); setEditorOpen(false); setAdvancedOpen(false); setPurpose('chat');
       return;
     }
     if (providers.length === 0) setEditorOpen(true);
   }, [visible, providers.length]);
 
-  const openNew = () => { setForm(emptyForm()); setModels([]); setTested(false); setAdvancedOpen(false); setEditorOpen(true); };
+  const openNew = (nextPurpose: Exclude<ProviderPurpose, 'both'>) => { setForm(emptyForm()); setModels([]); setTested(false); setAdvancedOpen(false); setPurpose(nextPurpose); setEditorOpen(true); };
   const editProvider = (provider: ProviderProfile) => {
     setForm({
       id: provider.id, name: provider.name, baseUrl: provider.baseUrl, apiKey: '', model: provider.model ?? '', chatModel: provider.chatModel ?? '',
@@ -60,6 +62,7 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       quality: provider.quality, aspectRatio: provider.aspectRatio, resolutionTier: provider.resolutionTier, createdAt: provider.createdAt,
     });
     setModels([provider.model, provider.chatModel].filter((value): value is string => Boolean(value)));
+    setPurpose(provider.model && provider.chatModel ? 'both' : provider.model ? 'image' : 'chat');
     setTested(false); setAdvancedOpen(false); setEditorOpen(true);
   };
 
@@ -85,8 +88,8 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       if (generating) throw new Error('请先等待或取消当前请求，再修改服务商');
       const name = form.name.trim();
       const baseUrl = normalizeBaseUrl(form.baseUrl);
-      const model = form.model.trim();
-      const chatModel = form.chatModel.trim();
+      const model = purpose === 'chat' ? '' : form.model.trim();
+      const chatModel = purpose === 'image' ? '' : form.chatModel.trim();
       const key = form.apiKey.trim() || (form.id ? await getProviderKey(form.id) : null);
       if (!name) throw new Error('请输入服务商名称');
       if (!key) throw new Error('请输入 API 密钥');
@@ -98,7 +101,7 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       await upsertProvider({ id, name, baseUrl, model: model || null, chatModel: chatModel || null, chatApi: form.chatApi, analysisProviderId: form.analysisProviderId, quality: form.quality, aspectRatio: form.aspectRatio, resolutionTier: form.resolutionTier, createdAt: form.id ? form.createdAt : now, updatedAt: now });
       if (form.apiKey.trim() || !form.id) await saveProviderKey(id, key);
       await reloadProviders(); await activateProvider(id);
-      setForm(emptyForm()); setModels([]); setTested(false); setEditorOpen(false); onClose();
+      setForm(emptyForm()); setModels([]); setTested(false); setEditorOpen(false); setPurpose('chat'); onClose();
     } catch (error) {
       setDialog({ title: '无法保存', message: error instanceof Error ? error.message : '请检查配置。' });
     } finally { saveLock.current = false; setSaving(false); }
@@ -114,9 +117,12 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
         <View style={styles.page}>
           <View style={styles.introCard}>
             <View style={styles.introIcon}><Ionicons name="sparkles-outline" size={22} color={colors.primaryStrong} /></View>
-            <View style={styles.introCopy}><Text style={styles.introTitle}>连接你自己的 AI 服务</Text><Text style={styles.introHint}>对话、文件分析和图片创作可以使用同一个服务商，也可以分开配置。</Text></View>
+            <View style={styles.introCopy}><Text style={styles.introTitle}>分别配置对话和图片 API</Text><Text style={styles.introHint}>生图服务商只需要 Images 权限；对话服务商单独填写 Chat / Responses / Claude 接口。</Text></View>
           </View>
-          <PrimaryButton label="添加服务商" icon="add" onPress={openNew} />
+          <View style={styles.addChoices}>
+            <Pressable style={styles.addChoice} onPress={() => openNew('chat')}><View style={styles.addChoiceIcon}><Ionicons name="chatbubbles-outline" size={20} color={colors.primaryStrong} /></View><Text style={styles.addChoiceTitle}>添加对话服务商</Text><Text style={styles.addChoiceHint}>问答、视觉、文件</Text></Pressable>
+            <Pressable style={styles.addChoice} onPress={() => openNew('image')}><View style={styles.addChoiceIcon}><Ionicons name="image-outline" size={20} color={colors.primaryStrong} /></View><Text style={styles.addChoiceTitle}>添加图片服务商</Text><Text style={styles.addChoiceHint}>生图与图片编辑</Text></Pressable>
+          </View>
           {providers.length > 0 && <Text style={styles.sectionTitle}>已保存的服务商</Text>}
           <View style={styles.providerList}>
             {providers.map((provider) => <ProviderCard key={provider.id} provider={provider} active={provider.id === activeProvider?.id} onSelect={() => void activateProvider(provider.id).then(onClose).catch((error) => setDialog({ title: '无法切换', message: error.message }))} onEdit={() => editProvider(provider)} onDelete={() => setDialog({ title: '删除服务商？', message: `将同时删除“${provider.name}”的会话、本地文件和密钥，此操作无法撤销。`, actions: [{ label: '取消', tone: 'secondary', onPress: () => setDialog(null) }, { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeProvider(provider.id).catch((error) => setDialog({ title: '无法删除', message: error.message })); } }] })} />)}
@@ -126,6 +132,13 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       ) : (
         <View style={styles.page}>
           {providers.length > 0 && <Pressable style={styles.backRow} onPress={() => setEditorOpen(false)}><Ionicons name="arrow-back" size={19} color={colors.primaryStrong} /><Text style={styles.backText}>返回服务商列表</Text></Pressable>}
+          <SectionCard title="服务商用途" subtitle="两个 API 可以使用不同地址、密钥和模型；切换用途后保存会移除未选中的能力。">
+            <View style={styles.chips}>
+              <Chip label="对话 / 文件" selected={purpose === 'chat'} onPress={() => setPurpose('chat')} />
+              <Chip label="图片创作" selected={purpose === 'image'} onPress={() => setPurpose('image')} />
+              <Chip label="两者都用" selected={purpose === 'both'} onPress={() => setPurpose('both')} />
+            </View>
+          </SectionCard>
           <SectionCard title="基本信息" subtitle="地址支持根域名或带 /v1 的地址">
             <Field label="名称" value={form.name} placeholder="例如：Salcara 对话" onChangeText={(name) => setForm({ ...form, name })} />
             <Field label="API 地址" value={form.baseUrl} placeholder="https://example.com 或 https://example.com/v1" autoCapitalize="none" keyboardType="url" onChangeText={(baseUrl) => setForm({ ...form, baseUrl })} />
@@ -133,24 +146,24 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
             <PrimaryButton label={tested ? '重新测试连接' : '测试连接并读取模型'} icon="pulse-outline" loading={busy} onPress={() => void testConnection()} />
           </SectionCard>
 
-          <SectionCard title="对话能力" subtitle="推荐先配置；默认首页会使用这里的模型">
+          {(purpose === 'chat' || purpose === 'both') && <SectionCard title="对话能力" subtitle="对话、视觉和文件解析使用这里的 API">
             <ModelChooser label="对话模型" value={form.chatModel} models={chatModels} placeholder="填写支持对话 / 视觉 / 文件的模型 ID" onChange={(chatModel) => setForm({ ...form, chatModel })} />
             <Text style={styles.label}>接口协议</Text>
             <View style={styles.chips}>{(['chat-completions', 'responses', 'anthropic'] as ChatApi[]).map((api) => <Chip key={api} label={api === 'chat-completions' ? 'Chat Completions' : api === 'responses' ? 'Responses' : 'Claude Messages'} selected={form.chatApi === api} onPress={() => setForm({ ...form, chatApi: api })} />)}</View>
             <Text style={styles.hint}>图片、PDF、Word、表格和代码的实际解析能力由模型决定；应用会优先做安全的本地提取。</Text>
-          </SectionCard>
+          </SectionCard>}
 
-          <SectionCard title="图片创作（可选）" subtitle="只有需要生图时才填写；比例和画质会在图片模式中调整">
+          {(purpose === 'image' || purpose === 'both') && <SectionCard title="图片创作" subtitle="只调用 Images API；比例和画质会在图片模式中调整">
             <ModelChooser label="图片模型" value={form.model} models={imageModels} placeholder="例如：gpt-image-2.5-sunburst" onChange={(model) => setForm({ ...form, model, quality: null })} />
             {Boolean(form.model) && <>
               <Text style={styles.label}>默认画质</Text><View style={styles.chips}>{allowedQualities.map((quality) => <Chip key={quality} label={quality} selected={form.quality === quality} onPress={() => setForm({ ...form, quality })} />)}</View>
               <Text style={styles.label}>默认比例</Text><View style={styles.chips}>{(['1:1', '16:9', '9:16'] as AspectRatio[]).map((aspectRatio) => <Chip key={aspectRatio} label={aspectRatio} selected={form.aspectRatio === aspectRatio} onPress={() => setForm({ ...form, aspectRatio })} />)}</View>
               <Text style={styles.label}>默认清晰度</Text><View style={styles.chips}>{TIERS.map((resolutionTier) => <Chip key={resolutionTier} label={resolutionTier} selected={form.resolutionTier === resolutionTier} onPress={() => setForm({ ...form, resolutionTier })} />)}</View>
             </>}
-          </SectionCard>
+          </SectionCard>}
 
-          <Pressable style={styles.advancedHeader} onPress={() => setAdvancedOpen((value) => !value)}><View><Text style={styles.advancedTitle}>高级选项</Text><Text style={styles.advancedHint}>图片解析服务商关联</Text></View><Ionicons name={advancedOpen ? 'chevron-up' : 'chevron-down'} size={20} color={colors.textMuted} /></Pressable>
-          {advancedOpen && <View style={styles.advancedBody}><Text style={styles.label}>图片文件解析服务商</Text><View style={styles.chips}><Chip label="使用当前服务商" selected={!form.analysisProviderId} onPress={() => setForm({ ...form, analysisProviderId: null })} />{providers.filter((item) => item.id !== form.id && item.chatModel).map((item) => <Chip key={item.id} label={item.name} selected={form.analysisProviderId === item.id} onPress={() => setForm({ ...form, analysisProviderId: item.id })} />)}</View><Text style={styles.hint}>图片模式遇到文件时，会先向这里选择的对话服务商发起一次解析，再调用图片模型；两次请求分别计费。</Text></View>}
+          {purpose !== 'chat' && <><Pressable style={styles.advancedHeader} onPress={() => setAdvancedOpen((value) => !value)}><View><Text style={styles.advancedTitle}>文件解析服务商（可选）</Text><Text style={styles.advancedHint}>图片模式遇到 PDF、Word 等文件时使用</Text></View><Ionicons name={advancedOpen ? 'chevron-up' : 'chevron-down'} size={20} color={colors.textMuted} /></Pressable>
+          {advancedOpen && <View style={styles.advancedBody}><Text style={styles.label}>图片文件解析服务商</Text><View style={styles.chips}><Chip label="使用当前服务商" selected={!form.analysisProviderId} onPress={() => setForm({ ...form, analysisProviderId: null })} />{providers.filter((item) => item.id !== form.id && item.chatModel).map((item) => <Chip key={item.id} label={item.name} selected={form.analysisProviderId === item.id} onPress={() => setForm({ ...form, analysisProviderId: item.id })} />)}</View><Text style={styles.hint}>会先向这里选择的对话服务商发起一次解析，再调用图片模型；两次请求分别计费。</Text></View>}</>}
           <PrimaryButton label="保存并使用" icon="checkmark" loading={saving} disabled={generating || busy} onPress={() => void save()} />
         </View>
       )}
@@ -185,8 +198,13 @@ const styles = StyleSheet.create({
   introCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.blueSurface, borderWidth: 1, borderColor: '#CFE5FF' },
   introIcon: { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background },
   introCopy: { flex: 1, gap: 4 },
-  introTitle: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  introTitle: { color: colors.text, fontSize: 14, fontWeight: '800' },
   introHint: { color: colors.textMuted, fontSize: 12, lineHeight: 18 },
+  addChoices: { flexDirection: 'row', gap: spacing.sm },
+  addChoice: { flex: 1, minHeight: 94, padding: spacing.md, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, gap: 5 },
+  addChoiceIcon: { width: 34, height: 34, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.blueSurface },
+  addChoiceTitle: { color: colors.text, fontSize: 12, fontWeight: '800' },
+  addChoiceHint: { color: colors.textMuted, fontSize: 10 },
   sectionTitle: { color: colors.text, fontSize: 14, fontWeight: '800', marginTop: spacing.sm },
   providerList: { gap: spacing.sm },
   providerCard: { minHeight: 86, flexDirection: 'row', alignItems: 'center', borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background, padding: spacing.sm },
@@ -195,7 +213,7 @@ const styles = StyleSheet.create({
   providerBadge: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
   providerBadgeActive: { backgroundColor: colors.background },
   providerCopy: { flex: 1, gap: 4 },
-  providerName: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  providerName: { color: colors.text, fontSize: 14, fontWeight: '800' },
   providerUrl: { color: colors.textMuted, fontSize: 11 },
   capabilityRow: { flexDirection: 'row', gap: spacing.sm },
   capability: { flexDirection: 'row', alignItems: 'center', gap: 3 },
@@ -209,8 +227,8 @@ const styles = StyleSheet.create({
   sectionHeading: { gap: 3 },
   sectionSubtitle: { color: colors.textMuted, fontSize: 12, lineHeight: 17 },
   field: { gap: 5 },
-  label: { color: colors.text, fontSize: 13, fontWeight: '700' },
-  input: { minHeight: 46, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: 13, color: colors.text, backgroundColor: colors.surface, fontSize: 14 },
+  label: { color: colors.text, fontSize: 12, fontWeight: '700' },
+  input: { minHeight: 44, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: 13, color: colors.text, backgroundColor: colors.surface, fontSize: 13 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   hint: { color: colors.textMuted, lineHeight: 18, fontSize: 12 },
   advancedHeader: { minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
