@@ -42,6 +42,23 @@ test('explains reachable-but-unauthorized responses instead of calling them netw
   await waitFor(() => expect(screen.getByText(/服务器可连接，但拒绝访问/)).toBeTruthy());
 });
 
+test('uses native Claude authentication only for the configured API host', async () => {
+  mockGetKey.mockResolvedValue('  claude-private-key  ');
+  mockFetch.mockResolvedValue({ ok: true, status: 200 });
+  const screen = await render(<NetworkDiagnostics visible onClose={jest.fn()} providerId="claude-provider" baseUrl="https://claude.example/v1" api="anthropic" imageUrl="https://cdn.example/image.png" />);
+  await fireEvent.press(screen.getByText('检测当前网络'));
+  await waitFor(() => expect(screen.getByText('模型接口可连接')).toBeTruthy());
+  expect(mockFetch).toHaveBeenCalledWith('https://claude.example/v1/models', expect.objectContaining({
+    method: 'GET',
+    headers: { 'x-api-key': 'claude-private-key', 'anthropic-version': '2023-06-01' },
+    redirect: 'error', credentials: 'omit',
+  }));
+  expect(mockFetch).toHaveBeenCalledWith('https://cdn.example/image.png', expect.objectContaining({
+    method: 'HEAD', headers: undefined, credentials: 'omit',
+  }));
+  expect(JSON.stringify(screen.toJSON())).not.toContain('claude-private-key');
+});
+
 test('closing diagnostics aborts the active request', async () => {
   mockFetch.mockImplementation((_url, options) => new Promise((_resolve, reject) => {
     options.signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });

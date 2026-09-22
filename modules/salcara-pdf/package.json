@@ -1,0 +1,6 @@
+{
+  "name": "salcara-pdf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local, bounded Android PDF page rendering for Salcara Image"
+}

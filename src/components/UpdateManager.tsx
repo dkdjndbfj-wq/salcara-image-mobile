@@ -1,21 +1,21 @@
 import * as Application from 'expo-application';
 import * as FileSystem from 'expo-file-system/legacy';
-import { File } from 'expo-file-system';
+import { File, Paths } from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
-import { fetch } from 'expo/fetch';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, spacing } from '../theme';
-import { type AppRelease, compareVersions, fetchLatestRelease, formatBytes, latestReleasePageUrl } from '../update';
+import { apkDownloadCandidates, type AppRelease, compareVersions, fetchLatestRelease, formatBytes } from '../update';
 import { AppDialog, type DialogAction } from './ui';
 import { networkFailureMessage } from '../api/network';
-import { copyVerifiedApk } from '../apk-download';
+import { verifyDownloadedApk } from '../apk-download';
 
 type Phase = 'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'permission' | 'error';
 
 const INSTALL_MIME = 'application/vnd.android.package-archive';
 const FLAG_GRANT_READ_URI_PERMISSION = 1;
+const FLAG_ACTIVITY_NEW_TASK = 0x10000000;
 
 export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }) {
   const currentVersion = Application.nativeApplicationVersion ?? '0.0.0';
@@ -90,81 +90,107 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
       if (release) await Linking.openURL(release.pageUrl);
       return;
     }
-    const contentUri = await FileSystem.getContentUriAsync(uri);
-    await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+    const contentUri = uri.startsWith('content://')
+      ? uri
+      : (() => {
+        try { return new File(uri).contentUri; }
+        catch { return undefined; }
+      })() ?? await FileSystem.getContentUriAsync(uri);
+    const params = {
       data: contentUri,
       type: INSTALL_MIME,
-      flags: FLAG_GRANT_READ_URI_PERMISSION,
-    });
+      flags: FLAG_GRANT_READ_URI_PERMISSION | FLAG_ACTIVITY_NEW_TASK,
+    };
+    // ACTION_INSTALL_PACKAGE is the Android-specific action intended for APKs.
+    // A few older/OEM package installers only register ACTION_VIEW, so retain
+    // that as a local fallback without sending the file to a browser.
+    try {
+      await IntentLauncher.startActivityAsync('android.intent.action.INSTALL_PACKAGE', params);
+    } catch (firstError) {
+      try {
+        await IntentLauncher.startActivityAsync('android.intent.action.VIEW', params);
+      } catch {
+        throw firstError;
+      }
+    }
   }, [release]);
 
   const downloadAndInstall = async () => {
     if (!release || downloadRef.current) return;
-    if (!FileSystem.cacheDirectory) {
-      setMessage('设备没有可用的更新缓存目录。');
-      setPhase('error');
-      return;
-    }
-    const destination = `${FileSystem.cacheDirectory}salcara-image-update-${release.version}.apk`;
+    const finalFile = new File(Paths.cache, `salcara-image-update-${release.version}.apk`);
+    const temporaryFile = new File(Paths.cache, `salcara-image-update-${release.version}.apk.part`);
     const controller = new AbortController();
     downloadRef.current = controller;
     const timeout = setTimeout(() => controller.abort('timeout'), 10 * 60_000);
     try {
       setProgress(0);
       setPhase('downloading');
-      await FileSystem.deleteAsync(destination, { idempotent: true });
-      const response = await fetch(release.apk.url, {
-        signal: controller.signal,
-        credentials: 'omit',
-        headers: {
-          Accept: 'application/vnd.android.package-archive,application/octet-stream,*/*',
-          'User-Agent': 'Salcara-Image-Android',
-        },
-      });
-      if (!response.ok) throw new Error(`下载服务器返回 HTTP ${response.status}`);
-      if (!response.body) throw new Error('更新包下载为空');
-      const file = new File(destination);
-      file.create({ overwrite: true, intermediates: true });
-      await copyVerifiedApk(response.body, file.writableStream(), release.apk, controller.signal, setProgress);
-      const info = await FileSystem.getInfoAsync(destination);
-      if (!info.exists || !info.size) throw new Error('下载的更新包为空');
-      if (release.apk.size > 0 && info.size !== release.apk.size) throw new Error('更新包大小校验失败，请重新下载');
+      const remove = (file: File) => { try { if (file.exists) file.delete(); } catch { /* best effort */ } };
+      remove(temporaryFile);
+
+      let installedFile: File | null = null;
+      let lastError: unknown = null;
+      for (const candidate of apkDownloadCandidates(release)) {
+        if (controller.signal.aborted) throw new Error('下载已取消');
+        remove(temporaryFile);
+        try {
+          const downloaded = await File.downloadFileAsync(candidate.url, temporaryFile, {
+            idempotent: true,
+            signal: controller.signal,
+            headers: {
+              Accept: 'application/vnd.android.package-archive,application/octet-stream,*/*',
+              'User-Agent': 'Salcara-Image-Android',
+              ...candidate.headers,
+            },
+            onProgress: ({ bytesWritten, totalBytes }) => {
+              const total = totalBytes > 0 ? totalBytes : release.apk.size;
+              setProgress(total > 0 ? Math.min(0.9, bytesWritten / total * 0.9) : 0);
+            },
+          });
+          await verifyDownloadedApk(downloaded.readableStream(), downloaded.size, release.apk, controller.signal, (fraction) => {
+            setProgress(0.9 + fraction * 0.1);
+          });
+          // Only replace the installable path after every byte has passed the
+          // release size, ZIP header and SHA-256 checks.
+          try { if (finalFile.exists) finalFile.delete(); } catch { /* best effort */ }
+          await downloaded.move(finalFile, { overwrite: true });
+          if (!finalFile.exists || finalFile.size !== release.apk.size) throw new Error('更新包落盘失败，请重试');
+          installedFile = finalFile;
+          break;
+        } catch (error) {
+          lastError = error;
+          remove(temporaryFile);
+          if (controller.signal.aborted) throw error;
+        }
+      }
+      remove(temporaryFile);
+      if (!installedFile) {
+        throw lastError instanceof Error ? lastError : new Error('所有更新下载入口均不可用');
+      }
       if (controller.signal.aborted) throw new Error('下载已取消');
-      downloadedUriRef.current = destination;
+      downloadedUriRef.current = installedFile.uri;
       setPhase('idle');
       try {
-        await launchInstaller(destination);
+        await launchInstaller(installedFile.uri);
       } catch {
         setMessage('Android 阻止了安装请求。请先允许 Salcara Image“安装未知应用”，返回后会继续打开安装界面。');
         setPhase('permission');
       }
     } catch (error) {
-      await FileSystem.deleteAsync(destination, { idempotent: true }).catch(() => undefined);
       if (controller.signal.aborted && controller.signal.reason !== 'timeout') {
         setPhase('available');
         return;
       }
       const detail = controller.signal.reason === 'timeout'
         ? '更新包下载超过 10 分钟，已暂停。'
-        : error instanceof Error && /^(下载服务器返回 HTTP|下载的更新包为空|更新包)/.test(error.message)
+        : error instanceof Error && /^(下载服务器返回 HTTP|下载的更新包为空|下载内容|更新包|所有更新)/.test(error.message)
           ? error.message
           : networkFailureMessage(release.apk.url, '更新包下载', error);
-      setMessage(`${detail}\n\n更新包托管在 GitHub，与 API 网站使用不同的网络。可点击“浏览器下载”交给系统浏览器。`);
+      setMessage(`${detail}\n\n应用已自动尝试 Salcara 更新站、GitHub API 资源和官方发布资源。若三者都不可达，需要在 Salcara 域名提供同一份签名 APK 镜像；不会再强制跳转到打不开的外部浏览器。`);
       setPhase('error');
     } finally {
       clearTimeout(timeout);
       downloadRef.current = null;
-    }
-  };
-
-  const downloadInBrowser = async () => {
-    const url = release?.apk.url ?? latestReleasePageUrl();
-    try {
-      await Linking.openURL(url);
-      setPhase('idle');
-    } catch (error) {
-      setMessage(error instanceof Error ? `无法打开系统浏览器：${error.message}` : '无法打开系统浏览器。');
-      setPhase('error');
     }
   };
 
@@ -199,7 +225,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
 
   if (phase === 'checking') {
     title = '正在检查更新';
-    description = '正在连接 Salcara Image 的官方 GitHub 发布页。';
+    description = '正在连接 Salcara 更新站与官方版本清单。';
     actions = [{ label: '请稍候', disabled: true }];
     dismissible = false;
   } else if (phase === 'available' && release) {
@@ -207,7 +233,6 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     description = `当前版本 ${currentVersion} · 安装包 ${formatBytes(release.apk.size)}\n\n${release.notes.slice(0, 420)}`;
     actions = [
       { label: '稍后', tone: 'secondary', onPress: close },
-      { label: '浏览器下载', tone: 'secondary', onPress: () => void downloadInBrowser() },
       { label: '应用内下载', tone: 'primary', onPress: () => void downloadAndInstall() },
     ];
   } else if (phase === 'up-to-date') {
@@ -234,7 +259,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     icon = 'alert-circle-outline';
     actions = [
       { label: '关闭', tone: 'secondary', onPress: close },
-      { label: '浏览器下载', tone: 'secondary', onPress: () => void downloadInBrowser() },
+      { label: '再次下载', tone: 'secondary', onPress: () => void downloadAndInstall() },
       { label: '重新检查', tone: 'primary', onPress: () => void check(true) },
     ];
   }

@@ -3,7 +3,7 @@ export type AspectRatio = '1:1' | '16:9' | '9:16';
 export type ResolutionTier = '1K' | '2K' | '4K';
 export type MessageStatus = 'pending' | 'complete' | 'error' | 'cancelled' | 'interrupted';
 export type MessageMode = 'generate' | 'edit' | 'chat';
-export type ChatApi = 'chat-completions' | 'responses';
+export type ChatApi = 'chat-completions' | 'responses' | 'anthropic';
 
 export interface ProviderProfile {
   id: string;

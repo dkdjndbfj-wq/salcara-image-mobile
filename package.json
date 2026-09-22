@@ -1,6 +1,6 @@
 {
   "name": "salcara-image-mobile",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "main": "index.ts",
   "dependencies": {
     "@noble/hashes": "2.4.0",

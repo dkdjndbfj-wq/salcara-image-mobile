@@ -361,7 +361,7 @@ export function ChatScreen() {
           <AttachmentOption icon="camera-outline" title="拍照" subtitle="使用相机拍摄主图" onPress={() => void addReferences('camera')} />
           <AttachmentOption icon="folder-open-outline" title="从文件选择" subtitle="仅支持图片文件" onPress={() => void addReferences('files')} />
           <AttachmentOption icon="document-text-outline" title="添加文档" subtitle="PDF、TXT、Markdown、CSV · 最多 4 份" onPress={() => void addDocuments()} />
-          <Text style={styles.compatibilityHint}>每个附件不超过 20MB，本次图片和文档合计不超过 30MB。PDF 图表内容由所选多模态模型理解。</Text>
+          <Text style={styles.compatibilityHint}>每个附件不超过 20MB，合计不超过 30MB。PDF 每份最多 12 页，本地转图后由视觉模型理解；超页请先拆分，不会截断内容。</Text>
         </View>
       </Sheet>
       <MaskEditor visible={maskVisible} image={references[0] ?? null} onCancel={() => setMaskVisible(false)} onConfirm={(uri) => { if (maskUri && maskUri !== uri) deleteLocalFile(maskUri); setMaskUri(uri); setMaskVisible(false); }} />
@@ -371,7 +371,7 @@ export function ChatScreen() {
         <ActivityIndicator color={colors.primaryStrong} />
       </AppDialog>
       <UpdateManager manualCheckToken={updateCheckToken} />
-      <NetworkDiagnostics visible={networkVisible} onClose={() => setNetworkVisible(false)} providerId={(isChat ? analyst?.id : app.activeProvider?.id) ?? ''} baseUrl={(isChat ? analyst?.baseUrl : app.activeProvider?.baseUrl) ?? ''} imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
+      <NetworkDiagnostics visible={networkVisible} onClose={() => setNetworkVisible(false)} providerId={(isChat ? analyst?.id : app.activeProvider?.id) ?? ''} baseUrl={(isChat ? analyst?.baseUrl : app.activeProvider?.baseUrl) ?? ''} api={isChat ? analyst?.chatApi : app.activeProvider?.chatApi} imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
     </SafeAreaView>
   );
 }

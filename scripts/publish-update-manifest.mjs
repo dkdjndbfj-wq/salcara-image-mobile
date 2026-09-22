@@ -18,15 +18,26 @@ function api(path, method = 'GET', body) {
 }
 const release = api(`releases/tags/${tag}`);
 const apk = release.assets.find((asset) => asset.name === `salcara-image-android-${tag}.apk`);
-if (release.draft || release.prerelease || !release.published_at || !apk?.size) {
+if (release.draft || release.prerelease || !release.published_at || !apk?.size || !apk.browser_download_url || !apk.url) {
   throw new Error('The stable release and its APK must be published before announcing an update');
 }
 const checksum = readFileSync(`${apk.name}.sha256`, 'utf8').trim().split(/\s+/)[0];
 if (!/^[a-f0-9]{64}$/i.test(checksum)) throw new Error('Invalid SHA-256 sidecar');
+const mirrorBase = (process.env.SALCARA_APK_MIRROR_BASE_URL ?? '').trim().replace(/\/+$/, '');
+if (mirrorBase && !/^https:\/\/(?:[a-z0-9-]+\.)*salcara\.top(?::\d+)?(?:\/[^\s]*)?$/i.test(mirrorBase)) {
+  throw new Error('SALCARA_APK_MIRROR_BASE_URL must be an HTTPS Salcara host');
+}
 const manifest = {
   version: tag.slice(1), tagName: tag, title: release.name,
   notes: release.body ?? '', pageUrl: release.html_url, publishedAt: release.published_at,
-  apk: { name: apk.name, url: apk.browser_download_url, size: apk.size, digest: `sha256:${checksum}` },
+  apk: {
+    name: apk.name,
+    url: apk.browser_download_url,
+    apiUrl: apk.url,
+    ...(mirrorBase ? { mirrorUrl: `${mirrorBase}/${encodeURIComponent(apk.name)}` } : {}),
+    size: apk.size,
+    digest: `sha256:${checksum}`,
+  },
 };
 let existing;
 try { existing = api('contents/latest.json?ref=updates'); } catch {

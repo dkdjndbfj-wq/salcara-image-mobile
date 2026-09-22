@@ -331,7 +331,7 @@ function mapProvider(row: ProviderRow): ProviderProfile {
     aspectRatio: row.aspect_ratio,
     resolutionTier: row.resolution_tier,
     chatModel: row.chat_model ?? null,
-    chatApi: row.chat_api === 'responses' ? 'responses' : 'chat-completions',
+    chatApi: row.chat_api === 'responses' || row.chat_api === 'anthropic' ? row.chat_api : 'chat-completions',
     analysisProviderId: row.analysis_provider_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

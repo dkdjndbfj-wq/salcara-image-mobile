@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { fetchChatModels } from '../api/chat-api';
-import type { AspectRatio, ProviderProfile, Quality, ResolutionTier } from '../domain';
+import type { AspectRatio, ChatApi, ProviderProfile, Quality, ResolutionTier } from '../domain';
 import { ALL_QUALITIES, createId, normalizeBaseUrl, qualitiesForModel } from '../domain-utils';
 import { useApp } from '../state/AppContext';
 import { upsertProvider } from '../storage/database';
@@ -20,7 +20,7 @@ type FormState = {
   apiKey: string;
   model: string;
   chatModel: string;
-  chatApi: 'chat-completions' | 'responses';
+  chatApi: ChatApi;
   analysisProviderId: string | null;
   quality: Quality | null;
   aspectRatio: AspectRatio | null;
@@ -75,7 +75,7 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       const baseUrl = normalizeBaseUrl(form.baseUrl);
       const key = form.apiKey.trim() || (form.id ? await getProviderKey(form.id) : null);
       if (!key) throw new Error('请输入 API 密钥');
-      const nextModels = await fetchChatModels(baseUrl, key);
+      const nextModels = await fetchChatModels(baseUrl, key, form.chatApi);
       setModels(nextModels);
       setTested(true);
       setDialog({ title: '连接成功', message: nextModels.length ? `读取到 ${nextModels.length} 个模型。请选择生图或对话模型；图片／PDF 理解能力以服务商实际支持为准。` : '接口可用，但没有返回模型，请手动填写模型 ID。' });
@@ -185,6 +185,13 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
           <Field label="名称" value={form.name} placeholder="例如：Salcara" onChangeText={(name) => setForm({ ...form, name })} />
           <Field label="API 地址" value={form.baseUrl} placeholder="https://example.com 或 /v1" autoCapitalize="none" keyboardType="url" onChangeText={(baseUrl) => setForm({ ...form, baseUrl })} />
           <Field label="API 密钥" value={form.apiKey} placeholder={form.id ? '留空则保留原密钥' : 'sk-…'} secureTextEntry autoCapitalize="none" onChangeText={(apiKey) => setForm({ ...form, apiKey })} />
+          <Text style={styles.label}>对话接口类型</Text>
+          <View style={styles.chips}>
+            <Chip label="Chat Completions" selected={form.chatApi === 'chat-completions'} onPress={() => setForm({ ...form, chatApi: 'chat-completions' })} />
+            <Chip label="Responses" selected={form.chatApi === 'responses'} onPress={() => setForm({ ...form, chatApi: 'responses' })} />
+            <Chip label="Claude Messages" selected={form.chatApi === 'anthropic'} onPress={() => setForm({ ...form, chatApi: 'anthropic' })} />
+          </View>
+          <Text style={styles.hint}>生图接口不受此项影响。Claude 可使用原生 Messages；生图与对话可分别添加独立地址和密钥。PDF 会在手机上逐页转成图片，需选择支持识图的模型。</Text>
           <PrimaryButton label={tested ? '重新测试并读取模型' : '测试连接并读取模型'} icon="pulse-outline" loading={busy} onPress={() => void testConnection()} />
 
           <Text style={styles.label}>生图模型（可留空）</Text>
@@ -201,14 +208,7 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
           <View style={styles.chips}>{models.filter((model) => !/image|dall-e|flux/i.test(model)).slice(0, 24).map((chatModel) => <Chip key={chatModel} label={chatModel} selected={form.chatModel === chatModel} onPress={() => setForm({ ...form, chatModel })} />)}</View>
           {models.length > 24 && <Text style={styles.hint}>显示部分模型，其他模型可手动填写完整 ID。</Text>}
           <TextInput value={form.chatModel} onChangeText={(chatModel) => setForm({ ...form, chatModel })} placeholder="输入支持对话的模型 ID" placeholderTextColor={colors.textMuted} autoCapitalize="none" style={styles.input} />
-          {Boolean(form.chatModel) && <>
-            <Text style={styles.label}>对话接口</Text>
-            <View style={styles.chips}>
-              <Chip label="Chat Completions" selected={form.chatApi === 'chat-completions'} onPress={() => setForm({ ...form, chatApi: 'chat-completions' })} />
-              <Chip label="Responses" selected={form.chatApi === 'responses'} onPress={() => setForm({ ...form, chatApi: 'responses' })} />
-            </View>
-            <Text style={styles.hint}>按服务商文档选择。识图和 PDF 需要多模态模型，仅模型列表无法确认支持情况。</Text>
-          </>}
+          <Text style={styles.hint}>识图和 PDF 需要多模态模型，仅模型列表无法确认支持情况。</Text>
           <Text style={styles.hint}>比例属于每次生成设置，可在对话框中调整。密钥只保存在 Android 安全存储中。</Text>
           <PrimaryButton label="保存并使用" icon="checkmark" loading={saving} disabled={generating || busy} onPress={() => void save()} />
         </View>

@@ -1,4 +1,4 @@
-import { copyVerifiedApk } from '../apk-download';
+import { copyVerifiedApk, verifyDownloadedApk } from '../apk-download';
 
 const digest = 'sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'; // SHA-256("abc")
 
@@ -45,4 +45,33 @@ test('stops writing as soon as the download exceeds the official byte size', asy
   const { source, destination, writer } = streams([[97, 98, 99, 100]]);
   await expect(copyVerifiedApk(source, destination, { size: 3, digest }, new AbortController().signal, jest.fn())).rejects.toThrow('超过发布记录');
   expect(writer.write).not.toHaveBeenCalled();
+});
+
+test('verifies a native-downloaded APK stream and rejects an HTML response', async () => {
+  const reader = {
+    read: jest.fn()
+      .mockResolvedValueOnce({ done: false, value: Uint8Array.from([0x50, 0x4b, 0x03, 0x04]) })
+      .mockResolvedValueOnce({ done: false, value: Uint8Array.from([97, 98, 99]) })
+      .mockResolvedValueOnce({ done: true }),
+    cancel: jest.fn(async () => undefined), releaseLock: jest.fn(),
+  };
+  await expect(verifyDownloadedApk(
+    { getReader: () => reader } as unknown as ReadableStream<Uint8Array>,
+    7,
+    { size: 7, digest: 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' },
+    new AbortController().signal,
+  )).rejects.toThrow('SHA-256');
+
+  const htmlReader = {
+    read: jest.fn()
+      .mockResolvedValueOnce({ done: false, value: Uint8Array.from([0x3c, 0x68, 0x74, 0x6d]) })
+      .mockResolvedValueOnce({ done: true }),
+    cancel: jest.fn(async () => undefined), releaseLock: jest.fn(),
+  };
+  await expect(verifyDownloadedApk(
+    { getReader: () => htmlReader } as unknown as ReadableStream<Uint8Array>,
+    4,
+    { size: 4, digest: 'sha256:9af15b336e8a9f3c8c3f6e4b1f4f7f1e7f6f9a3c5f6f7e8d9c0b1a2e3d4c5b6a' },
+    new AbortController().signal,
+  )).rejects.toThrow('不是有效的 Android APK');
 });

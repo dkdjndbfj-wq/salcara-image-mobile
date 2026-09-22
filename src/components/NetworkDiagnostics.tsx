@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { networkFailureMessage, networkHost } from '../api/network';
+import type { ChatApi } from '../domain';
 import { imageEndpoint } from '../domain-utils';
 import { getProviderKey } from '../storage/secure-keys';
 import { colors, radius, spacing } from '../theme';
@@ -11,8 +12,8 @@ import { PrimaryButton, Sheet } from './ui';
 type Probe = { label: string; host: string; reachable: boolean; message: string; elapsedMs: number };
 
 /** Diagnostic traffic is limited to the selected API and its existing result URL. */
-export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imageUrl }: {
-  visible: boolean; onClose: () => void; providerId: string; baseUrl: string; imageUrl?: string | null;
+export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imageUrl, api = 'chat-completions' }: {
+  visible: boolean; onClose: () => void; providerId: string; baseUrl: string; imageUrl?: string | null; api?: ChatApi;
 }) {
   const [results, setResults] = useState<Probe[]>([]);
   const [busy, setBusy] = useState(false);
@@ -25,7 +26,7 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
       controllerRef.current = null;
       controller?.abort();
     };
-  }, [visible, providerId, baseUrl, imageUrl]);
+  }, [visible, providerId, baseUrl, imageUrl, api]);
 
   const run = async () => {
     if (controllerRef.current) return;
@@ -39,9 +40,14 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
       let reachable = false;
       let message: string;
       try {
+        const headers: Record<string, string> | undefined = apiKey
+          ? api === 'anthropic'
+            ? { 'x-api-key': apiKey.trim(), 'anthropic-version': '2023-06-01' }
+            : { Authorization: `Bearer ${apiKey.trim()}` }
+          : undefined;
         const response = await fetch(url, {
           method: label === '图片服务器' ? 'HEAD' : 'GET',
-          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+          headers,
           signal: controller.signal,
           credentials: 'omit',
           redirect: apiKey ? 'error' : 'follow',

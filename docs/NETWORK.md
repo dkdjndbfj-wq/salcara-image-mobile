@@ -22,11 +22,19 @@ HTTP 401/403 意味着服务器已连接但拒绝访问；证书错误、DNS 错
 
 ## 更新渠道
 
-更新元数据来自 GitHub 正式 Release，备用入口来自 `updates` 分支的 `latest.json`（通过 jsDelivr 或 GitHub Raw 读取）。此文件只在签名 APK、SHA-256 已成功发布后由 CI 写入，不再使用开发分支的 `app.json` 猜测新版本。
+更新元数据优先从 Salcara 更新站 `https://salcara.top/app/latest.json` 读取，其次是 GitHub 正式 Release API、`updates` 分支的 `latest.json`（通过 jsDelivr 或 GitHub Raw 读取）。清单只在签名 APK、SHA-256 已成功发布后由 CI 写入，不再使用开发分支的 `app.json` 猜测新版本。
 
-更新 APK 仍由 GitHub Releases 托管。备用版本检查通道不等于 APK 镜像；若用户所在网络无法连接 GitHub 的下载域名，客户端不能仅靠重试保证下载成功。需要运营方把**同一份签名 APK、SHA-256 和发布元数据**托管到自行维护、用户可访问的 HTTPS 下载站，然后配置正式下载渠道；不要随意把 APK 或 API 密钥交给未知代理站。
+应用内下载不再把 APK 交给外部浏览器，而是按以下顺序尝试：
 
-应用内下载只接受本仓库对应版本的正式 APK 地址，边下载边计算 SHA-256，并在大小和摘要全部匹配后才调用安装器。完整 APK 不会加载到 JavaScript 内存。取消会关闭下载并删除未完成文件；发现损坏或超出发布记录大小时停止安装。发布 CI 必须拿到上一正式版 APK 才能验证同一签名及递增版本号，网络失败不会跳过覆盖安装检查。
+1. `https://salcara.top/downloads/<APK 文件名>`（或清单里的 `mirrorUrl`）；
+2. GitHub API 的单个 Release Asset 地址；
+3. GitHub Release 的公开下载地址。
+
+每个入口下载到应用缓存中的 `.part` 临时文件，先检查 ZIP/APK 文件头、精确大小和 SHA-256，再原子移动到安装路径，最后才调用 Android 安装器。中断、超时、HTML 错误页和截断文件都会被删除，不会再出现把半个 APK 交给系统导致“解析安装包失败”。安装失败时已校验的文件会保留，可重新打开安装器，不会重复下载或重复扣费。
+
+如果目标地区无法连接 GitHub，运营方需要在 Salcara 域名部署同一份签名 APK 与清单。完整配置见[更新镜像部署说明](./UPDATE-MIRROR.md)。不要把 APK 或 API 密钥交给未知代理站；即使下载入口被替换，应用也会因 SHA-256 不匹配而拒绝安装。
+
+发布 CI 必须拿到上一正式版 APK 才能验证同一签名及递增版本号，网络失败不会跳过覆盖安装检查。
 
 带 API 密钥的请求关闭自动重定向与共享 Cookie，防止地址跳转时意外转发密钥或附件；遇到跳转提示，请直接填写服务商最终的 API 地址。
 

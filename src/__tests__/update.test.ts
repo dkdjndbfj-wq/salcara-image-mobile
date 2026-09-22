@@ -1,6 +1,6 @@
 jest.mock('expo/fetch', () => ({ fetch: (...args: Parameters<typeof fetch>) => global.fetch(...args) }));
 
-import { compareVersions, fetchLatestRelease, formatBytes, normalizeVersion, parseReleaseManifest } from '../update';
+import { apkDownloadCandidates, compareVersions, fetchLatestRelease, formatBytes, normalizeVersion, parseReleaseManifest } from '../update';
 
 const released = {
   version: '1.2.3', tagName: 'v1.2.3', title: 'Salcara Image v1.2.3', notes: 'Published',
@@ -8,6 +8,7 @@ const released = {
   apk: {
     name: 'salcara-image-android-v1.2.3.apk', size: 123456,
     url: 'https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.2.3/salcara-image-android-v1.2.3.apk',
+    apiUrl: 'https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/123456789',
     digest: `sha256:${'a'.repeat(64)}`,
   },
 };
@@ -64,5 +65,24 @@ describe('app updates', () => {
     released.apk.url.replace('github.com/', 'github.com.attacker.example/'),
   ])('rejects update download URLs outside the exact official release asset: %s', (url) => {
     expect(() => parseReleaseManifest({ ...released, apk: { ...released.apk, url } })).toThrow('更新清单');
+  });
+
+  test('accepts only an official API asset or first-party mirror as alternate download fronts', () => {
+    expect(parseReleaseManifest(released).apk.apiUrl).toContain('/releases/assets/');
+    expect(() => parseReleaseManifest({
+      ...released,
+      apk: { ...released.apk, apiUrl: 'https://api.github.com/repos/attacker/repo/releases/assets/1' },
+    })).toThrow('更新清单');
+    expect(() => parseReleaseManifest({
+      ...released,
+      apk: { ...released.apk, mirrorUrl: 'https://example.com/app.apk' },
+    })).toThrow('更新清单');
+    const withMirror = parseReleaseManifest({
+      ...released,
+      apk: { ...released.apk, mirrorUrl: 'https://salcara.top/downloads/salcara-image-android-v1.2.3.apk' },
+    });
+    expect(apkDownloadCandidates(withMirror).map((item) => item.label)).toEqual([
+      'Salcara 更新镜像', 'GitHub API 资源', 'GitHub 发布资源',
+    ]);
   });
 });

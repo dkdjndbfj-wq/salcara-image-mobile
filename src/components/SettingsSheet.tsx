@@ -72,7 +72,8 @@ export function SettingsSheet({ visible, onClose }: { visible: boolean; onClose:
         <TextInput value={model} onChangeText={(value) => { setModel(value); if (!isChat) setQuality(null); }} placeholder={isChat ? '填写对话／视觉模型 ID' : 'gpt-image…'} placeholderTextColor={colors.textMuted} autoCapitalize="none" autoCorrect={false} style={styles.input} />
         {isChat ? <>
           <Text style={styles.label}>接口类型</Text>
-          <View style={styles.chips}><Chip label="Chat Completions" selected={chatApi === 'chat-completions'} onPress={() => setChatApi('chat-completions')} /><Chip label="Responses" selected={chatApi === 'responses'} onPress={() => setChatApi('responses')} /></View>
+          <View style={styles.chips}><Chip label="Chat Completions" selected={chatApi === 'chat-completions'} onPress={() => setChatApi('chat-completions')} /><Chip label="Responses" selected={chatApi === 'responses'} onPress={() => setChatApi('responses')} /><Chip label="Claude Messages" selected={chatApi === 'anthropic'} onPress={() => setChatApi('anthropic')} /></View>
+          <Text style={styles.hint}>PDF 会在手机本地逐页转成图片（每份最多 12 页），再发送给视觉模型，避免上游忽略 PDF 文件。</Text>
           <Text style={styles.hint}>图片理解和 PDF 需要该模型及服务商支持。应用不会自动切换接口或自动重发付费请求。</Text>
         </> : <>
         <Text style={styles.label}>画质</Text>

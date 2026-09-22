@@ -7,6 +7,7 @@ import { validateAttachments } from '../document-inputs';
 import type {
   AspectRatio,
   ChatMessage,
+  ChatApi,
   Conversation,
   DocumentAttachment,
   ProviderProfile,
@@ -43,7 +44,7 @@ type ProviderSettings = {
   aspectRatio?: AspectRatio;
   resolutionTier?: ResolutionTier;
   chatModel?: string;
-  chatApi?: 'chat-completions' | 'responses';
+  chatApi?: ChatApi;
   analysisProviderId?: string | null;
 };
 

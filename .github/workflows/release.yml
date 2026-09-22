@@ -82,9 +82,17 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara Image $GITHUB_REF_NAME" --generate-notes --notes "Android 签名 APK 与 SHA-256 校验文件。安装和服务商配置方法见仓库 README；隐私说明见 PRIVACY.md。"
+        shell: bash
+        run: |
+          notes_file="docs/RELEASE-${GITHUB_REF_NAME}.md"
+          if [[ -f "$notes_file" ]]; then
+            gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara Image $GITHUB_REF_NAME" --notes-file "$notes_file"
+          else
+            gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara Image $GITHUB_REF_NAME" --generate-notes --notes "Android 签名 APK 与 SHA-256。安装和服务商配置见 README；隐私说明见 PRIVACY.md。"
+          fi
       - name: Publish released-only update manifest
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          SALCARA_APK_MIRROR_BASE_URL: ${{ vars.SALCARA_APK_MIRROR_BASE_URL }}
         run: node scripts/publish-update-manifest.mjs

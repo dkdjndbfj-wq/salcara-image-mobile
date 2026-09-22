@@ -63,3 +63,11 @@ test('roundtrips chat settings, document attachments and resumable prepared prom
     requestApi: 'responses', analysisApi: 'chat-completions',
   });
 });
+
+test('retains the native Claude protocol after reloading a saved provider', async () => {
+  await upsertProvider({
+    id: 'claude', name: 'Claude', baseUrl: 'https://example.com/v1', model: null, quality: null, aspectRatio: null,
+    resolutionTier: null, createdAt: 3, updatedAt: 3, chatModel: 'claude-test', chatApi: 'anthropic',
+  });
+  expect((await listProviders()).find((item) => item.id === 'claude')).toMatchObject({ chatApi: 'anthropic', chatModel: 'claude-test' });
+});

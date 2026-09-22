@@ -5,12 +5,18 @@ const REPOSITORY = 'dkdjndbfj-wq/salcara-image-mobile';
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const RELEASE_PAGE_URL = `https://github.com/${REPOSITORY}/releases/latest`;
 const RELEASE_MANIFEST_URLS = [
+  // This is the first-party front door. It is optional today, but keeping the
+  // URL in the client lets Salcara serve the same signed manifest from its own
+  // domain when a user's network cannot reach GitHub at all.
+  'https://salcara.top/app/latest.json',
   `https://cdn.jsdelivr.net/gh/${REPOSITORY}@updates/latest.json`,
   `https://raw.githubusercontent.com/${REPOSITORY}/updates/latest.json`,
 ] as const;
+const FIRST_PARTY_APK_BASE_URL = 'https://salcara.top/downloads';
 
 type GitHubAsset = {
   name?: string;
+  url?: string;
   browser_download_url?: string;
   size?: number;
   digest?: string | null;
@@ -38,6 +44,10 @@ export type AppRelease = {
   apk: {
     name: string;
     url: string;
+    /** GitHub API asset endpoint; usually survives networks that block github.com. */
+    apiUrl?: string | null;
+    /** Optional first-party mirror, populated by the release manifest when configured. */
+    mirrorUrl?: string | null;
     size: number;
     digest: string | null;
   };
@@ -88,6 +98,7 @@ async function fetchGitHubRelease(signal?: AbortSignal): Promise<AppRelease> {
     apk: {
       name: asset.name,
       url: asset.browser_download_url,
+      apiUrl: asset.url ?? null,
       size: asset.size ?? 0,
       digest: asset.digest ?? null,
     },
@@ -113,6 +124,8 @@ export function parseReleaseManifest(payload: unknown): AppRelease {
     || release.apk?.name !== `salcara-image-android-${release.tagName}.apk`
     || typeof release.apk.url !== 'string'
     || release.apk.url !== `https://github.com/${REPOSITORY}/releases/download/${release.tagName}/${release.apk.name}`
+    || (release.apk.apiUrl != null && !isOfficialApiAssetUrl(release.apk.apiUrl))
+    || (release.apk.mirrorUrl != null && !isFirstPartyMirrorUrl(release.apk.mirrorUrl, release.apk.name))
     || !Number.isSafeInteger(release.apk.size) || release.apk.size <= 0 || release.apk.size > MAX_APK_BYTES
     || !/^sha256:[a-f0-9]{64}$/i.test(release.apk.digest ?? '')) {
     throw new Error('更新清单不完整，无法确认已发布的安装包');
@@ -123,6 +136,49 @@ export function parseReleaseManifest(payload: unknown): AppRelease {
     notes: typeof release.notes === 'string' ? release.notes : '体验优化与问题修复。',
     pageUrl: `https://github.com/${REPOSITORY}/releases/tag/${release.tagName}`,
   } as AppRelease;
+}
+
+function isOfficialApiAssetUrl(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^https:\/\/api\.github\.com\/repos\/dkdjndbfj-wq\/salcara-image-mobile\/releases\/assets\/\d+$/.test(value);
+}
+
+function isFirstPartyMirrorUrl(value: unknown, name: string): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && (url.hostname === 'salcara.top' || url.hostname.endsWith('.salcara.top'))
+      && url.search === '' && url.hash === ''
+      && decodeURIComponent(url.pathname.split('/').pop() ?? '') === name;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Return only trusted, digest-checked download front doors. The caller must
+ * still verify the bytes against apk.size and apk.digest before installing.
+ */
+export function apkDownloadCandidates(release: AppRelease): Array<{ url: string; label: string; headers?: Record<string, string> }> {
+  const candidates: Array<{ url: string; label: string; headers?: Record<string, string> }> = [];
+  if (release.apk.mirrorUrl) candidates.push({ url: release.apk.mirrorUrl, label: 'Salcara 更新镜像' });
+  // Keep a conventional first-party path as a built-in fallback. It is safe
+  // even before the operator enables the mirror because the final digest check
+  // rejects any unexpected response; a 404 simply advances to GitHub.
+  const firstParty = `${FIRST_PARTY_APK_BASE_URL}/${encodeURIComponent(release.apk.name)}`;
+  if (!candidates.some((candidate) => candidate.url === firstParty)) {
+    candidates.push({ url: firstParty, label: 'Salcara 更新站' });
+  }
+  if (release.apk.apiUrl) {
+    candidates.push({
+      url: release.apk.apiUrl,
+      label: 'GitHub API 资源',
+      headers: { Accept: 'application/octet-stream' },
+    });
+  }
+  candidates.push({ url: release.apk.url, label: 'GitHub 发布资源' });
+  return candidates.filter((candidate, index, all) => all.findIndex((item) => item.url === candidate.url) === index);
 }
 
 /**
