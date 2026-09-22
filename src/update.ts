@@ -91,7 +91,7 @@ async function fetchGitHubRelease(signal?: AbortSignal): Promise<AppRelease> {
   return parseReleaseManifest({
     version: normalizeVersion(tagName),
     tagName,
-    title: release.name?.trim() || `Salcara Image ${tagName}`,
+    title: release.name?.trim() || `Salcara AI ${tagName}`,
     notes: release.body?.trim() || '本次版本包含体验优化与问题修复。',
     pageUrl: release.html_url ?? RELEASE_PAGE_URL,
     publishedAt: release.published_at ?? null,
@@ -132,7 +132,7 @@ export function parseReleaseManifest(payload: unknown): AppRelease {
   }
   return {
     ...release,
-    title: typeof release.title === 'string' ? release.title : `Salcara Image ${release.tagName}`,
+    title: typeof release.title === 'string' ? release.title : `Salcara AI ${release.tagName}`,
     notes: typeof release.notes === 'string' ? release.notes : '体验优化与问题修复。',
     pageUrl: `https://github.com/${REPOSITORY}/releases/tag/${release.tagName}`,
   } as AppRelease;

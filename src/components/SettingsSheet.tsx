@@ -73,7 +73,7 @@ export function SettingsSheet({ visible, onClose }: { visible: boolean; onClose:
         {isChat ? <>
           <Text style={styles.label}>接口类型</Text>
           <View style={styles.chips}><Chip label="Chat Completions" selected={chatApi === 'chat-completions'} onPress={() => setChatApi('chat-completions')} /><Chip label="Responses" selected={chatApi === 'responses'} onPress={() => setChatApi('responses')} /><Chip label="Claude Messages" selected={chatApi === 'anthropic'} onPress={() => setChatApi('anthropic')} /></View>
-          <Text style={styles.hint}>PDF 会在手机本地逐页转成图片（每份最多 12 页），再发送给视觉模型，避免上游忽略 PDF 文件。</Text>
+          <Text style={styles.hint}>PDF 会在手机本地逐页转成图片；Word、表格、PPT、代码和文本优先在本地提取，再按模型协议发送。图片和文件理解能力取决于所选模型。</Text>
           <Text style={styles.hint}>图片理解和 PDF 需要该模型及服务商支持。应用不会自动切换接口或自动重发付费请求。</Text>
         </> : <>
         <Text style={styles.label}>画质</Text>
@@ -88,7 +88,7 @@ export function SettingsSheet({ visible, onClose }: { visible: boolean; onClose:
           <Chip label="使用当前服务商" selected={!analysisProviderId} onPress={() => setAnalysisProviderId(null)} />
           {providers.filter((item) => item.chatModel && item.id !== activeProvider?.id).map((item) => <Chip key={item.id} label={item.name} selected={analysisProviderId === item.id} onPress={() => setAnalysisProviderId(item.id)} />)}
         </View>
-        <Text style={styles.hint}>仅上传 PDF 等文档时使用对话模型解析，再调用生图模型，两次调用分别计费。请先在服务商管理中填写解析服务商的对话模型。PDF 内容用于整理提示词，不会直接传给生图接口。</Text>
+        <Text style={styles.hint}>仅上传文件时会先使用这里的对话模型整理生图要求，再调用生图模型，两次调用分别计费。支持图片、PDF、Word、表格、PPT、代码和常见文本；不支持的二进制会只提供文件元数据。</Text>
         </>}
         </>}
         <PrimaryButton label="应用设置" icon="checkmark" disabled={generating} onPress={() => void save()} />

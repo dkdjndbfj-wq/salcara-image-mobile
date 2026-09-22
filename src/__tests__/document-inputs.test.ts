@@ -17,15 +17,15 @@ import type { DocumentAttachment, ReferenceImage } from '../domain';
 
 const document: DocumentAttachment = { id: '1', uri: 'file:///a.pdf', name: 'a.pdf', mimeType: 'application/pdf', size: 100 };
 
-test('accepts supported formats even with generic Android MIME types, rejects Word', () => {
+test('classifies common formats even when Android reports generic MIME types', () => {
   expect(documentMimeType('方案.PDF', 'application/octet-stream')).toBe('application/pdf');
   expect(documentMimeType('README.md')).toBe('text/markdown');
-  expect(() => documentMimeType('方案.docx', 'application/pdf')).toThrow('先转为 PDF');
+  expect(documentMimeType('方案.docx', 'application/pdf')).toContain('wordprocessingml.document');
 });
 
 test('enforces individual and combined attachment limits', () => {
   expect(() => validateAttachments([{ ...document, size: 21 * 1024 * 1024 }], [])).toThrow('20MB');
-  expect(() => validateAttachments(Array(5).fill(document), [])).toThrow('4 份');
+  expect(() => validateAttachments(Array(5).fill(document), [])).toThrow('4 个文件');
   const reference: ReferenceImage = { ...document, mimeType: 'image/png', size: 16 * 1024 * 1024 };
   expect(() => validateAttachments([{ ...document, size: 16 * 1024 * 1024 }], [reference])).toThrow('30MB');
 });

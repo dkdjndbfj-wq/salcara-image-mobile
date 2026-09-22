@@ -173,7 +173,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
       try {
         await launchInstaller(installedFile.uri);
       } catch {
-        setMessage('Android 阻止了安装请求。请先允许 Salcara Image“安装未知应用”，返回后会继续打开安装界面。');
+        setMessage('Android 阻止了安装请求。请先允许 Salcara AI“安装未知应用”，返回后会继续打开安装界面。');
         setPhase('permission');
       }
     } catch (error) {
@@ -237,7 +237,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     ];
   } else if (phase === 'up-to-date') {
     title = '已经是最新版本';
-    description = `当前安装的是 Salcara Image ${currentVersion}。`;
+    description = `当前安装的是 Salcara AI ${currentVersion}。`;
     icon = 'checkmark-circle-outline';
     actions = [{ label: '完成', tone: 'primary', onPress: close }];
   } else if (phase === 'downloading' && release) {

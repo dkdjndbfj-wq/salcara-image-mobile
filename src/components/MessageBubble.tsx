@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import type { ChatMessage } from '../domain';
+import { attachmentKind } from '../document-inputs';
 import { colors, radius, spacing } from '../theme';
 
 export function MessageBubble({
@@ -52,8 +53,8 @@ export function MessageBubble({
             ))}
           </View>
         )}
-        {!!message.documents?.length && <View style={styles.referenceRow}>{message.documents.map((document) => <View key={document.id} style={styles.document}><Ionicons name="document-text-outline" size={16} color={colors.primaryStrong} /><Text numberOfLines={2} style={styles.documentText}>{document.name}</Text></View>)}</View>}
-        <View style={styles.userBubble}><Text selectable style={styles.userText}>{message.prompt}</Text></View>
+        {!!message.documents?.length && <View style={styles.referenceRow}>{message.documents.map((document) => <View key={document.id} style={styles.document}><Ionicons name={fileIcon(document.name, document.mimeType)} size={16} color={colors.primaryStrong} /><View style={styles.documentTextWrap}><Text numberOfLines={2} style={styles.documentText}>{document.name}</Text><Text style={styles.documentKind}>{fileKindLabel(document.name, document.mimeType)}</Text></View></View>)}</View>}
+        {!!message.prompt && <View style={styles.userBubble}><Text selectable style={styles.userText}>{message.prompt}</Text></View>}
       </View>
     );
   }
@@ -72,6 +73,7 @@ export function MessageBubble({
 
   if (message.status === 'complete' && message.mode === 'chat' && message.text) {
     return <View style={styles.assistantBlock}>
+      <View style={styles.assistantIdentity}><View style={styles.assistantAvatar}><Ionicons name="sparkles" size={13} color={colors.primaryStrong} /></View><Text style={styles.assistantLabel}>Salcara AI</Text></View>
       <Text selectable style={styles.answer}>{message.text}</Text>
       <Text style={styles.meta}>{message.model}{message.elapsedMs ? ` · ${formatDuration(Math.round(message.elapsedMs / 1000))}` : ''}</Text>
       <Action icon="copy-outline" label={copied ? '已复制' : '复制回答'} onPress={() => void Clipboard.setStringAsync(message.text!).then(() => setCopied(true)).catch(() => setCopied(false))} />
@@ -167,12 +169,17 @@ const styles = StyleSheet.create({
   answer: { color: colors.text, fontSize: 16, lineHeight: 26, paddingVertical: 4 },
   analysis: { color: colors.textMuted, fontSize: 13, lineHeight: 21, padding: 12, backgroundColor: colors.surface, borderRadius: radius.md },
   document: { flexDirection: 'row', alignItems: 'center', gap: 6, maxWidth: '100%', borderRadius: radius.md, padding: 10, backgroundColor: colors.surface },
-  documentText: { flexShrink: 1, color: colors.text, fontSize: 12 },
+  documentTextWrap: { flexShrink: 1, gap: 2 },
+  documentText: { color: colors.text, fontSize: 12 },
+  documentKind: { color: colors.textMuted, fontSize: 10 },
   referenceRow: { maxWidth: '90%', flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 },
   referenceItem: { width: 58, height: 58, borderRadius: radius.sm, overflow: 'hidden', backgroundColor: colors.surface },
   referenceImage: { width: 58, height: 58 },
   referenceTag: { position: 'absolute', left: 3, bottom: 3, color: '#fff', backgroundColor: 'rgba(17,24,39,.7)', borderRadius: 4, paddingHorizontal: 4, fontSize: 9 },
   assistantBlock: { alignItems: 'flex-start', paddingHorizontal: spacing.lg, gap: spacing.sm },
+  assistantIdentity: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  assistantAvatar: { width: 25, height: 25, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.blueSurface },
+  assistantLabel: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
   progressCard: { width: '100%', minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: spacing.md, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md },
   progressText: { flex: 1, gap: 4 },
   progressTitle: { color: colors.text, fontWeight: '700' },
@@ -192,3 +199,19 @@ const styles = StyleSheet.create({
   action: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border },
   actionText: { color: colors.textMuted, fontSize: 11, fontWeight: '600' },
 });
+
+function fileIcon(name: string, mimeType: string): React.ComponentProps<typeof Ionicons>['name'] {
+  switch (attachmentKind(name, mimeType)) {
+    case 'image': return 'image-outline';
+    case 'pdf': return 'document-text-outline';
+    case 'office': return 'briefcase-outline';
+    case 'archive': return 'archive-outline';
+    case 'text': return 'code-slash-outline';
+    default: return 'attach-outline';
+  }
+}
+
+function fileKindLabel(name: string, mimeType: string): string {
+  const kind = attachmentKind(name, mimeType);
+  return kind === 'office' ? '办公文件' : kind === 'archive' ? '压缩包目录' : kind === 'text' ? '文本 / 代码' : kind === 'pdf' ? 'PDF 文档' : kind === 'image' ? '图片' : '文件附件';
+}

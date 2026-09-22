@@ -230,7 +230,7 @@ export async function insertConversation(conversation: Conversation): Promise<vo
     conversation.title,
     conversation.providerId,
     conversation.transparent ? 1 : 0,
-    conversation.mode ?? 'image',
+    conversation.mode ?? 'chat',
     conversation.createdAt,
     conversation.updatedAt,
   );
@@ -242,7 +242,7 @@ export async function updateConversation(conversation: Conversation): Promise<vo
     conversation.title,
     conversation.providerId,
     conversation.transparent ? 1 : 0,
-    conversation.mode ?? 'image',
+    conversation.mode ?? 'chat',
     conversation.updatedAt,
     conversation.id,
   );

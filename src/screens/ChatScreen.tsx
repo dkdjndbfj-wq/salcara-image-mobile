@@ -25,14 +25,15 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
-import { pickDocuments, validateAttachments } from '../document-inputs';
+import { attachmentKind, isImageAttachment, pickAnyFiles, validateAttachments } from '../document-inputs';
 import { latestCompletedImage } from '../domain-utils';
-import { createReferenceFromGenerated, pickFromFiles, pickFromGallery, prepareReferenceForMask, takePhoto } from '../image-inputs';
+import { createReferenceFromGenerated, pickFromFiles, pickFromGallery, prepareReferenceForMask, prepareReferenceFromAttachment, takePhoto } from '../image-inputs';
 import { useApp } from '../state/AppContext';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
 import { colors, radius, spacing } from '../theme';
 import { ConversationDrawer } from '../components/ConversationDrawer';
 import { AboutSheet } from '../components/AboutSheet';
+import { AppSettingsSheet } from '../components/AppSettingsSheet';
 import { ImagePreview } from '../components/ImagePreview';
 import { MaskEditor } from '../components/MaskEditor';
 import { MessageBubble } from '../components/MessageBubble';
@@ -59,6 +60,7 @@ export function ChatScreen() {
   const [providersVisible, setProvidersVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [aboutVisible, setAboutVisible] = useState(false);
+  const [appSettingsVisible, setAppSettingsVisible] = useState(false);
   const [networkVisible, setNetworkVisible] = useState(false);
   const [attachmentsVisible, setAttachmentsVisible] = useState(false);
   const [maskVisible, setMaskVisible] = useState(false);
@@ -105,7 +107,7 @@ export function ChatScreen() {
   }, [app.activeConversation?.id, app.activeProvider?.id]);
 
   if (!app.ready) {
-    return <SafeAreaView style={styles.loading}><Image source={require('../../assets/icon.png')} style={styles.loadingLogo} /><Text style={styles.loadingTitle}>Salcara Image</Text><Text style={styles.loadingText}>正在准备本地数据…</Text></SafeAreaView>;
+    return <SafeAreaView style={styles.loading}><Image source={require('../../assets/icon.png')} style={styles.loadingLogo} /><Text style={styles.loadingTitle}>Salcara AI</Text><Text style={styles.loadingText}>正在准备本地数据…</Text></SafeAreaView>;
   }
 
   const addReferences = async (source: 'gallery' | 'camera' | 'files') => {
@@ -125,12 +127,29 @@ export function ChatScreen() {
   const addDocuments = async () => {
     try {
       setAttachmentsVisible(false);
-      const selected = await pickDocuments(4 - documents.length);
-      try { validateAttachments([...documents, ...selected], references); }
-      catch (error) { selected.forEach((item) => deleteLocalFile(item.uri)); throw error; }
-      setDocuments((current) => [...current, ...selected]);
+      const selected = await pickAnyFiles(4 - documents.length);
+      // The general file picker may return images too. Promote those to the
+      // normal reference tray so image previews, ordering and mask editing
+      // remain identical to gallery/camera imports.
+      const imageFiles = selected.filter(isImageAttachment);
+      const selectedImages: ReferenceImage[] = [];
+      try {
+        for (const item of imageFiles) selectedImages.push(await prepareReferenceFromAttachment(item));
+      } catch (error) {
+        selected.forEach((item) => deleteLocalFile(item.uri));
+        selectedImages.forEach((item) => deleteLocalFile(item.uri));
+        throw error;
+      }
+      const selectedDocuments = selected.filter((item) => !isImageAttachment(item));
+      try { validateAttachments([...documents, ...selectedDocuments], [...references, ...selectedImages]); }
+      catch (error) { selected.forEach((item) => deleteLocalFile(item.uri)); selectedImages.forEach((item) => deleteLocalFile(item.uri)); throw error; }
+      // The original imported image copies are no longer needed after the
+      // normalizer creates a private reference file.
+      imageFiles.forEach((item) => deleteLocalFile(item.uri));
+      setReferences((current) => [...current, ...selectedImages].slice(0, 4));
+      setDocuments((current) => [...current, ...selectedDocuments]);
     } catch (error) {
-      setDialog({ title: '无法添加文档', message: error instanceof Error ? error.message : '文档读取失败。', icon: 'document-text-outline' });
+      setDialog({ title: '无法添加文件', message: error instanceof Error ? error.message : '文件读取失败。', icon: 'document-text-outline' });
     }
   };
 
@@ -154,8 +173,8 @@ export function ChatScreen() {
       setSettingsVisible(true);
       return;
     }
-    if (!text) {
-      setDialog({ title: '还没有输入内容', message: '请先输入你希望 AI 完成的内容。', icon: 'create-outline' });
+    if (!text && !references.length && !documents.length) {
+      setDialog({ title: '还没有内容', message: '请输入问题，或先添加图片 / 文件让 AI 分析。', icon: 'create-outline' });
       return;
     }
     if (app.generating) {
@@ -237,21 +256,31 @@ export function ChatScreen() {
       <View style={styles.header}>
         <IconButton icon="menu" label="打开会话" onPress={() => setDrawerVisible(true)} />
         <Pressable style={styles.headerInfo} onPress={() => setProvidersVisible(true)}>
-          <Text style={styles.providerName} numberOfLines={1}>{app.activeProvider?.name ?? '添加服务商'}</Text>
-          <Text style={styles.modelName} numberOfLines={1}>{(isChat ? analyst?.chatModel : app.activeProvider?.model) ?? '尚未配置模型'}</Text>
+          <Text style={styles.providerName} numberOfLines={1}>Salcara AI</Text>
+          <Text style={styles.modelName} numberOfLines={1}>{app.activeProvider ? `${isChat ? '对话' : '图片创作'} · ${isChat ? analyst?.chatModel ?? '选择对话模型' : app.activeProvider.model ?? '选择生图模型'}` : '点击添加服务商'}</Text>
         </Pressable>
         <IconButton icon="options-outline" label={isChat ? '对话设置' : '生成设置'} onPress={() => app.activeProvider ? setSettingsVisible(true) : setProvidersVisible(true)} />
       </View>
       <View style={styles.modeRow}>
-        {(['image', 'chat'] as const).map((mode) => <Chip key={mode} label={mode === 'image' ? '图片创作' : '对话 · 解析'} selected={app.composerMode === mode} onPress={() => void app.setComposerMode(mode).catch((error) => setDialog({ title: '暂时无法切换', message: error.message }))} />)}
+        {(['chat', 'image'] as const).map((mode) => <Chip key={mode} label={mode === 'image' ? '图片创作' : '对话'} selected={app.composerMode === mode} onPress={() => void app.setComposerMode(mode).catch((error) => setDialog({ title: '暂时无法切换', message: error.message }))} />)}
       </View>
 
       <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
         {app.messages.length === 0 ? (
           <Animated.View entering={FadeIn.duration(280)} style={styles.emptyState}>
             <View style={styles.logo}><Ionicons name="sparkles" size={30} color={colors.primaryStrong} /></View>
-            <Text style={styles.emptyTitle}>{isChat ? '聊想法，也能读懂图片与文件' : '描述你想看到的画面'}</Text>
-            <Text style={styles.emptyText}>{app.activeProvider ? isChat ? '支持文字、图片与 PDF 等文档。自动携带最近 12 轮成功对话，能力取决于所选模型。' : '添加参考图进行修改，也可上传 PDF 整理生图需求。生成参数可随时切换。' : '先添加一个 OpenAI 兼容服务商，再开始使用。'}</Text>
+            <Text style={styles.emptyTitle}>{isChat ? '你好，我是 Salcara AI' : '图片创作模式'}</Text>
+            <Text style={styles.emptyText}>{app.activeProvider ? isChat ? '可以对话、分析图片和文件，也可以在同一会话里继续修改上一张生成图。' : '输入画面描述，或添加参考图开始创作。需要通用问答时切换回“对话”。' : '先添加一个服务商，再开始对话、分析文件或生成图片。'}</Text>
+            {isChat && app.activeProvider && <View style={styles.quickCards}>
+              {[
+                ['document-text-outline', '总结这份文件', '上传 PDF、Word、表格或代码'],
+                ['image-outline', '分析这张图片', '识别内容并给出建议'],
+                ['sparkles-outline', '开始图片创作', '切换模式生成或修改图片'],
+              ].map(([icon, title, hint]) => <Pressable key={title} style={styles.quickCard} onPress={() => { if (title === '开始图片创作') void app.setComposerMode('image'); else setPrompt(title === '分析这张图片' ? '请分析这张图片。' : '请总结这份文件。'); }}>
+                <Ionicons name={icon as React.ComponentProps<typeof Ionicons>['name']} size={20} color={colors.primaryStrong} />
+                <Text style={styles.quickCardTitle}>{title}</Text><Text style={styles.quickCardHint}>{hint}</Text>
+              </Pressable>)}
+            </View>}
             {!app.activeProvider && <Pressable style={styles.setupButton} onPress={() => setProvidersVisible(true)}><Text style={styles.setupText}>添加服务商</Text></Pressable>}
           </Animated.View>
         ) : (
@@ -297,7 +326,7 @@ export function ChatScreen() {
           <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => void openMaskEditor()} hasMask={Boolean(maskUri)} allowMask={!isChat} />
           {documents.length > 0 && <ScrollView horizontal style={styles.documentTray} contentContainerStyle={{ gap: 8 }}>
             {documents.map((document) => <View key={document.id} style={styles.documentChip}>
-              <Ionicons name="document-text-outline" size={20} color={colors.primaryStrong} />
+              <Ionicons name={attachmentIcon(document.name, document.mimeType)} size={20} color={colors.primaryStrong} />
               <View style={{ maxWidth: 150 }}><Text numberOfLines={1} style={styles.documentName}>{document.name}</Text><Text style={styles.compatibilityHint}>{(document.size / 1024 / 1024).toFixed(1)} MB</Text></View>
               <Pressable accessibilityLabel={`移除 ${document.name}`} onPress={() => { setDocuments((current) => current.filter((item) => item.id !== document.id)); deleteLocalFile(document.uri); }}><Ionicons name="close" size={18} color={colors.textMuted} /></Pressable>
             </View>)}
@@ -309,8 +338,9 @@ export function ChatScreen() {
             </AnimatedPressable>}
             {app.activeProvider && (
               <Pressable onPress={() => setSettingsVisible(true)} style={styles.settingsSummary}>
+                <Ionicons name="options-outline" size={15} color={colors.textMuted} />
                 <Text style={styles.settingsText}>
-                  {isChat ? `${analyst?.name ?? '选择服务商'} · ${analyst?.chatModel || '选择对话模型'}` : app.activeProvider.quality && app.activeProvider.aspectRatio && app.activeProvider.resolutionTier
+                  {isChat ? '模型与接口' : app.activeProvider.quality && app.activeProvider.aspectRatio && app.activeProvider.resolutionTier
                     ? `${app.activeProvider.quality} · ${app.activeProvider.aspectRatio} · ${app.activeProvider.resolutionTier}`
                     : '设置生成参数'}
                 </Text>
@@ -319,9 +349,9 @@ export function ChatScreen() {
           </View>
           {!isChat && transparent && <Text style={styles.compatibilityHint}>已请求透明 PNG，实际透明能力由服务商决定。</Text>}
           {!isChat && documents.length > 0 && <Text style={styles.compatibilityHint}>将通过 {analyst?.chatModel ? `${analyst.name} / ${analyst.chatModel}` : '待配置的对话模型'} 解析文件后生图；解析与生图分别计费。</Text>}
-          {isChat && (documents.length > 0 || references.length > 0) && <Text style={styles.compatibilityHint}>附件将发送到 {analyst?.name ?? '所选对话服务商'}；请确认模型支持图片／PDF。</Text>}
+          {isChat && (documents.length > 0 || references.length > 0) && <Text style={styles.compatibilityHint}>已选 {documents.length + references.length} 个附件 · 文本和办公文件优先本地提取</Text>}
           <View style={styles.composer}>
-            <IconButton icon="add" label="添加图片或文档" disabled={app.generating} onPress={() => setAttachmentsVisible(true)} />
+            <IconButton icon="add" label="添加图片或文件" disabled={app.generating} onPress={() => setAttachmentsVisible(true)} />
             <TextInput
               value={prompt}
               onChangeText={setPrompt}
@@ -351,17 +381,18 @@ export function ChatScreen() {
         onOpenProviders={() => { setDrawerVisible(false); setProvidersVisible(true); }}
         onOpenAbout={() => { setDrawerVisible(false); setAboutVisible(true); }}
         onOpenNetwork={() => { setDrawerVisible(false); setNetworkVisible(true); }}
+        onOpenSettings={() => { setDrawerVisible(false); setAppSettingsVisible(true); }}
       />
       <ProviderManager visible={providersVisible} onClose={() => setProvidersVisible(false)} />
       <SettingsSheet visible={settingsVisible} onClose={() => setSettingsVisible(false)} />
       <AboutSheet visible={aboutVisible} onClose={() => setAboutVisible(false)} onCheckUpdates={() => setUpdateCheckToken((value) => value + 1)} />
-      <Sheet visible={attachmentsVisible} title="添加图片或文档" onClose={() => setAttachmentsVisible(false)}>
+      <AppSettingsSheet visible={appSettingsVisible} onClose={() => setAppSettingsVisible(false)} />
+      <Sheet visible={attachmentsVisible} title="添加附件" onClose={() => setAttachmentsVisible(false)}>
         <View style={styles.attachmentOptions}>
           <AttachmentOption icon="images-outline" title="从相册选择" subtitle="PNG、JPEG 或 WebP" onPress={() => void addReferences('gallery')} />
           <AttachmentOption icon="camera-outline" title="拍照" subtitle="使用相机拍摄主图" onPress={() => void addReferences('camera')} />
-          <AttachmentOption icon="folder-open-outline" title="从文件选择" subtitle="仅支持图片文件" onPress={() => void addReferences('files')} />
-          <AttachmentOption icon="document-text-outline" title="添加文档" subtitle="PDF、TXT、Markdown、CSV · 最多 4 份" onPress={() => void addDocuments()} />
-          <Text style={styles.compatibilityHint}>每个附件不超过 20MB，合计不超过 30MB。PDF 每份最多 12 页，本地转图后由视觉模型理解；超页请先拆分，不会截断内容。</Text>
+          <AttachmentOption icon="folder-open-outline" title="从设备选择" subtitle="图片、PDF、Word、Excel、PPT、代码、压缩包等" onPress={() => void addDocuments()} />
+          <Text style={styles.compatibilityHint}>每个附件不超过 20MB，合计不超过 30MB。常见文本和办公文件会在手机本地提取；压缩包只读取目录，不执行其中内容。</Text>
         </View>
       </Sheet>
       <MaskEditor visible={maskVisible} image={references[0] ?? null} onCancel={() => setMaskVisible(false)} onConfirm={(uri) => { if (maskUri && maskUri !== uri) deleteLocalFile(maskUri); setMaskUri(uri); setMaskVisible(false); }} />
@@ -378,6 +409,11 @@ export function ChatScreen() {
 
 function AttachmentOption({ icon, title, subtitle, onPress }: { icon: React.ComponentProps<typeof Ionicons>['name']; title: string; subtitle: string; onPress: () => void }) {
   return <Pressable onPress={onPress} style={styles.attachmentRow}><View style={styles.attachmentIcon}><Ionicons name={icon} size={23} color={colors.primaryStrong} /></View><View><Text style={styles.attachmentTitle}>{title}</Text><Text style={styles.attachmentSubtitle}>{subtitle}</Text></View></Pressable>;
+}
+
+function attachmentIcon(name: string, mimeType: string): React.ComponentProps<typeof Ionicons>['name'] {
+  const kind = attachmentKind(name, mimeType);
+  return kind === 'office' ? 'briefcase-outline' : kind === 'archive' ? 'archive-outline' : kind === 'text' ? 'code-slash-outline' : kind === 'pdf' ? 'document-text-outline' : 'attach-outline';
 }
 
 const styles = StyleSheet.create({
@@ -399,6 +435,10 @@ const styles = StyleSheet.create({
   logo: { width: 68, height: 68, borderRadius: 22, backgroundColor: colors.blueSurface, alignItems: 'center', justifyContent: 'center' },
   emptyTitle: { color: colors.text, fontSize: 22, fontWeight: '800', textAlign: 'center' },
   emptyText: { color: colors.textMuted, fontSize: 14, lineHeight: 22, textAlign: 'center' },
+  quickCards: { width: '100%', flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: spacing.sm },
+  quickCard: { width: '31%', minWidth: 96, minHeight: 92, padding: 10, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, gap: 5 },
+  quickCardTitle: { color: colors.text, fontSize: 12, fontWeight: '700' },
+  quickCardHint: { color: colors.textMuted, fontSize: 10, lineHeight: 14 },
   setupButton: { minHeight: 44, paddingHorizontal: spacing.xl, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md, backgroundColor: colors.primary },
   setupText: { color: '#fff', fontWeight: '700' },
   messages: { paddingVertical: spacing.xl, gap: spacing.xl },
@@ -415,7 +455,7 @@ const styles = StyleSheet.create({
   transparentActive: { backgroundColor: colors.blueSurface, borderColor: colors.primary },
   transparentText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' },
   transparentTextActive: { color: colors.primaryStrong },
-  settingsSummary: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 9 },
+  settingsSummary: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 5, justifyContent: 'center', paddingHorizontal: 9 },
   settingsText: { color: colors.textMuted, fontSize: 11, fontWeight: '600' },
   compatibilityHint: { color: colors.textMuted, fontSize: 11, paddingHorizontal: spacing.md },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm, paddingHorizontal: spacing.md },

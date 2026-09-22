@@ -13,12 +13,14 @@ export function ConversationDrawer({
   onOpenProviders,
   onOpenAbout,
   onOpenNetwork,
+  onOpenSettings,
 }: {
   visible: boolean;
   onClose: () => void;
   onOpenProviders: () => void;
   onOpenAbout: () => void;
   onOpenNetwork: () => void;
+  onOpenSettings: () => void;
 }) {
   const { conversations, activeConversation, providers, startConversation, selectConversation, removeConversation } = useApp();
   const [dialog, setDialog] = useState<{ title: string; message: string; actions?: DialogAction[] } | null>(null);
@@ -49,7 +51,7 @@ export function ConversationDrawer({
       <View style={styles.overlay}>
         <SafeAreaView style={styles.drawer} edges={['top', 'bottom']}>
           <View style={styles.header}>
-            <View><Text style={styles.brand}>Salcara Image</Text><Text style={styles.subtitle}>图片创作与多模态对话</Text></View>
+            <View><Text style={styles.brand}>Salcara AI</Text><Text style={styles.subtitle}>对话、文件与图片创作</Text></View>
             <Pressable onPress={onClose} style={styles.icon}><Ionicons name="close" size={22} color={colors.text} /></Pressable>
           </View>
           <Pressable
@@ -83,6 +85,10 @@ export function ConversationDrawer({
             ))}
           </ScrollView>
           <View style={styles.bottomActions}>
+            <Pressable style={styles.providerButton} onPress={onOpenSettings}>
+              <Ionicons name="settings-outline" size={20} color={colors.text} />
+              <Text style={styles.providerText}>应用设置</Text>
+            </Pressable>
             <Pressable style={styles.providerButton} onPress={onOpenNetwork}>
               <Ionicons name="pulse-outline" size={20} color={colors.text} />
               <Text style={styles.providerText}>网络诊断</Text>
@@ -123,7 +129,7 @@ const styles = StyleSheet.create({
   title: { color: colors.text, fontWeight: '600', fontSize: 14 },
   meta: { color: colors.textMuted, fontSize: 11 },
   delete: { width: 42, height: 48, alignItems: 'center', justifyContent: 'center' },
-  bottomActions: { borderTopWidth: 1, borderColor: colors.border, paddingTop: spacing.sm },
-  providerButton: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  bottomActions: { borderTopWidth: 1, borderColor: colors.border, paddingTop: spacing.md, flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  providerButton: { width: '47%', minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.xs },
   providerText: { color: colors.text, fontWeight: '700' },
 });

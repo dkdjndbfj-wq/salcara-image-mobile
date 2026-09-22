@@ -159,6 +159,15 @@ test('models list keeps compatible provider IDs without inventing defaults', asy
   expect(mockFetch.mock.calls[0][1]).toMatchObject({ redirect: 'error', credentials: 'omit' });
 });
 
+test('sends an unknown local file through compatible file-input protocols', async () => {
+  const binary: DocumentAttachment = { id: 'bin', uri: 'file:///model.bin', name: 'model.bin', mimeType: 'application/octet-stream', size: 128 };
+  mockReadFiles.set(binary.uri, { size: 128, base64: 'AAECAw==' });
+  const responses = await buildChatBody({ ...request, api: 'responses', documents: [binary] });
+  expect((responses.input as Array<{ content: unknown[] }>)[0].content).toContainEqual({ type: 'input_file', filename: 'model.bin', file_data: 'data:application/octet-stream;base64,AAECAw==' });
+  const completions = await buildChatBody({ ...request, documents: [binary] });
+  expect((completions.messages as Array<{ content: unknown[] }>)[1].content).toContainEqual({ type: 'file', file: { filename: 'model.bin', file_data: 'data:application/octet-stream;base64,AAECAw==' } });
+});
+
 test('Claude Messages receives PDF page images instead of ignored native document blocks', async () => {
   const body = await buildChatBody({ ...request, api: 'anthropic', model: 'claude-test', documents: [pdf], references: [image] });
   expect(body).toMatchObject({ model: 'claude-test', max_tokens: 4096, stream: false, system: expect.any(String) });

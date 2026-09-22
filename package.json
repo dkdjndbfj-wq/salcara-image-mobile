@@ -1,10 +1,10 @@
 {
   "name": "salcara-image-mobile",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "main": "index.ts",
   "dependencies": {
-    "@noble/hashes": "2.4.0",
     "@expo/vector-icons": "^15.0.2",
+    "@noble/hashes": "2.4.0",
     "@react-native-community/slider": "5.2.0",
     "expo": "~57.0.24",
     "expo-application": "~57.0.3",
@@ -25,6 +25,7 @@
     "expo-sqlite": "~57.0.3",
     "expo-status-bar": "~57.0.1",
     "expo-system-ui": "~57.0.4",
+    "fflate": "^0.8.3",
     "react": "19.2.3",
     "react-native": "0.86.3",
     "react-native-draggable-flatlist": "^4.0.3",

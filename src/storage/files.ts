@@ -166,7 +166,7 @@ export async function saveToGallery(uri: string): Promise<void> {
   if (!permission.granted) {
     throw new Error(permission.canAskAgain
       ? '需要允许“保存图片”权限才能写入系统相册。'
-      : '相册保存权限已被关闭，请到系统设置中允许 Salcara Image 保存图片。');
+      : '相册保存权限已被关闭，请到系统设置中允许 Salcara AI 保存图片。');
   }
 
   try {

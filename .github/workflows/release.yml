@@ -86,9 +86,9 @@ jobs:
         run: |
           notes_file="docs/RELEASE-${GITHUB_REF_NAME}.md"
           if [[ -f "$notes_file" ]]; then
-            gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara Image $GITHUB_REF_NAME" --notes-file "$notes_file"
+            gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara AI $GITHUB_REF_NAME" --notes-file "$notes_file"
           else
-            gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara Image $GITHUB_REF_NAME" --generate-notes --notes "Android 签名 APK 与 SHA-256。安装和服务商配置见 README；隐私说明见 PRIVACY.md。"
+            gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara AI $GITHUB_REF_NAME" --generate-notes --notes "Android 签名 APK 与 SHA-256。安装和服务商配置见 README；隐私说明见 PRIVACY.md。"
           fi
       - name: Publish released-only update manifest
         if: startsWith(github.ref, 'refs/tags/v')

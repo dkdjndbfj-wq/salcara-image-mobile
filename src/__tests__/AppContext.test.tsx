@@ -67,9 +67,10 @@ import { RemoteImageDownloadError } from '../storage/files';
 
 let app: ReturnType<typeof useApp>;
 function Probe() { app = useApp(); return null; }
-async function mount() {
+async function mount(mode: 'image' | 'chat' = 'image') {
   await render(<AppProvider><Probe /></AppProvider>);
   await waitFor(() => expect(app.ready).toBe(true));
+  await act(async () => { await app.setComposerMode(mode); });
 }
 const pdf: DocumentAttachment = { id: 'doc', uri: 'file:///document.pdf', name: '场地方案.pdf', mimeType: 'application/pdf', size: 128 };
 
@@ -94,8 +95,7 @@ beforeEach(() => {
 
 test('chat stores assistant text in the conversation without invoking generation', async () => {
   mockProviders[0].analysisProviderId = null;
-  await mount();
-  await act(async () => { await app.setComposerMode('chat'); });
+  await mount('chat');
   await act(async () => { await app.sendPrompt('描述足球场', [], undefined, false, [pdf]); });
   expect(mockSendChat).toHaveBeenCalledWith(expect.objectContaining({ model: 'own-chat-model', documents: [pdf], prompt: '描述足球场' }));
   expect(mockGenerate).not.toHaveBeenCalled();

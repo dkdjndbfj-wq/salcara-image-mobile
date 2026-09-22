@@ -91,7 +91,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [generating, setGenerating] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [requestStage, setRequestStage] = useState('');
-  const [composerMode, setComposerModeState] = useState<'image' | 'chat'>('image');
+  // Salcara is a general assistant now. Image creation remains a deliberate
+  // mode switch instead of being the default for every new conversation.
+  const [composerMode, setComposerModeState] = useState<'image' | 'chat'>('chat');
   const requestLockRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const requestStartedAtRef = useRef(0);
@@ -132,7 +134,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setActiveProviderIdState(providerId);
       const latestConversation = loadedConversations.find((conversation) => conversation.providerId === providerId);
       if (latestConversation) {
-        setComposerModeState(latestConversation.mode ?? 'image');
+        setComposerModeState(latestConversation.mode ?? 'chat');
         setActiveConversationId(latestConversation.id);
         setMessages(await listMessages(latestConversation.id));
       } else if (loadedProviders.find((item) => item.id === providerId)?.chatModel && !loadedProviders.find((item) => item.id === providerId)?.model) {
@@ -158,7 +160,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setActiveConversationId(latest?.id ?? null);
     setMessages(latest ? await listMessages(latest.id) : []);
     const profile = (await listProviders()).find((item) => item.id === providerId);
-    setComposerModeState(latest?.mode ?? (profile?.chatModel && !profile?.model ? 'chat' : 'image'));
+    setComposerModeState(latest?.mode ?? 'chat');
   }, []);
 
   const setComposerMode = useCallback(async (mode: 'image' | 'chat') => {
@@ -211,7 +213,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       setActiveConversationId(conversationId);
       setMessages(await listMessages(conversationId));
-      setComposerModeState(conversation.mode ?? 'image');
+      setComposerModeState(conversation.mode ?? 'chat');
     },
     [conversations, activeProviderIdState],
   );
@@ -231,7 +233,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const latest = next.find((conversation) => conversation.providerId === activeProviderIdState);
         setActiveConversationId(latest?.id ?? null);
         setMessages(latest ? await listMessages(latest.id) : []);
-        setComposerModeState(latest?.mode ?? composerMode);
+        setComposerModeState(latest?.mode ?? 'chat');
       }
     },
     [refreshConversations, activeConversationId, activeProviderIdState, composerMode],
@@ -396,7 +398,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         throw new Error('请先选择模型、画质、比例和清晰度');
       }
       if (isChat && !chatProvider?.chatModel) throw new Error('请在对话设置中选择已配置对话模型的服务商');
-      if (!prompt.trim()) throw new Error('请输入希望 AI 完成的内容');
+      if (!prompt.trim() && !references.length && !documents.length) throw new Error('请输入内容，或添加需要解析的图片 / 文件');
       if (requestLockRef.current) throw new Error('当前请求尚未完成');
       validateAttachments(documents, references);
       const analyst = documents.length && !isChat
@@ -444,7 +446,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const size = !isChat && provider.aspectRatio && provider.resolutionTier ? sizeFor(provider.aspectRatio, provider.resolutionTier) : '';
       const baseMessage = {
         conversationId: conversation.id,
-        prompt: prompt.trim(),
+        prompt: prompt.trim() || '请分析所附资料。',
         mode: isChat ? ('chat' as const) : requestReferences.length ? ('edit' as const) : ('generate' as const),
         providerId: isChat ? chatProvider!.id : provider.id,
         model: (isChat ? chatProvider!.chatModel : provider.model)!,
@@ -482,7 +484,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       await insertMessage(userMessage);
       await insertMessage(assistantMessage);
       setMessages((current) => [...current, userMessage, assistantMessage]);
-      await executeRequest(assistantMessage, prompt.trim(), requestReferences, isChat ? null : maskUri, messages);
+      await executeRequest(assistantMessage, prompt.trim() || '请分析所附资料。', requestReferences, isChat ? null : maskUri, messages);
       } finally {
         requestLockRef.current = false;
         setGenerating(false);

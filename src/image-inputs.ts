@@ -81,6 +81,13 @@ export async function createReferenceFromGenerated(uri: string): Promise<Referen
   return prepareAsset({ uri, name: 'generated-reference.png', mimeType: 'image/png', fileSize: fileSize(uri) });
 }
 
+/** Convert an image returned by the general file picker to a supported,
+ * private reference asset (PNG/JPEG/WebP). This also handles HEIC/GIF and
+ * oversized images instead of relabelling their bytes as PNG. */
+export async function prepareReferenceFromAttachment(asset: { uri: string; name: string; mimeType: string; size: number }): Promise<ReferenceImage> {
+  return prepareAsset({ uri: asset.uri, name: asset.name, mimeType: asset.mimeType, fileSize: asset.size });
+}
+
 export async function prepareReferenceForMask(image: ReferenceImage): Promise<ReferenceImage> {
   const dimensions = image.width && image.height
     ? { width: image.width, height: image.height }

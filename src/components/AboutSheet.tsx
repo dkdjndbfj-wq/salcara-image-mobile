@@ -30,7 +30,7 @@ export function AboutSheet({ visible, onClose, onCheckUpdates }: { visible: bool
         <View style={styles.hero}>
           <Image source={require('../../assets/icon.png')} style={styles.logo} />
           <View style={styles.heroText}>
-            <Text style={styles.name}>Salcara Image</Text>
+            <Text style={styles.name}>Salcara AI</Text>
             <Text style={styles.version}>版本 {version}{build ? `（${build}）` : ''}</Text>
           </View>
         </View>
@@ -48,7 +48,7 @@ export function AboutSheet({ visible, onClose, onCheckUpdates }: { visible: bool
         </View>
 
         <PrimaryButton label="检查软件更新" icon="cloud-download-outline" onPress={() => { onClose(); onCheckUpdates(); }} />
-        <Text style={styles.hint}>启动时会通过 GitHub 与备用 CDN 自动检查正式版本。更新包仍只从官方 GitHub Releases 获取；应用内下载失败时可改用系统浏览器。覆盖安装会保留本机数据。</Text>
+        <Text style={styles.hint}>启动时会通过 Salcara 更新站与 GitHub 备用清单自动检查正式版本。安装包会在应用内校验后交给 Android 安装器，覆盖安装会保留本机数据。</Text>
       </View>
     </Sheet>
   );

@@ -4,6 +4,8 @@ export type ResolutionTier = '1K' | '2K' | '4K';
 export type MessageStatus = 'pending' | 'complete' | 'error' | 'cancelled' | 'interrupted';
 export type MessageMode = 'generate' | 'edit' | 'chat';
 export type ChatApi = 'chat-completions' | 'responses' | 'anthropic';
+/** How a local attachment is prepared before it is sent to a model. */
+export type AttachmentKind = 'pdf' | 'text' | 'office' | 'archive' | 'image' | 'binary';
 
 export interface ProviderProfile {
   id: string;
@@ -44,8 +46,11 @@ export interface DocumentAttachment {
   id: string;
   uri: string;
   name: string;
-  mimeType: 'application/pdf' | 'text/plain' | 'text/markdown' | 'text/csv';
+  /** Keep the original MIME when Android provides one. Unknown types are allowed. */
+  mimeType: string;
   size: number;
+  /** Optional for old database rows; callers should infer it when absent. */
+  kind?: AttachmentKind;
 }
 
 export interface ChatMessage {
