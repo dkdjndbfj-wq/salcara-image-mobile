@@ -12,8 +12,10 @@ import { PrimaryButton, Sheet } from './ui';
 type Probe = { label: string; host: string; reachable: boolean; message: string; elapsedMs: number };
 
 /** Diagnostic traffic is limited to the selected API and its existing result URL. */
-export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imageUrl, api = 'chat-completions' }: {
+export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imageUrl, api = 'chat-completions', secondaryProviderId, secondaryBaseUrl, secondaryApi = 'chat-completions' }: {
   visible: boolean; onClose: () => void; providerId: string; baseUrl: string; imageUrl?: string | null; api?: ChatApi;
+  /** Optional second capability host, used by automatic chat + image routing. */
+  secondaryProviderId?: string; secondaryBaseUrl?: string; secondaryApi?: ChatApi;
 }) {
   const [results, setResults] = useState<Probe[]>([]);
   const [busy, setBusy] = useState(false);
@@ -26,7 +28,7 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
       controllerRef.current = null;
       controller?.abort();
     };
-  }, [visible, providerId, baseUrl, imageUrl, api]);
+  }, [visible, providerId, baseUrl, imageUrl, api, secondaryProviderId, secondaryBaseUrl, secondaryApi]);
 
   const run = async () => {
     if (controllerRef.current) return;
@@ -35,13 +37,13 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
     setBusy(true);
     setResults([]);
     const timeout = setTimeout(() => controller.abort(), 12_000);
-    const probe = async (url: string, label: string, apiKey?: string | null, method: 'GET' | 'HEAD' = 'GET'): Promise<Probe> => {
+    const probe = async (url: string, label: string, apiKey?: string | null, method: 'GET' | 'HEAD' = 'GET', probeApi: ChatApi = api): Promise<Probe> => {
       const started = Date.now();
       let reachable = false;
       let message: string;
       try {
         const headers: Record<string, string> | undefined = apiKey
-          ? api === 'anthropic'
+          ? probeApi === 'anthropic'
             ? { 'x-api-key': apiKey.trim(), 'anthropic-version': '2023-06-01' }
             : { Authorization: `Bearer ${apiKey.trim()}` }
           : undefined;
@@ -64,13 +66,22 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
       return { label, host: networkHost(url), reachable, message, elapsedMs: Date.now() - started };
     };
     try {
-      const key = await getProviderKey(providerId);
+      const primaryKey = await getProviderKey(providerId);
       if (controller.signal.aborted) return;
-      if (!key) throw new Error('未找到当前服务商密钥，请重新保存服务商。');
+      if (!primaryKey) throw new Error('未找到当前服务商密钥，请重新保存服务商。');
       const probes = [
-        probe(imageEndpoint(baseUrl, 'models'), 'API 服务器', key),
-        probe(imageEndpoint(baseUrl, 'images/generations'), '生图接口', key, 'HEAD'),
+        probe(imageEndpoint(baseUrl, 'models'), 'API 服务器', primaryKey),
+        probe(imageEndpoint(baseUrl, 'images/generations'), '生图接口', primaryKey, 'HEAD'),
       ];
+      if (secondaryProviderId && secondaryBaseUrl && secondaryProviderId !== providerId) {
+        const secondaryKey = await getProviderKey(secondaryProviderId);
+        if (secondaryKey) {
+          probes.push(
+            probe(imageEndpoint(secondaryBaseUrl, 'models'), '图片 API 服务器', secondaryKey, 'GET', secondaryApi),
+            probe(imageEndpoint(secondaryBaseUrl, 'images/generations'), '图片生图接口', secondaryKey, 'HEAD', secondaryApi),
+          );
+        }
+      }
       if (imageUrl && /^https?:\/\//i.test(imageUrl)) probes.push(probe(imageUrl, '图片服务器', undefined, 'HEAD'));
       const result = await Promise.all(probes);
       if (controllerRef.current === controller) setResults(result);
@@ -88,7 +99,7 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
   return (
     <Sheet visible={visible} title="网络诊断" onClose={() => { controllerRef.current?.abort(); onClose(); }}>
       <View style={styles.body}>
-      <Text style={styles.intro}>检测当前手机网络与所选服务商的连接，不生成图片，也不消耗模型额度。密钥只发往你配置的 API 地址。</Text>
+      <Text style={styles.intro}>检测当前手机网络与所选服务商的连接，不生成图片，也不消耗模型额度。自动模式会同时检测对话 API 和图片 API。</Text>
       <View style={styles.note}><Text style={styles.noteText}>网站、模型列表和生图 POST 是不同链路。这里会额外用不扣费的 HEAD 探测生图接口路由；同一个网站或 /models 能打开，并不表示生图接口一定能完成请求。</Text></View>
       {results.map((result) => (
         <View key={result.label} style={styles.result}>

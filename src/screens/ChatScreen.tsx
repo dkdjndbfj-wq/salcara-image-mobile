@@ -60,6 +60,8 @@ export function ChatScreen() {
     ? app.activeProvider
     : (app.activeProvider?.analysisProviderId && app.providers.find((item) => item.id === app.activeProvider?.analysisProviderId && item.chatModel))
       || app.providers.find((item) => item.chatModel);
+  const diagnosticsProvider = isImageOnly ? imageProvider : chatProvider ?? imageProvider;
+  const diagnosticsSecondary = isAuto && diagnosticsProvider?.id !== imageProvider?.id ? imageProvider : undefined;
   const [continueFromPrevious, setContinueFromPrevious] = useState(true);
   const [maskUri, setMaskUri] = useState<string | null>(null);
   const [drawerVisible, setDrawerVisible] = useState(false);
@@ -423,7 +425,17 @@ export function ChatScreen() {
         <ActivityIndicator color={colors.primaryStrong} />
       </AppDialog>
       <UpdateManager manualCheckToken={updateCheckToken} />
-      <NetworkDiagnostics visible={networkVisible} onClose={() => setNetworkVisible(false)} providerId={(isImageOnly ? imageProvider?.id : chatProvider?.id) ?? ''} baseUrl={(isImageOnly ? imageProvider?.baseUrl : chatProvider?.baseUrl) ?? ''} api={isImageOnly ? imageProvider?.chatApi : chatProvider?.chatApi} imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
+      <NetworkDiagnostics
+        visible={networkVisible}
+        onClose={() => setNetworkVisible(false)}
+        providerId={diagnosticsProvider?.id ?? ''}
+        baseUrl={diagnosticsProvider?.baseUrl ?? ''}
+        api={diagnosticsProvider?.chatApi}
+        secondaryProviderId={diagnosticsSecondary?.id}
+        secondaryBaseUrl={diagnosticsSecondary?.baseUrl}
+        secondaryApi={imageProvider?.chatApi}
+        imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl}
+      />
     </SafeAreaView>
   );
 }

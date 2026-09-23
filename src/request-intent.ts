@@ -74,7 +74,7 @@ export function hasImageIntent(prompt: string): boolean {
   // user separately asks to render the resulting prompt.
   if (/(?:帮我|请|给我|为我)?(?:生成|写|整理|优化)[^。！？]{0,24}(?:图片|图像|海报)?(?:提示词|prompt|关键词|文案|排版说明)/i.test(value)) return false;
   if (isImageAdviceQuestion(value)) return false;
-  const directImageRequest = /(?:生图|出图|绘制|画(?:一张|一幅|个|一个|一只|图片|图|海报|插画|头像|壁纸)|生成|制作|做|创作|设计)\s*[^。！？,，]{0,32}(?:图片|图像|图片|图|海报|宣传图|封面|插画|头像|壁纸|画面|logo)|(?:修改|编辑|重绘|换|改|替换|扩|修复|上色|抠|变成|变为|转换为)\s*[^。！？,，]*?(?:图片|图|背景|画面|照片|风格|赛博朋克|水彩|油画)|(?:将|把)\s*[^。！？,，]{0,36}(?:改成|变成|变为|替换成)/i;
+  const directImageRequest = /(?:生图|出图|绘制|画(?:一张|一幅|个|一个|一只|图片|图|海报|插画|头像|壁纸)|生成|制作|做|创作|设计)\s*[^。！？,，]{0,32}(?:图片|图像|图片|图|海报|宣传图|封面|插画|头像|壁纸|画面|logo)|(?:修改|编辑|重绘|换|改|替换|扩|修复|上色|抠|变成|变为|转换为)\s*[^。！？,，]*?(?:图片|图|背景|画面|照片|风格|赛博朋克|水彩|油画)/i;
   // A how-to question can contain the same words as an imperative. Treat it
   // as chat even when it mentions “生成图片”, because charging for an answer
   // about image generation would be surprising.

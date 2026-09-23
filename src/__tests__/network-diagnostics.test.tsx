@@ -59,6 +59,25 @@ test('uses native Claude authentication only for the configured API host', async
   expect(JSON.stringify(screen.toJSON())).not.toContain('claude-private-key');
 });
 
+test('can diagnose a separate image provider in automatic mode', async () => {
+  mockFetch.mockResolvedValue({ ok: true, status: 200, body: { cancel: async () => undefined } });
+  const screen = await render(<NetworkDiagnostics
+    visible
+    onClose={jest.fn()}
+    providerId="chat-provider"
+    baseUrl="https://chat.example/v1"
+    api="responses"
+    secondaryProviderId="image-provider"
+    secondaryBaseUrl="https://image.example/v1"
+    secondaryApi="chat-completions"
+  />);
+  await fireEvent.press(screen.getByText('检测当前网络'));
+  await waitFor(() => expect(screen.getByText('图片 API 服务器 · image.example')).toBeTruthy());
+  expect(mockGetKey).toHaveBeenCalledWith('chat-provider');
+  expect(mockGetKey).toHaveBeenCalledWith('image-provider');
+  expect(mockFetch).toHaveBeenCalledWith('https://image.example/v1/images/generations', expect.objectContaining({ method: 'HEAD', headers: { Authorization: 'Bearer private-key' } }));
+});
+
 test('closing diagnostics aborts the active request', async () => {
   mockFetch.mockImplementation((_url, options) => new Promise((_resolve, reject) => {
     options.signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });

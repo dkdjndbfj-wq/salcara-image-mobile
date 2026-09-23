@@ -18,6 +18,7 @@ test('auto mode edits only when the prompt explicitly asks for image creation', 
   expect(inferRequestIntent('把这张图变成赛博朋克风格', image, [], 'auto')).toBe('edit');
   expect(inferRequestIntent('将背景改成蓝色', image, [], 'auto')).toBe('edit');
   expect(inferRequestIntent('把这个改成复古海报', image, [], 'auto')).toBe('edit');
+  expect(inferRequestIntent('把这段文字改成更正式的表达', [], [], 'auto')).toBe('chat');
   expect(inferRequestIntent('参考这个示意图的风格创作一张新图', image, [], 'auto')).toBe('edit');
   expect(inferRequestIntent('来一张适合手机壁纸的夜景', [], [], 'auto')).toBe('generate');
   expect(inferRequestIntent('请按这份 PDF 生成一张封面', [], pdf, 'auto')).toBe('generate');
