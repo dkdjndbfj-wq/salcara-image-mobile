@@ -1,15 +1,15 @@
 {
-  "version": "1.3.1",
-  "tagName": "v1.3.1",
-  "title": "Salcara AI v1.3.1",
-  "notes": "# Salcara AI v1.3.1\n\n这是 v1.3.0 通用 AI 客户端的稳定性补丁。\n\n## 主要修复\n\n- 兼容更多 OpenAI 兼容网关的图片响应包装（`b64_json`、`image_base64`、`partial_image_b64`、`result.data`、内嵌 data URL 等），并优先使用内嵌图片内容。\n- 支持 Sub2API 异步图片任务返回的 `task_id`，在同一 API 地址安全轮询，不重新提交收费请求。\n- 将 HTTP/2 `StreamResetException: CANCEL`、图片 CDN 超时和 API 连接失败分开提示；已生成但下载失败时只提供“重新下载”，不会再次生图扣费。\n- 图片服务商与对话服务商在配置界面明确分离，图片服务商可以只配置 Images API；对话模型在弹层中通过列表选择，手动填写收进折叠项。\n- 缩小标题、消息、服务商和弹窗字号，统一紧凑的白色/浅蓝界面。\n- 同步补充网络排障说明，提示在 Sub2API 每个生图上游账号开启“生图结果 URL 转 base64”。\n\n## 计费与安全\n\n应用不会因为“没有图片数据”自动重新提交一次新的付费生图请求。生成请求是否已经计费，应以服务商记录为准；只有拿到外部图片 URL 后的下载重试不会重复调用生图接口。\n\nAPK 与 `.sha256` 文件由 GitHub Actions 生成并发布，更新清单只在发布成功后写入 `updates` 分支。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.3.1",
-  "publishedAt": "2026-09-22T13:36:04Z",
+  "version": "1.3.2",
+  "tagName": "v1.3.2",
+  "title": "Salcara AI v1.3.2",
+  "notes": "# Salcara AI v1.3.2\n\n## 统一对话与图片创作\n\n- 默认使用一个 ChatGPT 风格输入框，自动判断每条消息是普通对话、图片/文件分析、图片生成还是图片编辑。\n- 图片只是示意时不会触发生图；“分析、识别、描述、总结”等请求只发送到对话服务商。\n- 明确要求生成或修改图片时，先由独立对话 API 检查并整理作图要求，再调用图片 API；对话步骤失败不会继续发起付费生图。\n- 在同一会话上传 PDF/Word 并分析后，下一条明确的生图请求会沿用历史文件上下文。\n- 保留“仅对话”和“仅图片创作”手动覆盖，兼容旧会话和只配置 Images API 的高级用法。\n\n## 配置与安全\n\n- 对话服务商和图片服务商可以使用完全不同的地址、密钥和模型。\n- 自动生图找不到对话模型时会在付费图片请求前停止并提示配置，不会盲目扣费。\n- 已保存的作图说明会用于手动重试，避免重复解析；图片 URL 下载失败只重试下载，不重新提交生图。\n\n## 发布\n\n这是 Android `versionCode 10` 的覆盖安装版本。APK、SHA-256、安装说明和隐私说明见 GitHub Release 页面。\n\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.3.2",
+  "publishedAt": "2026-09-23T11:29:15Z",
   "apk": {
-    "name": "salcara-image-android-v1.3.1.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.3.1/salcara-image-android-v1.3.1.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/581475540",
-    "size": 100090424,
-    "digest": "sha256:c772c8cc0d68b7fcd2b631781d82faff66af9ea5ecb1b41c544801a0c11a83b4"
+    "name": "salcara-image-android-v1.3.2.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.3.2/salcara-image-android-v1.3.2.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/583634748",
+    "size": 100101632,
+    "digest": "sha256:5910456433fecd4e3d033fd18aa0170d495b9bedb48d0003a1764cdfbd8c33bc"
   }
 }
