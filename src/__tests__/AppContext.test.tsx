@@ -1,7 +1,7 @@
 import { act, render, waitFor } from '@testing-library/react-native';
 import React from 'react';
 
-import type { ChatMessage, Conversation, DocumentAttachment, ProviderProfile } from '../domain';
+import type { ChatMessage, ComposerMode, Conversation, DocumentAttachment, ProviderProfile, ReferenceImage } from '../domain';
 
 let mockProviders: ProviderProfile[] = [];
 let mockConversations: Conversation[] = [];
@@ -67,12 +67,13 @@ import { RemoteImageDownloadError } from '../storage/files';
 
 let app: ReturnType<typeof useApp>;
 function Probe() { app = useApp(); return null; }
-async function mount(mode: 'image' | 'chat' = 'image') {
+async function mount(mode: ComposerMode = 'image') {
   await render(<AppProvider><Probe /></AppProvider>);
   await waitFor(() => expect(app.ready).toBe(true));
   await act(async () => { await app.setComposerMode(mode); });
 }
 const pdf: DocumentAttachment = { id: 'doc', uri: 'file:///document.pdf', name: '场地方案.pdf', mimeType: 'application/pdf', size: 128 };
+const illustrativeImage: ReferenceImage = { id: 'ref', uri: 'file:///示意.png', name: '示意.png', mimeType: 'image/png', size: 128 };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -101,6 +102,47 @@ test('chat stores assistant text in the conversation without invoking generation
   expect(mockGenerate).not.toHaveBeenCalled();
   expect(mockPrepare).not.toHaveBeenCalled();
   expect(app.messages[1]).toMatchObject({ role: 'assistant', mode: 'chat', status: 'complete', text: '足球场有两侧看台。', imageUri: null });
+});
+
+test('auto mode confirms a paid image request through chat before generation', async () => {
+  await mount('auto');
+  await act(async () => { await app.sendPrompt('生成一张足球场宣传海报', [], undefined, false); });
+  expect(mockPrepare).toHaveBeenCalledTimes(1);
+  expect(mockGenerate).toHaveBeenCalledTimes(1);
+  expect(mockOrder).toEqual(['analyze', 'persist-prepared', 'generate']);
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ prompt: '用户要求与文档整合后的作图说明' }));
+});
+
+test('auto mode can start from a chat-only provider and use a separate image provider', async () => {
+  await mount('auto');
+  await act(async () => { await app.activateProvider('analysis-provider'); });
+  await act(async () => { await app.sendPrompt('生成一张足球场图片', [], undefined, false); });
+  expect(mockPrepare).toHaveBeenCalledWith(expect.objectContaining({
+    baseUrl: 'https://chat.example.com/v1', model: 'vision-model', apiKey: 'analysis-provider-test-key',
+  }));
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({
+    baseUrl: 'https://images.example.com/v1', model: 'image-model', apiKey: 'image-provider-test-key',
+  }));
+  expect(app.activeConversation).toMatchObject({ providerId: 'analysis-provider', mode: 'auto' });
+  expect(app.messages[1]).toMatchObject({ providerId: 'image-provider', mode: 'generate' });
+});
+
+test('auto mode analyses a PDF first, then reuses it when the next turn asks for an image', async () => {
+  await mount('auto');
+  await act(async () => { await app.sendPrompt('请分析这份方案', [], undefined, false, [pdf]); });
+  expect(mockSendChat).toHaveBeenCalledTimes(1);
+  expect(mockGenerate).not.toHaveBeenCalled();
+  await act(async () => { await app.sendPrompt('根据刚才的方案生成一张宣传海报', [], undefined, false); });
+  expect(mockPrepare).toHaveBeenCalledWith(expect.objectContaining({ documents: [pdf], history: expect.any(Array) }));
+  expect(mockGenerate).toHaveBeenCalledTimes(1);
+});
+
+test('auto mode treats a reference image used for analysis as chat context', async () => {
+  await mount('auto');
+  await act(async () => { await app.sendPrompt('请分析这张示意图', [illustrativeImage], undefined, false); });
+  expect(mockSendChat).toHaveBeenCalledTimes(1);
+  expect(mockPrepare).not.toHaveBeenCalled();
+  expect(mockGenerate).not.toHaveBeenCalled();
 });
 
 test('PDF-assisted generation uses the selected analysis key and persists analysis before generation', async () => {

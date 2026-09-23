@@ -5,7 +5,7 @@ jest.mock('../storage/files', () => ({
   downloadPng: jest.fn(async (url: string) => `file://download-${url.split('/').pop()}`),
 }));
 
-import { buildEditFields, buildGenerationBody, editImage, findImagePayload, persistApiResult } from '../api/image-api';
+import { buildEditFields, buildGenerationBody, editImage, findImagePayload, generateImage, persistApiResult } from '../api/image-api';
 
 const common = {
   model: 'gpt-image-2.5-sunburst',
@@ -74,6 +74,17 @@ describe('OpenAI-compatible image payloads', () => {
 
   test('downloads URL responses', async () => {
     await expect(persistApiResult({ data: [{ url: 'https://cdn.example/result.png' }] })).resolves.toBe('file://download-result.png');
+  });
+
+  test('uses one alternate Android fetch transport after a pre-response failure', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch')
+      .mockRejectedValueOnce(new Error('Network request failed'))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ b64_json: 'YWJjZA==' }] }) } as Response);
+    await expect(generateImage({
+      ...common, baseUrl: 'https://salcara.top/v1', apiKey: 'test-key', transparent: false,
+    })).resolves.toBe('file://base64-YWJj.png');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fetchMock.mockRestore();
   });
 
   test('uses inline data URLs without another network dependency', async () => {

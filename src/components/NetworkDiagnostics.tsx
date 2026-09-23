@@ -35,7 +35,7 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
     setBusy(true);
     setResults([]);
     const timeout = setTimeout(() => controller.abort(), 12_000);
-    const probe = async (url: string, label: string, apiKey?: string | null): Promise<Probe> => {
+    const probe = async (url: string, label: string, apiKey?: string | null, method: 'GET' | 'HEAD' = 'GET'): Promise<Probe> => {
       const started = Date.now();
       let reachable = false;
       let message: string;
@@ -46,16 +46,16 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
             : { Authorization: `Bearer ${apiKey.trim()}` }
           : undefined;
         const response = await fetch(url, {
-          method: label === '图片服务器' ? 'HEAD' : 'GET',
+          method,
           headers,
           signal: controller.signal,
           credentials: 'omit',
           redirect: apiKey ? 'error' : 'follow',
         });
         reachable = true;
-        if (response.ok) message = label === '图片服务器' ? '图片地址可连接（未下载图片）' : '模型接口可连接';
+        if (response.ok) message = label === '图片服务器' ? '图片地址可连接（未下载图片）' : label === '生图接口' ? '生图接口路由可连接（仅 HEAD，未生成图片）' : '模型接口可连接';
         else if (response.status === 401 || response.status === 403) message = `服务器可连接，但拒绝访问（HTTP ${response.status}）。请检查密钥或链接是否过期。`;
-        else if (response.status === 405) message = '服务器可连接，但不支持探测方法；需要实际下载才能确认。';
+        else if (response.status === 405) message = label === '生图接口' ? '生图接口路由可连接，但服务商不支持 HEAD 探测；未生成图片。' : '服务器可连接，但不支持探测方法；需要实际下载才能确认。';
         else message = `服务器可连接，返回 HTTP ${response.status}；请检查地址或服务商状态。`;
         await response.body?.cancel().catch(() => undefined);
       } catch (error) {
@@ -67,8 +67,11 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
       const key = await getProviderKey(providerId);
       if (controller.signal.aborted) return;
       if (!key) throw new Error('未找到当前服务商密钥，请重新保存服务商。');
-      const probes = [probe(imageEndpoint(baseUrl, 'models'), 'API 服务器', key)];
-      if (imageUrl && /^https?:\/\//i.test(imageUrl)) probes.push(probe(imageUrl, '图片服务器'));
+      const probes = [
+        probe(imageEndpoint(baseUrl, 'models'), 'API 服务器', key),
+        probe(imageEndpoint(baseUrl, 'images/generations'), '生图接口', key, 'HEAD'),
+      ];
+      if (imageUrl && /^https?:\/\//i.test(imageUrl)) probes.push(probe(imageUrl, '图片服务器', undefined, 'HEAD'));
       const result = await Promise.all(probes);
       if (controllerRef.current === controller) setResults(result);
     } catch (error) {
@@ -86,7 +89,7 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
     <Sheet visible={visible} title="网络诊断" onClose={() => { controllerRef.current?.abort(); onClose(); }}>
       <View style={styles.body}>
       <Text style={styles.intro}>检测当前手机网络与所选服务商的连接，不生成图片，也不消耗模型额度。密钥只发往你配置的 API 地址。</Text>
-      <View style={styles.note}><Text style={styles.noteText}>网站、API 和图片下载可能使用不同域名。你可以先关闭节点检测，再开启节点对比结果；同一个网站能打开，并不表示图片服务器也可连接。</Text></View>
+      <View style={styles.note}><Text style={styles.noteText}>网站、模型列表和生图 POST 是不同链路。这里会额外用不扣费的 HEAD 探测生图接口路由；同一个网站或 /models 能打开，并不表示生图接口一定能完成请求。</Text></View>
       {results.map((result) => (
         <View key={result.label} style={styles.result}>
           <Text style={styles.label}>{result.label} · {result.host}</Text>

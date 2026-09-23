@@ -2,7 +2,7 @@ import { File } from 'expo-file-system';
 import { fetch } from 'expo/fetch';
 
 import type { ImageApiResponse, Quality, ReferenceImage } from '../domain';
-import { imageEndpoint, normalizeBaseUrl, parseImageModels, redactSensitiveText } from '../domain-utils';
+import { createId, imageEndpoint, normalizeBaseUrl, parseImageModels, redactSensitiveText } from '../domain-utils';
 import { downloadPng, saveBase64Png } from '../storage/files';
 import { isAbortError, networkFailureMessage } from './network';
 
@@ -190,12 +190,36 @@ async function requestImageApi(url: string, options: Parameters<typeof fetch>[1]
     return await parseResponse(await fetch(url, { ...options, redirect: 'error', credentials: 'omit' }));
   } catch (error) {
     if (error instanceof ImageApiError || isAbortError(error)) throw error;
+    // Expo's streaming fetch and React Native's built-in fetch use different
+    // native plumbing on some Android versions. If the first transport fails
+    // before receiving an HTTP response, make one alternate-transport attempt
+    // with the exact same request. We never retry after an HTTP error, and we
+    // never follow redirects that could leak the API key.
+    const alternateFetch = globalThis.fetch;
+    if (typeof alternateFetch === 'function' && alternateFetch !== fetch && isTransportFailure(error)) {
+      try {
+        return await parseResponse(await alternateFetch(url, { ...options, redirect: 'error', credentials: 'omit' }));
+      } catch (alternateError) {
+        if (alternateError instanceof ImageApiError || isAbortError(alternateError)) throw alternateError;
+        throw new ImageApiError(networkFailureMessage(url, '生图接口', alternateError));
+      }
+    }
     throw new ImageApiError(networkFailureMessage(url, '生图接口', error));
   }
 }
 
+function isTransportFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return !isAbortError(error) && !/redirect|HTTP\s*\d{3}|status\s*\d{3}/i.test(error.message);
+}
+
 function authorizationHeaders(apiKey: string): Record<string, string> {
-  return { Authorization: `Bearer ${apiKey.trim()}` };
+  return {
+    Authorization: `Bearer ${apiKey.trim()}`,
+    Accept: 'application/json',
+    'User-Agent': 'Salcara-AI-Android',
+    'X-Client-Request-Id': createId(),
+  };
 }
 
 async function parseResponse(response: Response): Promise<ImageApiResponse | Record<string, unknown>> {

@@ -72,7 +72,7 @@ export function ConversationDrawer({
               >
                 <View style={styles.rowBody}>
                   <Text style={styles.title} numberOfLines={1}>{conversation.title}</Text>
-                  <Text style={styles.meta}>{conversation.mode === 'chat' ? '对话' : '生图'} · {providerName(conversation.providerId)}</Text>
+                  <Text style={styles.meta}>{conversation.mode === 'chat' ? '对话' : conversation.mode === 'image' ? '生图' : '自动'} · {providerName(conversation.providerId)}</Text>
                 </View>
                 <Pressable
                   accessibilityLabel="删除会话"

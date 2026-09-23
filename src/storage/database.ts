@@ -117,6 +117,8 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         chat_api: "TEXT NOT NULL DEFAULT 'chat-completions'",
         analysis_provider_id: 'TEXT',
       });
+      // Existing installs receive the legacy image default for rows created by
+      // the old schema; all new rows are written explicitly as auto below.
       await addMissingColumns(db, 'conversations', { mode: "TEXT NOT NULL DEFAULT 'image'" });
       await addMissingColumns(db, 'messages', {
         remote_image_url: 'TEXT',
@@ -230,7 +232,7 @@ export async function insertConversation(conversation: Conversation): Promise<vo
     conversation.title,
     conversation.providerId,
     conversation.transparent ? 1 : 0,
-    conversation.mode ?? 'chat',
+    conversation.mode ?? 'auto',
     conversation.createdAt,
     conversation.updatedAt,
   );
@@ -242,7 +244,7 @@ export async function updateConversation(conversation: Conversation): Promise<vo
     conversation.title,
     conversation.providerId,
     conversation.transparent ? 1 : 0,
-    conversation.mode ?? 'chat',
+    conversation.mode ?? 'auto',
     conversation.updatedAt,
     conversation.id,
   );
@@ -344,7 +346,7 @@ function mapConversation(row: ConversationRow): Conversation {
     title: row.title,
     providerId: row.provider_id,
     transparent: row.transparent === 1,
-    mode: row.mode === 'chat' ? 'chat' : 'image',
+    mode: row.mode === 'chat' ? 'chat' : row.mode === 'auto' ? 'auto' : 'image',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

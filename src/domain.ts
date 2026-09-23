@@ -3,6 +3,8 @@ export type AspectRatio = '1:1' | '16:9' | '9:16';
 export type ResolutionTier = '1K' | '2K' | '4K';
 export type MessageStatus = 'pending' | 'complete' | 'error' | 'cancelled' | 'interrupted';
 export type MessageMode = 'generate' | 'edit' | 'chat';
+/** How the composer chooses between the independent chat and image APIs. */
+export type ComposerMode = 'auto' | 'image' | 'chat';
 export type ChatApi = 'chat-completions' | 'responses' | 'anthropic';
 /** How a local attachment is prepared before it is sent to a model. */
 export type AttachmentKind = 'pdf' | 'text' | 'office' | 'archive' | 'image' | 'binary';
@@ -27,7 +29,8 @@ export interface Conversation {
   title: string;
   providerId: string;
   transparent: boolean;
-  mode?: 'image' | 'chat';
+  /** New conversations default to auto. Old installs may still contain chat/image. */
+  mode?: ComposerMode;
   createdAt: number;
   updatedAt: number;
 }

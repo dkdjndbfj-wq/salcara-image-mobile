@@ -39,7 +39,7 @@ test('explains reachable-but-unauthorized responses instead of calling them netw
   mockFetch.mockResolvedValue({ ok: false, status: 401 });
   const screen = await render(<NetworkDiagnostics visible onClose={jest.fn()} providerId="provider" baseUrl="https://api.example" />);
   await fireEvent.press(screen.getByText('检测当前网络'));
-  await waitFor(() => expect(screen.getByText(/服务器可连接，但拒绝访问/)).toBeTruthy());
+  await waitFor(() => expect(screen.getAllByText(/服务器可连接，但拒绝访问/).length).toBeGreaterThanOrEqual(1));
 });
 
 test('uses native Claude authentication only for the configured API host', async () => {
@@ -66,7 +66,7 @@ test('closing diagnostics aborts the active request', async () => {
   const onClose = jest.fn();
   const screen = await render(<NetworkDiagnostics visible onClose={onClose} providerId="provider" baseUrl="https://api.example" />);
   await fireEvent.press(screen.getByText('检测当前网络'));
-  await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
   await fireEvent.press(screen.getByLabelText('关闭'));
   expect(mockFetch.mock.calls[0][1].signal.aborted).toBe(true);
   expect(onClose).toHaveBeenCalledTimes(1);

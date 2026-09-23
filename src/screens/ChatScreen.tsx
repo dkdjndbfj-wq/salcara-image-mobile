@@ -52,8 +52,14 @@ export function ChatScreen() {
   const [prompt, setPrompt] = useState('');
   const [references, setReferences] = useState<ReferenceImage[]>([]);
   const [documents, setDocuments] = useState<DocumentAttachment[]>([]);
-  const isChat = app.composerMode === 'chat';
-  const analyst = app.providers.find((item) => item.id === (app.activeProvider?.analysisProviderId || app.activeProvider?.id));
+  const isChatOnly = app.composerMode === 'chat';
+  const isImageOnly = app.composerMode === 'image';
+  const isAuto = app.composerMode === 'auto';
+  const imageProvider = app.activeProvider?.model ? app.activeProvider : app.providers.find((item) => item.model);
+  const chatProvider = app.activeProvider?.chatModel
+    ? app.activeProvider
+    : (app.activeProvider?.analysisProviderId && app.providers.find((item) => item.id === app.activeProvider?.analysisProviderId && item.chatModel))
+      || app.providers.find((item) => item.chatModel);
   const [continueFromPrevious, setContinueFromPrevious] = useState(true);
   const [maskUri, setMaskUri] = useState<string | null>(null);
   const [drawerVisible, setDrawerVisible] = useState(false);
@@ -63,6 +69,7 @@ export function ChatScreen() {
   const [appSettingsVisible, setAppSettingsVisible] = useState(false);
   const [networkVisible, setNetworkVisible] = useState(false);
   const [attachmentsVisible, setAttachmentsVisible] = useState(false);
+  const [routeVisible, setRouteVisible] = useState(false);
   const [maskVisible, setMaskVisible] = useState(false);
   const [preparingMask, setPreparingMask] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
@@ -169,10 +176,6 @@ export function ChatScreen() {
       setProvidersVisible(true);
       return;
     }
-    if (isChat ? !analyst?.chatModel : !app.activeProvider.model || !app.activeProvider.quality || !app.activeProvider.aspectRatio || !app.activeProvider.resolutionTier) {
-      setSettingsVisible(true);
-      return;
-    }
     if (!text && !references.length && !documents.length) {
       setDialog({ title: '还没有内容', message: '请输入问题，或先添加图片 / 文件让 AI 分析。', icon: 'create-outline' });
       return;
@@ -250,33 +253,35 @@ export function ChatScreen() {
 
   const transparent = app.activeConversation?.transparent ?? false;
   const previousResult = latestCompletedImage(app.messages);
-  const continuingFromPrevious = Boolean(!isChat && continueFromPrevious && references.length === 0 && previousResult?.imageUri);
+  const continuingFromPrevious = Boolean(!isChatOnly && continueFromPrevious && references.length === 0 && previousResult?.imageUri);
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.header}>
         <IconButton icon="menu" label="打开会话" onPress={() => setDrawerVisible(true)} />
         <Pressable style={styles.headerInfo} onPress={() => setProvidersVisible(true)}>
           <Text style={styles.providerName} numberOfLines={1}>Salcara AI</Text>
-          <Text style={styles.modelName} numberOfLines={1}>{app.activeProvider ? `${isChat ? '对话' : '图片创作'} · ${isChat ? analyst?.chatModel ?? '选择对话模型' : app.activeProvider.model ?? '选择生图模型'}` : '点击添加服务商'}</Text>
+          <Text style={styles.modelName} numberOfLines={1}>{app.activeProvider ? isAuto ? `自动判断 · ${chatProvider?.chatModel ?? '对话模型'} / ${imageProvider?.model ?? '图片模型'}` : isChatOnly ? `对话 · ${chatProvider?.chatModel ?? '选择对话模型'}` : `图片创作 · ${imageProvider?.model ?? '选择生图模型'}` : '点击添加服务商'}</Text>
         </Pressable>
-        <IconButton icon="options-outline" label={isChat ? '对话设置' : '生成设置'} onPress={() => app.activeProvider ? setSettingsVisible(true) : setProvidersVisible(true)} />
+        <IconButton icon="options-outline" label={isChatOnly ? '对话设置' : isImageOnly ? '生成设置' : '模型设置'} onPress={() => app.activeProvider ? setSettingsVisible(true) : setProvidersVisible(true)} />
       </View>
-      <View style={styles.modeRow}>
-        {(['chat', 'image'] as const).map((mode) => <Chip key={mode} label={mode === 'image' ? '图片创作' : '对话'} selected={app.composerMode === mode} onPress={() => void app.setComposerMode(mode).catch((error) => setDialog({ title: '暂时无法切换', message: error.message }))} />)}
-      </View>
+      <Pressable style={styles.routeBar} onPress={() => setRouteVisible(true)} accessibilityRole="button" accessibilityLabel="选择发送方式">
+        <Ionicons name={isAuto ? 'sparkles-outline' : isChatOnly ? 'chatbubbles-outline' : 'image-outline'} size={16} color={colors.primaryStrong} />
+        <Text style={styles.routeBarText}>{isAuto ? '自动判断发送方式' : isChatOnly ? '仅对话' : '仅图片创作'}</Text>
+        <Ionicons name="chevron-down" size={15} color={colors.textMuted} />
+      </Pressable>
 
       <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
         {app.messages.length === 0 ? (
           <Animated.View entering={FadeIn.duration(280)} style={styles.emptyState}>
             <View style={styles.logo}><Ionicons name="sparkles" size={30} color={colors.primaryStrong} /></View>
-            <Text style={styles.emptyTitle}>{isChat ? '你好，我是 Salcara AI' : '图片创作模式'}</Text>
-            <Text style={styles.emptyText}>{app.activeProvider ? isChat ? '可以对话、分析图片和文件，也可以在同一会话里继续修改上一张生成图。' : '输入画面描述，或添加参考图开始创作。需要通用问答时切换回“对话”。' : '先添加一个服务商，再开始对话、分析文件或生成图片。'}</Text>
-            {isChat && app.activeProvider && <View style={styles.quickCards}>
+            <Text style={styles.emptyTitle}>{isAuto ? '你好，我是 Salcara AI' : isChatOnly ? '你好，我是 Salcara AI' : '图片创作模式'}</Text>
+            <Text style={styles.emptyText}>{app.activeProvider ? isAuto ? '像 ChatGPT 一样，在同一会话里对话、分析文件、生成图片和继续修改上一张图。只有明确要求出图时才调用图片 API。' : isChatOnly ? '可以对话、分析图片和文件；当前不会调用图片生成接口。' : '输入画面描述，或添加参考图开始创作。文件会先由对话模型整理要求，再调用图片接口。' : '先添加一个服务商，再开始对话、分析文件或生成图片。'}</Text>
+            {(isAuto || isChatOnly) && app.activeProvider && <View style={styles.quickCards}>
               {[
                 ['document-text-outline', '总结这份文件', '上传 PDF、Word、表格或代码'],
                 ['image-outline', '分析这张图片', '识别内容并给出建议'],
-                ['sparkles-outline', '开始图片创作', '切换模式生成或修改图片'],
-              ].map(([icon, title, hint]) => <Pressable key={title} style={styles.quickCard} onPress={() => { if (title === '开始图片创作') void app.setComposerMode('image'); else setPrompt(title === '分析这张图片' ? '请分析这张图片。' : '请总结这份文件。'); }}>
+                ['sparkles-outline', '开始图片创作', '输入“生成/修改一张图片”即可自动路由'],
+              ].map(([icon, title, hint]) => <Pressable key={title} style={styles.quickCard} onPress={() => { setPrompt(title === '分析这张图片' ? '请分析这张图片。' : title === '总结这份文件' ? '请总结这份文件。' : '生成一张图片：'); }}>
                 <Ionicons name={icon as React.ComponentProps<typeof Ionicons>['name']} size={20} color={colors.primaryStrong} />
                 <Text style={styles.quickCardTitle}>{title}</Text><Text style={styles.quickCardHint}>{hint}</Text>
               </Pressable>)}
@@ -323,7 +328,7 @@ export function ChatScreen() {
               </Pressable>
             </View>
           )}
-          <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => void openMaskEditor()} hasMask={Boolean(maskUri)} allowMask={!isChat} />
+          <ReferenceTray images={references} onChange={changeReferences} onEditMask={() => void openMaskEditor()} hasMask={Boolean(maskUri)} allowMask={!isChatOnly} />
           {documents.length > 0 && <ScrollView horizontal style={styles.documentTray} contentContainerStyle={{ gap: 8 }}>
             {documents.map((document) => <View key={document.id} style={styles.documentChip}>
               <Ionicons name={attachmentIcon(document.name, document.mimeType)} size={20} color={colors.primaryStrong} />
@@ -332,7 +337,7 @@ export function ChatScreen() {
             </View>)}
           </ScrollView>}
           <View style={styles.quickSettings}>
-            {!isChat && <AnimatedPressable style={[styles.transparent, transparentAnimatedStyle]} disabled={!app.activeProvider || app.generating} onPress={() => void app.toggleTransparent().catch((error) => setDialog({ title: '无法切换透明背景', message: error instanceof Error ? error.message : '请稍后再试。' }))}>
+            {!isChatOnly && <AnimatedPressable style={[styles.transparent, transparentAnimatedStyle]} disabled={!app.activeProvider || app.generating} onPress={() => void app.toggleTransparent().catch((error) => setDialog({ title: '无法切换透明背景', message: error instanceof Error ? error.message : '请稍后再试。' }))}>
               <Ionicons name="layers-outline" size={17} color={transparent ? colors.primaryStrong : colors.textMuted} />
               <Text style={[styles.transparentText, transparent && styles.transparentTextActive]}>透明背景</Text>
             </AnimatedPressable>}
@@ -340,22 +345,23 @@ export function ChatScreen() {
               <Pressable onPress={() => setSettingsVisible(true)} style={styles.settingsSummary}>
                 <Ionicons name="options-outline" size={15} color={colors.textMuted} />
                 <Text style={styles.settingsText}>
-                  {isChat ? '模型与接口' : app.activeProvider.quality && app.activeProvider.aspectRatio && app.activeProvider.resolutionTier
-                    ? `${app.activeProvider.quality} · ${app.activeProvider.aspectRatio} · ${app.activeProvider.resolutionTier}`
+                  {isAuto ? '自动判断 · 模型设置' : isChatOnly ? '模型与接口' : imageProvider?.quality && imageProvider.aspectRatio && imageProvider.resolutionTier
+                    ? `${imageProvider.quality} · ${imageProvider.aspectRatio} · ${imageProvider.resolutionTier}`
                     : '设置生成参数'}
                 </Text>
               </Pressable>
             )}
           </View>
-          {!isChat && transparent && <Text style={styles.compatibilityHint}>已请求透明 PNG，实际透明能力由服务商决定。</Text>}
-          {!isChat && documents.length > 0 && <Text style={styles.compatibilityHint}>将通过 {analyst?.chatModel ? `${analyst.name} / ${analyst.chatModel}` : '待配置的对话模型'} 解析文件后生图；解析与生图分别计费。</Text>}
-          {isChat && (documents.length > 0 || references.length > 0) && <Text style={styles.compatibilityHint}>已选 {documents.length + references.length} 个附件 · 文本和办公文件优先本地提取</Text>}
+          {!isChatOnly && transparent && <Text style={styles.compatibilityHint}>已请求透明 PNG，实际透明能力由服务商决定。</Text>}
+          {isImageOnly && documents.length > 0 && <Text style={styles.compatibilityHint}>将通过 {chatProvider?.chatModel ? `${chatProvider.name} / ${chatProvider.chatModel}` : '待配置的对话模型'} 解析文件后生图；解析与生图分别计费。</Text>}
+          {isAuto && documents.length > 0 && <Text style={styles.compatibilityHint}>发送后先判断：普通问题只分析文件；明确写“生成/修改图片”才会继续调用图片 API。</Text>}
+          {(isChatOnly || isAuto) && (documents.length > 0 || references.length > 0) && <Text style={styles.compatibilityHint}>已选 {documents.length + references.length} 个附件 · 文本和办公文件优先本地提取</Text>}
           <View style={styles.composer}>
             <IconButton icon="add" label="添加图片或文件" disabled={app.generating} onPress={() => setAttachmentsVisible(true)} />
             <TextInput
               value={prompt}
               onChangeText={setPrompt}
-              placeholder={isChat ? '输入问题，或让我分析附件…' : documents.length ? '描述如何根据文件生成图片…' : references.length || continuingFromPrevious ? '描述如何修改图片…' : '描述你想生成的图片…'}
+              placeholder={isAuto ? '输入问题，或描述要生成 / 修改的图片…' : isChatOnly ? '输入问题，或让我分析附件…' : documents.length ? '描述如何根据文件生成图片…' : references.length || continuingFromPrevious ? '描述如何修改图片…' : '描述你想生成的图片…'}
               placeholderTextColor={colors.textMuted}
               multiline
               maxLength={4000}
@@ -387,6 +393,19 @@ export function ChatScreen() {
       <SettingsSheet visible={settingsVisible} onClose={() => setSettingsVisible(false)} />
       <AboutSheet visible={aboutVisible} onClose={() => setAboutVisible(false)} onCheckUpdates={() => setUpdateCheckToken((value) => value + 1)} />
       <AppSettingsSheet visible={appSettingsVisible} onClose={() => setAppSettingsVisible(false)} />
+      <Sheet visible={routeVisible} title="发送方式" onClose={() => setRouteVisible(false)}>
+        <View style={styles.routeOptions}>
+          <Text style={styles.routeTitle}>同一个对话里自动选择接口</Text>
+          <Text style={styles.routeHint}>上传图片、PDF 或 Word 默认只做对话分析。明确要求生成或修改图片时，先由对话 API 确认并整理要求，再调用独立图片 API；图片本身不会自动触发生图。</Text>
+          <View style={styles.routeChips}>
+            {([
+              ['auto', '自动判断（推荐）'],
+              ['chat', '仅对话'],
+              ['image', '仅图片创作'],
+            ] as const).map(([mode, label]) => <Chip key={mode} label={label} selected={app.composerMode === mode} onPress={() => void app.setComposerMode(mode).then(() => setRouteVisible(false)).catch((error) => setDialog({ title: '暂时无法切换', message: error instanceof Error ? error.message : '请稍后再试。' }))} />)}
+          </View>
+        </View>
+      </Sheet>
       <Sheet visible={attachmentsVisible} title="添加附件" onClose={() => setAttachmentsVisible(false)}>
         <View style={styles.attachmentOptions}>
           <AttachmentOption icon="images-outline" title="从相册选择" subtitle="PNG、JPEG 或 WebP" onPress={() => void addReferences('gallery')} />
@@ -402,7 +421,7 @@ export function ChatScreen() {
         <ActivityIndicator color={colors.primaryStrong} />
       </AppDialog>
       <UpdateManager manualCheckToken={updateCheckToken} />
-      <NetworkDiagnostics visible={networkVisible} onClose={() => setNetworkVisible(false)} providerId={(isChat ? analyst?.id : app.activeProvider?.id) ?? ''} baseUrl={(isChat ? analyst?.baseUrl : app.activeProvider?.baseUrl) ?? ''} api={isChat ? analyst?.chatApi : app.activeProvider?.chatApi} imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
+      <NetworkDiagnostics visible={networkVisible} onClose={() => setNetworkVisible(false)} providerId={(isChatOnly ? chatProvider?.id : imageProvider?.id) ?? ''} baseUrl={(isChatOnly ? chatProvider?.baseUrl : imageProvider?.baseUrl) ?? ''} api={isChatOnly ? chatProvider?.chatApi : imageProvider?.chatApi} imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
     </SafeAreaView>
   );
 }
@@ -424,7 +443,12 @@ const styles = StyleSheet.create({
   loadingText: { color: colors.textMuted },
   header: { minHeight: 66, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, gap: spacing.md, borderBottomWidth: 1, borderColor: colors.border },
   headerInfo: { flex: 1, alignItems: 'center', gap: 2 },
-  modeRow: { flexDirection: 'row', gap: 8, justifyContent: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: colors.border },
+  routeBar: { minHeight: 34, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.background },
+  routeBarText: { color: colors.primaryStrong, fontSize: 12, fontWeight: '700' },
+  routeOptions: { padding: spacing.lg, gap: spacing.md },
+  routeTitle: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  routeHint: { color: colors.textMuted, fontSize: 12, lineHeight: 19 },
+  routeChips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   documentTray: { flexGrow: 0, marginHorizontal: spacing.md, marginTop: 8, maxHeight: 64 },
   documentChip: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderRadius: radius.md, backgroundColor: colors.blueSurface },
   documentName: { color: colors.text, fontSize: 12, fontWeight: '600' },
