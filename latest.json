@@ -1,15 +1,15 @@
 {
-  "version": "1.3.2",
-  "tagName": "v1.3.2",
-  "title": "Salcara AI v1.3.2",
-  "notes": "# Salcara AI v1.3.2\n\n## 统一对话与图片创作\n\n- 默认使用一个 ChatGPT 风格输入框，自动判断每条消息是普通对话、图片/文件分析、图片生成还是图片编辑。\n- 图片只是示意时不会触发生图；“分析、识别、描述、总结”等请求只发送到对话服务商。\n- 明确要求生成或修改图片时，先由独立对话 API 检查并整理作图要求，再调用图片 API；对话步骤失败不会继续发起付费生图。\n- 在同一会话上传 PDF/Word 并分析后，下一条明确的生图请求会沿用历史文件上下文。\n- 保留“仅对话”和“仅图片创作”手动覆盖，兼容旧会话和只配置 Images API 的高级用法。\n\n## 配置与安全\n\n- 对话服务商和图片服务商可以使用完全不同的地址、密钥和模型。\n- 自动生图找不到对话模型时会在付费图片请求前停止并提示配置，不会盲目扣费。\n- 已保存的作图说明会用于手动重试，避免重复解析；图片 URL 下载失败只重试下载，不重新提交生图。\n\n## 发布\n\n这是 Android `versionCode 10` 的覆盖安装版本。APK、SHA-256、安装说明和隐私说明见 GitHub Release 页面。\n\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.3.2",
-  "publishedAt": "2026-09-23T11:29:15Z",
+  "version": "1.3.4",
+  "tagName": "v1.3.4",
+  "title": "Salcara AI v1.3.4",
+  "notes": "# Salcara AI v1.3.4\n\n## 更保守的自动生图判断\n\n- “帮我生成图片提示词”“生成图片需要什么参数”“把文字改得更正式”等普通对话不会触发生图扣费。\n- “把这张图变成赛博朋克风格”“将背景改成蓝色”等明确图片编辑请求仍会自动进入图片编辑流程。\n- 继续保留图片附件仅用于分析时的对话路由，以及生图前先由对话 API 整理要求的安全步骤。\n- 自动模式的网络诊断会分别探测对话服务商和图片服务商，避免把“对话能连通”误认为“图片接口也能连通”。\n\n这是 Android `versionCode 12` 的覆盖安装版本。APK、SHA-256、安装说明和隐私说明见 GitHub Release 页面。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.3.4",
+  "publishedAt": "2026-09-23T16:30:07Z",
   "apk": {
-    "name": "salcara-image-android-v1.3.2.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.3.2/salcara-image-android-v1.3.2.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/583634748",
-    "size": 100101632,
-    "digest": "sha256:5910456433fecd4e3d033fd18aa0170d495b9bedb48d0003a1764cdfbd8c33bc"
+    "name": "salcara-image-android-v1.3.4.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.3.4/salcara-image-android-v1.3.4.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/584157638",
+    "size": 100109368,
+    "digest": "sha256:011fff0e581bf833ae0ec581e7977462c9fae84ba7df8e89e7a9dfc3afa86f13"
   }
 }
