@@ -33,7 +33,7 @@ function emptyForm(): FormState {
   return { id: null, name: '', baseUrl: '', apiKey: '', model: '', chatModel: '', chatApi: 'chat-completions', analysisProviderId: null, quality: null, aspectRatio: null, resolutionTier: null, createdAt: Date.now() };
 }
 
-export function ProviderManager({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+export function ProviderManager({ visible, onClose, focusProviderId }: { visible: boolean; onClose: () => void; focusProviderId?: string | null }) {
   const { providers, activeProvider, reloadProviders, activateProvider, removeProvider, generating } = useApp();
   const [form, setForm] = useState<FormState>(emptyForm);
   const [models, setModels] = useState<string[]>([]);
@@ -65,6 +65,17 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
     setPurpose(provider.model && provider.chatModel ? 'both' : provider.model ? 'image' : 'chat');
     setTested(false); setAdvancedOpen(false); setEditorOpen(true);
   };
+
+  // Settings can send the user directly to the selected image provider. This
+  // keeps the common “change model” path one tap shorter than opening the
+  // provider list and then guessing which row to edit.
+  useEffect(() => {
+    if (!visible || !focusProviderId) return;
+    const provider = providers.find((item) => item.id === focusProviderId);
+    if (provider) editProvider(provider);
+    // editProvider intentionally snapshots the selected provider once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, focusProviderId]);
 
   const testConnection = async () => {
     try {
@@ -116,8 +127,8 @@ export function ProviderManager({ visible, onClose }: { visible: boolean; onClos
       {!editorOpen ? (
         <View style={styles.page}>
           <View style={styles.introCard}>
-            <View style={styles.introIcon}><Ionicons name="sparkles-outline" size={22} color={colors.primaryStrong} /></View>
-            <View style={styles.introCopy}><Text style={styles.introTitle}>分别配置对话和图片 API</Text><Text style={styles.introHint}>生图服务商只需要 Images 权限；对话服务商单独填写 Chat / Responses / Claude 接口。</Text></View>
+            <View style={styles.introCopy}><Text style={styles.introTitle}>服务商</Text><Text style={styles.introHint}>对话和图片 API 可以分别保存，按能力自动路由。</Text></View>
+            <Ionicons name="server-outline" size={20} color={colors.primaryStrong} />
           </View>
           <View style={styles.addChoices}>
             <Pressable style={styles.addChoice} onPress={() => openNew('chat')}><View style={styles.addChoiceIcon}><Ionicons name="chatbubbles-outline" size={20} color={colors.primaryStrong} /></View><Text style={styles.addChoiceTitle}>添加对话服务商</Text><Text style={styles.addChoiceHint}>问答、视觉、文件</Text></Pressable>

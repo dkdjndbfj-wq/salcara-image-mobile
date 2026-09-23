@@ -64,6 +64,7 @@ export function ChatScreen() {
   const [maskUri, setMaskUri] = useState<string | null>(null);
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [providersVisible, setProvidersVisible] = useState(false);
+  const [providerFocusId, setProviderFocusId] = useState<string | null>(null);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [aboutVisible, setAboutVisible] = useState(false);
   const [appSettingsVisible, setAppSettingsVisible] = useState(false);
@@ -274,16 +275,17 @@ export function ChatScreen() {
         {app.messages.length === 0 ? (
           <Animated.View entering={FadeIn.duration(280)} style={styles.emptyState}>
             <View style={styles.logo}><Ionicons name="sparkles" size={30} color={colors.primaryStrong} /></View>
-            <Text style={styles.emptyTitle}>{isAuto ? '你好，我是 Salcara AI' : isChatOnly ? '你好，我是 Salcara AI' : '图片创作模式'}</Text>
-            <Text style={styles.emptyText}>{app.activeProvider ? isAuto ? '像 ChatGPT 一样，在同一会话里对话、分析文件、生成图片和继续修改上一张图。只有明确要求出图时才调用图片 API。' : isChatOnly ? '可以对话、分析图片和文件；当前不会调用图片生成接口。' : '输入画面描述，或添加参考图开始创作。文件会先由对话模型整理要求，再调用图片接口。' : '先添加一个服务商，再开始对话、分析文件或生成图片。'}</Text>
-            {(isAuto || isChatOnly) && app.activeProvider && <View style={styles.quickCards}>
+            <Text style={styles.emptyTitle}>{isImageOnly ? '开始图片创作' : '你好，我是 Salcara AI'}</Text>
+            <Text style={styles.emptyText}>{app.activeProvider ? isAuto ? '一个会话里聊天、读文件、看图片和创作。只有明确要求出图时才调用图片 API。' : isChatOnly ? '可对话、分析图片和文件；当前不会调用图片生成接口。' : '输入画面描述，或添加参考图开始创作。' : '先添加服务商，再开始使用。'}</Text>
+            {(isAuto || isChatOnly) && app.activeProvider && <View style={styles.suggestionList}>
               {[
-                ['document-text-outline', '总结这份文件', '上传 PDF、Word、表格或代码'],
-                ['image-outline', '分析这张图片', '识别内容并给出建议'],
-                ['sparkles-outline', '开始图片创作', '输入“生成/修改一张图片”即可自动路由'],
-              ].map(([icon, title, hint]) => <Pressable key={title} style={styles.quickCard} onPress={() => { setPrompt(title === '分析这张图片' ? '请分析这张图片。' : title === '总结这份文件' ? '请总结这份文件。' : '生成一张图片：'); }}>
-                <Ionicons name={icon as React.ComponentProps<typeof Ionicons>['name']} size={20} color={colors.primaryStrong} />
-                <Text style={styles.quickCardTitle}>{title}</Text><Text style={styles.quickCardHint}>{hint}</Text>
+                ['document-text-outline', '总结这份文件', '上传文件后自动分析'],
+                ['image-outline', '分析这张图片', '图片只会作为对话上下文'],
+                ['sparkles-outline', '生成一张图片', '明确写“生成 / 修改”即可'],
+              ].map(([icon, title, hint]) => <Pressable key={title} style={styles.suggestion} onPress={() => { setPrompt(title === '分析这张图片' ? '请分析这张图片。' : title === '总结这份文件' ? '请总结这份文件。' : '生成一张图片：'); }}>
+                <View style={styles.suggestionIcon}><Ionicons name={icon as React.ComponentProps<typeof Ionicons>['name']} size={17} color={colors.primaryStrong} /></View>
+                <View style={styles.suggestionCopy}><Text style={styles.suggestionTitle}>{title}</Text><Text style={styles.suggestionHint}>{hint}</Text></View>
+                <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
               </Pressable>)}
             </View>}
             {!app.activeProvider && <Pressable style={styles.setupButton} onPress={() => setProvidersVisible(true)}><Text style={styles.setupText}>添加服务商</Text></Pressable>}
@@ -389,8 +391,8 @@ export function ChatScreen() {
         onOpenNetwork={() => { setDrawerVisible(false); setNetworkVisible(true); }}
         onOpenSettings={() => { setDrawerVisible(false); setAppSettingsVisible(true); }}
       />
-      <ProviderManager visible={providersVisible} onClose={() => setProvidersVisible(false)} />
-      <SettingsSheet visible={settingsVisible} onClose={() => setSettingsVisible(false)} />
+      <ProviderManager visible={providersVisible} onClose={() => { setProvidersVisible(false); setProviderFocusId(null); }} focusProviderId={providerFocusId} />
+      <SettingsSheet visible={settingsVisible} onClose={() => setSettingsVisible(false)} onOpenProviders={(providerId) => { setProviderFocusId(providerId ?? null); setProvidersVisible(true); }} />
       <AboutSheet visible={aboutVisible} onClose={() => setAboutVisible(false)} onCheckUpdates={() => setUpdateCheckToken((value) => value + 1)} />
       <AppSettingsSheet visible={appSettingsVisible} onClose={() => setAppSettingsVisible(false)} />
       <Sheet visible={routeVisible} title="发送方式" onClose={() => setRouteVisible(false)}>
@@ -421,7 +423,7 @@ export function ChatScreen() {
         <ActivityIndicator color={colors.primaryStrong} />
       </AppDialog>
       <UpdateManager manualCheckToken={updateCheckToken} />
-      <NetworkDiagnostics visible={networkVisible} onClose={() => setNetworkVisible(false)} providerId={(isChatOnly ? chatProvider?.id : imageProvider?.id) ?? ''} baseUrl={(isChatOnly ? chatProvider?.baseUrl : imageProvider?.baseUrl) ?? ''} api={isChatOnly ? chatProvider?.chatApi : imageProvider?.chatApi} imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
+      <NetworkDiagnostics visible={networkVisible} onClose={() => setNetworkVisible(false)} providerId={(isImageOnly ? imageProvider?.id : chatProvider?.id) ?? ''} baseUrl={(isImageOnly ? imageProvider?.baseUrl : chatProvider?.baseUrl) ?? ''} api={isImageOnly ? imageProvider?.chatApi : chatProvider?.chatApi} imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
     </SafeAreaView>
   );
 }
@@ -441,10 +443,10 @@ const styles = StyleSheet.create({
   loadingLogo: { width: 108, height: 108, borderRadius: 30 },
   loadingTitle: { color: colors.text, fontSize: 19, fontWeight: '800' },
   loadingText: { color: colors.textMuted },
-  header: { minHeight: 66, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, gap: spacing.md, borderBottomWidth: 1, borderColor: colors.border },
+  header: { minHeight: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, gap: spacing.sm, borderBottomWidth: 1, borderColor: colors.border },
   headerInfo: { flex: 1, alignItems: 'center', gap: 2 },
-  routeBar: { minHeight: 34, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.background },
-  routeBarText: { color: colors.primaryStrong, fontSize: 12, fontWeight: '700' },
+  routeBar: { minHeight: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, borderBottomWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  routeBarText: { color: colors.primaryStrong, fontSize: 11, fontWeight: '700' },
   routeOptions: { padding: spacing.lg, gap: spacing.md },
   routeTitle: { color: colors.text, fontSize: 15, fontWeight: '800' },
   routeHint: { color: colors.textMuted, fontSize: 12, lineHeight: 19 },
@@ -455,14 +457,16 @@ const styles = StyleSheet.create({
   providerName: { color: colors.text, fontWeight: '700', fontSize: 14 },
   modelName: { color: colors.textMuted, fontSize: 11, maxWidth: '92%' },
   body: { flex: 1 },
-  emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing.xxl, gap: spacing.md },
+  emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing.lg, gap: spacing.sm },
   logo: { width: 68, height: 68, borderRadius: 22, backgroundColor: colors.blueSurface, alignItems: 'center', justifyContent: 'center' },
   emptyTitle: { color: colors.text, fontSize: 19, fontWeight: '800', textAlign: 'center' },
-  emptyText: { color: colors.textMuted, fontSize: 13, lineHeight: 20, textAlign: 'center' },
-  quickCards: { width: '100%', flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: spacing.sm },
-  quickCard: { width: '31%', minWidth: 96, minHeight: 92, padding: 10, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, gap: 5 },
-  quickCardTitle: { color: colors.text, fontSize: 12, fontWeight: '700' },
-  quickCardHint: { color: colors.textMuted, fontSize: 10, lineHeight: 14 },
+  emptyText: { maxWidth: 330, color: colors.textMuted, fontSize: 12, lineHeight: 18, textAlign: 'center' },
+  suggestionList: { width: '100%', maxWidth: 360, marginTop: spacing.sm, gap: 6 },
+  suggestion: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.sm, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background },
+  suggestionIcon: { width: 30, height: 30, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.blueSurface },
+  suggestionCopy: { flex: 1, gap: 2 },
+  suggestionTitle: { color: colors.text, fontSize: 12, fontWeight: '700' },
+  suggestionHint: { color: colors.textMuted, fontSize: 10 },
   setupButton: { minHeight: 44, paddingHorizontal: spacing.xl, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md, backgroundColor: colors.primary },
   setupText: { color: '#fff', fontWeight: '700' },
   messages: { paddingVertical: spacing.xl, gap: spacing.xl },

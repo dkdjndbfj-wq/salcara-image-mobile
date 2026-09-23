@@ -13,13 +13,14 @@ import { AppDialog, Chip, PrimaryButton, Sheet } from './ui';
 const RATIOS: AspectRatio[] = ['1:1', '16:9', '9:16'];
 const TIERS: ResolutionTier[] = ['1K', '2K', '4K'];
 
-export function SettingsSheet({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+export function SettingsSheet({ visible, onClose, onOpenProviders }: { visible: boolean; onClose: () => void; onOpenProviders?: (providerId?: string) => void }) {
   const { activeProvider, providers, composerMode, generating, updateActiveProviderSettings } = useApp();
   // Auto mode edits the conversation model here; image defaults remain on the
   // image provider and are shown as a summary below. The route itself is
   // selected per message, not by this sheet.
   const isAuto = composerMode === 'auto';
   const isChat = composerMode !== 'image';
+  const imageProvider = activeProvider?.model ? activeProvider : providers.find((item) => Boolean(item.model));
   const [chatApi, setChatApi] = useState<ChatApi>('chat-completions');
   const [analysisProviderId, setAnalysisProviderId] = useState<string | null>(null);
   const [model, setModel] = useState('');
@@ -98,6 +99,7 @@ export function SettingsSheet({ visible, onClose }: { visible: boolean; onClose:
     <View style={styles.body}>
       <View style={styles.contextCard}><Ionicons name={isAuto ? 'sparkles-outline' : isChat ? 'chatbubbles-outline' : 'image-outline'} size={20} color={colors.primaryStrong} /><View style={styles.contextCopy}><Text style={styles.contextTitle}>{isAuto ? '自动路由 · 对话与图片' : isChat ? '对话与文件' : '图片创作'}</Text><Text style={styles.contextHint}>{activeProvider?.name ?? '尚未选择服务商'}</Text></View></View>
       {isAuto && <View style={styles.autoCard}><Text style={styles.autoTitle}>按消息自动选择</Text><Text style={styles.hint}>普通问题、PDF/Word 分析和图片识别只使用对话 API。提示词明确要求“生成、绘制、修改图片”时，会先由对话 API 检查并整理要求，再调用图片 API；图片附件本身不会触发生图。</Text></View>}
+      {isAuto && <View style={styles.imageSummary}><View style={styles.summaryHeading}><View><Text style={styles.label}>图片创作默认参数</Text><Text style={styles.summaryProvider}>{imageProvider?.name ?? '尚未配置图片服务商'}</Text></View><Ionicons name="image-outline" size={20} color={colors.primaryStrong} /></View>{imageProvider?.model ? <><Text style={styles.summaryModel} numberOfLines={1}>{imageProvider.model}</Text><Text style={styles.hint}>{[imageProvider.quality, imageProvider.aspectRatio, imageProvider.resolutionTier].filter(Boolean).join(' · ') || '尚未完成图片参数设置'}</Text></> : <Text style={styles.hint}>自动生图前必须先配置图片模型、画质、比例和清晰度。</Text>}{onOpenProviders && <Pressable style={styles.manageButton} onPress={() => { onClose(); onOpenProviders(imageProvider?.id); }}><Ionicons name="options-outline" size={16} color={colors.primaryStrong} /><Text style={styles.manageText}>调整图片模型和参数</Text></Pressable>}</View>}
       {isChat && <View style={styles.group}><Text style={styles.label}>使用哪个对话服务商？</Text><View style={styles.chips}>{activeProvider?.chatModel && <Chip label="使用当前服务商" selected={!analysisProviderId} onPress={() => { setAnalysisProviderId(null); setModel(activeProvider.chatModel ?? ''); }} />}{chatProviders.filter((item) => item.id !== activeProvider?.id).map((item) => <Chip key={item.id} label={item.name} selected={analysisProviderId === item.id} onPress={() => { setAnalysisProviderId(item.id); setModel(item.chatModel ?? ''); }} />)}</View>{analysisProviderId && <Text style={styles.hint}>{`当前会话保持不变，内容发给 ${providers.find((item) => item.id === analysisProviderId)?.name ?? '所选服务商'} 的对话模型。`}</Text>}{!activeProvider?.chatModel && !chatProviders.length && <Text style={styles.hint}>当前没有对话服务商，请先在服务商管理中添加独立的对话 API。</Text>}</View>}
       {(!isChat || !analysisProviderId) && <>
         <View style={styles.group}><ModelPicker label={isChat ? '对话模型' : '图片模型'} models={selectableModels} value={model} loading={modelsLoading} error={modelsError} manualOpen={manualModelOpen} onRefresh={() => void loadModels()} onToggleManual={() => setManualModelOpen((value) => !value)} onChange={(value) => { setModel(value); if (!isChat) setQuality(null); }} placeholder={isChat ? '手动填写对话模型 ID' : '手动填写图片模型 ID'} /></View>
@@ -126,6 +128,12 @@ const styles = StyleSheet.create({
   contextHint: { color: colors.textMuted, fontSize: 12 },
   autoCard: { padding: spacing.md, gap: spacing.xs, borderRadius: radius.lg, backgroundColor: colors.blueSurface, borderWidth: 1, borderColor: '#CFE5FF' },
   autoTitle: { color: colors.primaryStrong, fontSize: 13, fontWeight: '800' },
+  imageSummary: { padding: spacing.md, gap: spacing.xs, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  summaryHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  summaryProvider: { color: colors.textMuted, fontSize: 11, marginTop: 3 },
+  summaryModel: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  manageButton: { minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: spacing.xs, borderRadius: radius.md, backgroundColor: colors.blueSurface },
+  manageText: { color: colors.primaryStrong, fontSize: 12, fontWeight: '700' },
   group: { gap: spacing.sm },
   label: { color: colors.text, fontSize: 12, fontWeight: '700' },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },

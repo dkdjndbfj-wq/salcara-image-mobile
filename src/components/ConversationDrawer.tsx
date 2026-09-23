@@ -51,18 +51,18 @@ export function ConversationDrawer({
       <View style={styles.overlay}>
         <SafeAreaView style={styles.drawer} edges={['top', 'bottom']}>
           <View style={styles.header}>
-            <View><Text style={styles.brand}>Salcara AI</Text><Text style={styles.subtitle}>对话、文件与图片创作</Text></View>
+            <View><Text style={styles.brand}>Salcara AI</Text><Text style={styles.subtitle}>你的 AI 工作区</Text></View>
             <Pressable onPress={onClose} style={styles.icon}><Ionicons name="close" size={22} color={colors.text} /></Pressable>
           </View>
           <Pressable
             style={styles.newButton}
             onPress={() => void createConversation()}
           >
-            <Ionicons name="add" size={20} color={colors.primaryStrong} />
+            <Ionicons name="add" size={20} color="#FFFFFF" />
             <Text style={styles.newText}>新会话</Text>
           </Pressable>
-          <ScrollView style={styles.list} contentContainerStyle={{ gap: spacing.sm }}>
-            <Text style={styles.sectionLabel}>最近会话</Text>
+          <ScrollView style={styles.list} contentContainerStyle={{ gap: 2 }}>
+            <Text style={styles.sectionLabel}>会话</Text>
             {conversations.length === 0 && <Text style={styles.empty}>开始对话后，会话会显示在这里。</Text>}
             {conversations.map((conversation) => (
               <Pressable
@@ -85,6 +85,7 @@ export function ConversationDrawer({
             ))}
           </ScrollView>
           <View style={styles.bottomActions}>
+            <Text style={styles.sectionLabel}>设置</Text>
             <Pressable style={styles.providerButton} onPress={onOpenSettings}>
               <Ionicons name="settings-outline" size={20} color={colors.text} />
               <Text style={styles.providerText}>应用设置</Text>
@@ -112,24 +113,24 @@ export function ConversationDrawer({
 
 const styles = StyleSheet.create({
   overlay: { flex: 1, flexDirection: 'row', backgroundColor: 'rgba(17,24,39,0.28)' },
-  drawer: { width: '84%', maxWidth: 360, backgroundColor: colors.background, padding: spacing.lg },
+  drawer: { width: '84%', maxWidth: 360, backgroundColor: colors.background, padding: spacing.md },
   dismiss: { flex: 1 },
-  header: { minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  brand: { color: colors.text, fontSize: 18, fontWeight: '800' },
-  subtitle: { color: colors.textMuted, marginTop: 2, fontSize: 12 },
+  header: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  brand: { color: colors.text, fontSize: 16, fontWeight: '800' },
+  subtitle: { color: colors.textMuted, marginTop: 2, fontSize: 11 },
   icon: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  newButton: { marginTop: spacing.lg, minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, borderRadius: radius.md, backgroundColor: colors.blueSurface, borderWidth: 1, borderColor: colors.primary },
-  newText: { color: colors.primaryStrong, fontWeight: '700', fontSize: 14 },
-  list: { flex: 1, gap: spacing.sm, marginTop: spacing.xl },
-  sectionLabel: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
-  empty: { color: colors.textMuted, lineHeight: 20, paddingVertical: spacing.md },
-  row: { minHeight: 60, flexDirection: 'row', alignItems: 'center', borderRadius: radius.md, paddingLeft: spacing.md },
-  activeRow: { backgroundColor: colors.blueSurface },
+  newButton: { marginTop: spacing.md, minHeight: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, borderRadius: radius.md, backgroundColor: colors.primary },
+  newText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  list: { flex: 1, marginTop: spacing.lg },
+  sectionLabel: { color: colors.textMuted, fontSize: 11, fontWeight: '700', paddingVertical: spacing.sm },
+  empty: { color: colors.textMuted, lineHeight: 18, paddingVertical: spacing.md, fontSize: 12 },
+  row: { minHeight: 52, flexDirection: 'row', alignItems: 'center', borderRadius: radius.sm, paddingLeft: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  activeRow: { backgroundColor: colors.blueSurface, borderBottomColor: colors.blueSurface },
   rowBody: { flex: 1, gap: 4 },
-  title: { color: colors.text, fontWeight: '600', fontSize: 13 },
-  meta: { color: colors.textMuted, fontSize: 11 },
+  title: { color: colors.text, fontWeight: '600', fontSize: 12 },
+  meta: { color: colors.textMuted, fontSize: 10 },
   delete: { width: 42, height: 48, alignItems: 'center', justifyContent: 'center' },
-  bottomActions: { borderTopWidth: 1, borderColor: colors.border, paddingTop: spacing.md, flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  providerButton: { width: '47%', minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.xs },
-  providerText: { color: colors.text, fontWeight: '700', fontSize: 13 },
+  bottomActions: { borderTopWidth: 1, borderColor: colors.border, paddingTop: spacing.xs, gap: 2 },
+  providerButton: { width: '100%', minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.sm, borderRadius: radius.sm },
+  providerText: { color: colors.text, fontWeight: '600', fontSize: 12 },
 });

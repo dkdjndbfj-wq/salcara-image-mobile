@@ -1,6 +1,6 @@
 {
   "name": "salcara-image-mobile",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "main": "index.ts",
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",
