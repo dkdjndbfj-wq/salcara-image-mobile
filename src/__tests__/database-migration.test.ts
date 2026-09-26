@@ -87,3 +87,15 @@ test('cleans legacy blank conversations, stores global model choices and keeps c
   await reassignConversations('old', 'claude');
   expect((await listConversations()).find((item) => item.id === 'old-c')?.providerId).toBe('claude');
 });
+
+test('an assistant message turned into an image job keeps its image settings after reload', async () => {
+  await insertConversation({ id: 'job-c', title: '画图', providerId: 'old', mode: 'auto', transparent: false, createdAt: 6, updatedAt: 6 });
+  const pending: ChatMessage = {
+    id: 'job-m', conversationId: 'job-c', role: 'assistant', prompt: '画一只猫', mode: 'chat', status: 'pending', providerId: 'claude',
+    model: 'claude-test', quality: 'auto', size: '', transparent: false, imageUri: null, remoteImageUrl: null, references: [], maskUri: null,
+    error: null, elapsedMs: null, createdAt: 6,
+  };
+  await insertMessage(pending);
+  await updateMessage({ ...pending, mode: 'generate', providerId: 'old', model: 'gpt-image-2', quality: 'high', size: '1152x2048', transparent: true, preparedPrompt: '橘猫' });
+  expect((await listMessages('job-c'))[0]).toMatchObject({ mode: 'generate', providerId: 'old', model: 'gpt-image-2', quality: 'high', size: '1152x2048', transparent: true, preparedPrompt: '橘猫' });
+});

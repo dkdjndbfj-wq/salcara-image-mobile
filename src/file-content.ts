@@ -18,10 +18,41 @@ export type PreparedAttachment =
  * macros/embedded binaries are deliberately ignored. Unknown files remain a
  * file part for protocols which support input_file/file content.
  */
+/**
+ * Extracted text of office files, archives and text files, reused while the
+ * same file stays in the conversation (history resends it on later turns).
+ */
+const extractedCache = new Map<string, PreparedAttachment>();
+const MAX_CACHE_ENTRIES = 12;
+
+function remember(key: string, value: PreparedAttachment): PreparedAttachment {
+  if (value.type === 'text' || value.type === 'metadata') {
+    extractedCache.delete(key);
+    extractedCache.set(key, value);
+    while (extractedCache.size > MAX_CACHE_ENTRIES) extractedCache.delete(extractedCache.keys().next().value as string);
+  }
+  return value;
+}
+
+/** Test hook. */
+export function clearExtractedCache(): void { extractedCache.clear(); }
+
+/** Raw bytes without a base64 round trip when the runtime supports it. */
+async function readBytes(file: File): Promise<Uint8Array> {
+  const withBytes = file as File & { bytes?: () => Promise<Uint8Array> };
+  if (typeof withBytes.bytes === 'function') {
+    try { return await withBytes.bytes(); } catch { /* fall back */ }
+  }
+  return base64ToBytes(await file.base64());
+}
+
 export async function prepareAttachment(attachment: DocumentAttachment, signal?: AbortSignal): Promise<PreparedAttachment> {
   throwIfAborted(signal);
   const kind = attachment.kind ?? attachmentKind(attachment.name, attachment.mimeType);
   const file = readableFile(attachment);
+  const cacheKey = `${attachment.uri}#${file.size ?? attachment.size}#${kind}`;
+  const cached = extractedCache.get(cacheKey);
+  if (cached) return remember(cacheKey, cached);
   const mimeType = normalizedMimeType(attachment.name, attachment.mimeType);
   if (kind === 'image') {
     const base64 = await file.base64();
@@ -32,24 +63,25 @@ export async function prepareAttachment(attachment: DocumentAttachment, signal?:
   if (kind === 'text') {
     const raw = await file.text();
     throwIfAborted(signal);
-    if (raw.includes('\u0000')) return { type: 'metadata', text: metadataLine(attachment, '检测到二进制内容，未直接展开') };
-    return { type: 'text', text: limitText(stripBom(raw), attachment.name) };
+    if (raw.includes('\u0000')) return remember(cacheKey, { type: 'metadata', text: metadataLine(attachment, '检测到二进制内容，未直接展开') });
+    return remember(cacheKey, { type: 'text', text: limitText(stripBom(raw), attachment.name) });
   }
   if (kind === 'office') {
-    const base64 = await file.base64();
+    const bytes = await readBytes(file);
     throwIfAborted(signal);
-    const text = extractOfficeText(attachment.name, base64ToBytes(base64));
-    if (text.trim()) return { type: 'text', text: limitText(text, attachment.name) };
+    const text = extractOfficeText(attachment.name, bytes);
+    if (text.trim()) return remember(cacheKey, { type: 'text', text: limitText(text, attachment.name) });
+    const base64 = await file.base64();
     if (base64) return { type: 'file', data: `data:${mimeType};base64,${base64}`, filename: attachment.name, mimeType };
-    return { type: 'metadata', text: metadataLine(attachment, '这是办公文档；当前未能提取可读正文') };
+    return remember(cacheKey, { type: 'metadata', text: metadataLine(attachment, '这是办公文档；当前未能提取可读正文') });
   }
   if (kind === 'archive') {
-    const base64 = await file.base64();
+    const bytes = await readBytes(file);
     throwIfAborted(signal);
-    const entries = listZipEntries(base64ToBytes(base64));
-    return { type: 'metadata', text: entries.length
+    const entries = listZipEntries(bytes);
+    return remember(cacheKey, { type: 'metadata', text: entries.length
       ? `${metadataLine(attachment, '压缩包目录（未解压，不执行其中代码）')}\n${entries.slice(0, 200).map((entry) => `- ${entry}`).join('\n')}`
-      : metadataLine(attachment, '压缩包未能读取目录；未解压其中内容') };
+      : metadataLine(attachment, '压缩包未能读取目录；未解压其中内容') });
   }
   // Responses and several OpenAI-compatible gateways understand a generic
   // file part. We preserve the original name so the model can identify it.
@@ -126,16 +158,24 @@ function limitText(value: string, name: string): string {
 
 function stripBom(value: string): string { return value.replace(/^\uFEFF/, ''); }
 
+const BASE64_LOOKUP = (() => {
+  const table = new Int16Array(256).fill(-1);
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.split('').forEach((character, index) => { table[character.charCodeAt(0)] = index; });
+  table['-'.charCodeAt(0)] = 62;
+  table['_'.charCodeAt(0)] = 63;
+  return table;
+})();
+
+/** Table-driven decoder: one pass, no per-character search, no intermediate string copy. */
 function base64ToBytes(value: string): Uint8Array {
-  const clean = value.replace(/\s/g, '');
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const output = new Uint8Array(Math.floor(clean.length * 3 / 4));
+  const output = new Uint8Array(Math.floor(value.length * 3 / 4) + 3);
   let buffer = 0;
   let bits = 0;
   let offset = 0;
-  for (const character of clean) {
-    if (character === '=') break;
-    const digit = alphabet.indexOf(character);
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 61) break; // '='
+    const digit = code < 256 ? BASE64_LOOKUP[code] : -1;
     if (digit < 0) continue;
     buffer = (buffer << 6) | digit;
     bits += 6;

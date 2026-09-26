@@ -1,10 +1,10 @@
 import React, { useEffect, useRef } from 'react';
-import { Animated, Easing, Image, View } from 'react-native';
+import { Animated, Easing, View } from 'react-native';
 import Svg, { Defs, LinearGradient, Stop, Text as SvgText } from 'react-native-svg';
 
 import { brandStops } from '../theme';
 
-const LOGO = require('../../assets/brand-logo.png');
+import { LogoArt } from './Logo';
 import { useReducedMotion } from './MotionPressable';
 
 let gradientSeed = 0;
@@ -14,9 +14,9 @@ function useGradientId(prefix: string) {
   return ref.current;
 }
 
-/** The Salcara logo (raster artwork with transparent background). */
+/** The Salcara logo — vector, so edges stay clean at any size and on any background. */
 export function BrandMark({ size = 28 }: { size?: number }) {
-  return <Image source={LOGO} style={{ width: size, height: size }} resizeMode="contain" accessibilityIgnoresInvertColors />;
+  return <View style={{ width: size, height: size }} accessibilityIgnoresInvertColors><LogoArt size={size} /></View>;
 }
 
 /** The logo slowly turning and breathing — shown while Salcara is thinking. Its two-fold symmetry makes the loop seamless. */

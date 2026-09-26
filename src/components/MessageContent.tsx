@@ -74,12 +74,20 @@ function Blocks({ text, caret }: { text: string; caret: boolean }) {
 }
 
 function inline(text: string): React.ReactNode[] {
-  return text.split(/(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\s][^*]*\*|\[[^\]]+\]\(https?:\/\/[^\s)]+\))/g).filter((part) => part !== '').map((part, i) => {
+  return text.split(/(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\s][^*]*\*|\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>()（）「」"'，。；！？]+)/g).filter((part) => part !== '').map((part, i) => {
     if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) return <Text key={i} style={styles.bold}>{part.slice(2, -2)}</Text>;
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) return <Text key={i} style={styles.inlineCode}>{` ${part.slice(1, -1)} `}</Text>;
     if (part.startsWith('*') && part.endsWith('*') && part.length > 2) return <Text key={i} style={{ fontStyle: 'italic' }}>{part.slice(1, -1)}</Text>;
     const link = part.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
     if (link) return <Text key={i} accessibilityRole="link" style={styles.link} onPress={() => void Linking.openURL(link[2]).catch(() => {})}>{link[1]}</Text>;
+    if (/^https?:\/\//.test(part)) {
+      // Bare URL: keep trailing punctuation out of the link.
+      const url = part.replace(/[.,:;!?)\]]+$/, '');
+      return <React.Fragment key={i}>
+        <Text accessibilityRole="link" style={styles.link} onPress={() => void Linking.openURL(url).catch(() => {})}>{url}</Text>
+        {part.slice(url.length)}
+      </React.Fragment>;
+    }
     return part;
   });
 }
@@ -118,16 +126,17 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   </View>;
 }
 
-function useBlink() {
+/** Nested Text can't use the native driver; a standalone View can. */
+function useBlink(native = false) {
   const opacity = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     const loop = Animated.loop(Animated.sequence([
-      Animated.timing(opacity, { toValue: 0.15, duration: 420, useNativeDriver: false }),
-      Animated.timing(opacity, { toValue: 1, duration: 420, useNativeDriver: false }),
+      Animated.timing(opacity, { toValue: 0.15, duration: 420, useNativeDriver: native }),
+      Animated.timing(opacity, { toValue: 1, duration: 420, useNativeDriver: native }),
     ]));
     loop.start();
     return () => loop.stop();
-  }, [opacity]);
+  }, [opacity, native]);
   return opacity;
 }
 
@@ -137,7 +146,7 @@ function CaretText() {
   return <Animated.Text style={[styles.caretText, { opacity }]}> ●</Animated.Text>;
 }
 function Caret() {
-  const opacity = useBlink();
+  const opacity = useBlink(true);
   return <Animated.View style={[styles.caret, { opacity }]} />;
 }
 

@@ -119,7 +119,7 @@ export function Sheet({ visible, title, subtitle, onClose, children, scroll = tr
   return <Modal visible={mounted} transparent animationType="none" statusBarTranslucent onRequestClose={close}>
     <View style={styles.overlay} accessibilityViewIsModal>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, page ? { backgroundColor: 'rgba(11,18,32,0.12)' } : styles.scrim, { opacity: progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolate: 'clamp' }) }]} />
-      {!page && <Pressable style={StyleSheet.absoluteFill} accessibilityLabel="关闭" onPress={close} />}
+      {!page && <Pressable style={StyleSheet.absoluteFill} accessible={false} importantForAccessibility="no" onPress={close} />}
       <KeyboardAvoidingView pointerEvents="box-none" style={styles.placement} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <Animated.View {...(page ? pagePan.panHandlers : {})} style={[styles.sheet, page && styles.page, {
           backgroundColor: bg, paddingTop: page ? insets.top : 0, marginTop: page ? 0 : Math.max(insets.top, 24),
@@ -141,6 +141,7 @@ export function Sheet({ visible, title, subtitle, onClose, children, scroll = tr
           {footer && <View style={[styles.footer, { backgroundColor: bg, paddingBottom: Math.max(insets.bottom, 14) }]}>{footer}</View>}
         </Animated.View>
       </KeyboardAvoidingView>
+      <ToastHost />
     </View>
   </Modal>;
 }
@@ -156,7 +157,7 @@ export function AppDialog({ visible, title, message, icon, actions, children, di
   return <Modal visible={mounted} transparent animationType="none" statusBarTranslucent onRequestClose={close}>
     <View style={styles.dialogBackdrop}>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.scrim, { opacity: progress }]} />
-      {dismissible && <Pressable accessibilityLabel="关闭提示" style={StyleSheet.absoluteFill} onPress={close} />}
+      {dismissible && <Pressable accessible={false} importantForAccessibility="no" style={StyleSheet.absoluteFill} onPress={close} />}
       <Animated.View accessibilityViewIsModal style={[styles.dialog, { opacity: progress, transform: [{ scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] }) }] }]}>
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.dialogContent}>
           {glyph && <View style={[styles.dialogIcon, danger && { backgroundColor: colors.dangerSurface }]}><Icon name={glyph} size={22} color={danger ? colors.danger : colors.primary} /></View>}
@@ -216,17 +217,25 @@ export function SectionLabel({ children }: { children: ReactNode }) {
 
 // ——— Toast ———
 type ToastMessage = { id: number; text: string; icon: IconName };
-let toastListener: ((toast: ToastMessage) => void) | null = null;
+/**
+ * Every open layer (screen, sheet, image preview) mounts its own host; the most
+ * recently mounted one — the one on top — shows the toast, so confirmations are
+ * never hidden behind a native modal.
+ */
+const toastListeners: Array<(toast: ToastMessage) => void> = [];
 let toastId = 0;
-export function showToast(text: string, icon: IconName = 'checkCircle') { toastListener?.({ id: ++toastId, text, icon }); }
+export function showToast(text: string, icon: IconName = 'checkCircle') { toastListeners[toastListeners.length - 1]?.({ id: ++toastId, text, icon }); }
 
 export function ToastHost() {
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const progress = useRef(new Animated.Value(0)).current;
   const insets = useSafeAreaInsets();
   useEffect(() => {
-    toastListener = setToast;
-    return () => { if (toastListener === setToast) toastListener = null; };
+    toastListeners.push(setToast);
+    return () => {
+      const index = toastListeners.lastIndexOf(setToast);
+      if (index >= 0) toastListeners.splice(index, 1);
+    };
   }, []);
   useEffect(() => {
     if (!toast) return;

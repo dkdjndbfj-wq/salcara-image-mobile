@@ -79,7 +79,25 @@ export async function fetchImageModels(baseUrl: string, apiKey: string): Promise
   }
 }
 
-export async function generateImage(request: GenerateRequest): Promise<string> {
+/** Removes the literal API key from any error text (relays sometimes echo it back). */
+function withoutKey<T>(apiKey: string, task: () => Promise<T>): Promise<T> {
+  const key = apiKey.trim();
+  return task().catch((error: unknown) => {
+    if (!key || !(error instanceof Error) || !error.message.includes(key)) throw error;
+    const safe = error.message.split(key).join('[已隐藏密钥]');
+    throw error instanceof ImageApiError ? new ImageApiError(safe, error.status, error.code) : Object.assign(new Error(safe), { name: error.name });
+  });
+}
+
+export function generateImage(request: GenerateRequest): Promise<string> {
+  return withoutKey(request.apiKey, () => generateImageUnsafe(request));
+}
+
+export function editImage(request: EditRequest): Promise<string> {
+  return withoutKey(request.apiKey, () => editImageUnsafe(request));
+}
+
+async function generateImageUnsafe(request: GenerateRequest): Promise<string> {
   const payload = await requestImageApi(imageEndpoint(request.baseUrl, 'images/generations'), {
     method: 'POST',
     headers: {
@@ -92,7 +110,7 @@ export async function generateImage(request: GenerateRequest): Promise<string> {
   return persistImageResponse(payload, request);
 }
 
-export async function editImage(request: EditRequest): Promise<string> {
+async function editImageUnsafe(request: EditRequest): Promise<string> {
   if (request.references.length === 0) throw new ImageApiError('图片编辑至少需要一张参考图');
   if (request.references.length > 4) throw new ImageApiError('一次最多上传 4 张参考图');
 
@@ -186,31 +204,40 @@ function waitForPoll(milliseconds: number, signal?: AbortSignal): Promise<void> 
 }
 
 async function requestImageApi(url: string, options: Parameters<typeof fetch>[1]) {
+  let response: Response;
   try {
-    return await parseResponse(await fetch(url, { ...options, redirect: 'error', credentials: 'omit' }));
+    response = await fetch(url, { ...options, redirect: 'error', credentials: 'omit' });
   } catch (error) {
     if (error instanceof ImageApiError || isAbortError(error)) throw error;
     // Expo's streaming fetch and React Native's built-in fetch use different
-    // native plumbing on some Android versions. If the first transport fails
-    // before receiving an HTTP response, make one alternate-transport attempt
-    // with the exact same request. We never retry after an HTTP error, and we
-    // never follow redirects that could leak the API key.
+    // native plumbing on some Android versions. Only when the first transport
+    // provably never reached the server (DNS / connect / TLS handshake) is the
+    // same request tried once on the other transport. Any later failure may
+    // mean the provider already started a paid generation, so it is never
+    // resent automatically.
     const alternateFetch = globalThis.fetch;
-    if (typeof alternateFetch === 'function' && alternateFetch !== fetch && isTransportFailure(error)) {
-      try {
-        return await parseResponse(await alternateFetch(url, { ...options, redirect: 'error', credentials: 'omit' }));
-      } catch (alternateError) {
-        if (alternateError instanceof ImageApiError || isAbortError(alternateError)) throw alternateError;
-        throw new ImageApiError(networkFailureMessage(url, '生图接口', alternateError));
-      }
+    if (typeof alternateFetch !== 'function' || alternateFetch === fetch || !isConnectFailure(error)) {
+      throw new ImageApiError(networkFailureMessage(url, '生图接口', error));
     }
+    try {
+      response = await alternateFetch(url, { ...options, redirect: 'error', credentials: 'omit' });
+    } catch (alternateError) {
+      if (alternateError instanceof ImageApiError || isAbortError(alternateError)) throw alternateError;
+      throw new ImageApiError(networkFailureMessage(url, '生图接口', alternateError));
+    }
+  }
+  try {
+    return await parseResponse(response);
+  } catch (error) {
+    if (error instanceof ImageApiError || isAbortError(error)) throw error;
     throw new ImageApiError(networkFailureMessage(url, '生图接口', error));
   }
 }
 
-function isTransportFailure(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return !isAbortError(error) && !/redirect|HTTP\s*\d{3}|status\s*\d{3}/i.test(error.message);
+/** Failures that happen before any byte of the request reaches the server. */
+export function isConnectFailure(error: unknown): boolean {
+  if (!(error instanceof Error) || isAbortError(error)) return false;
+  return /unknownhost|unable to resolve|no address associated|failed to connect|connectexception|connection refused|econnrefused|ehostunreach|enetunreach|network is unreachable|sslhandshake|handshake failed|cleartext/i.test(error.message);
 }
 
 function authorizationHeaders(apiKey: string): Record<string, string> {
@@ -332,13 +359,25 @@ function collectImagePayloads(
   }
 }
 
+/** One scan, no copies (image payloads can be tens of MB). */
 function looksLikeBase64(value: string): boolean {
-  const compact = value.replace(/\s+/g, '');
-  if (compact.length < 8 || compact.length % 4 === 1) return false;
-  return /^[A-Za-z0-9+/_-]+={0,2}$/.test(compact);
+  let length = 0;
+  let padding = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 32 || code === 10 || code === 13 || code === 9) continue;
+    if (code === 61) { padding += 1; if (padding > 2) return false; length += 1; continue; }
+    if (padding) return false;
+    const valid = (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 43 || code === 47 || code === 45 || code === 95;
+    if (!valid) return false;
+    length += 1;
+  }
+  return length >= 8 && length % 4 !== 1;
 }
 
 function normalizeBase64(value: string): string {
+  // Fast path: the ordinary, already padded alphabet is passed through untouched.
+  if (!/[\s_-]/.test(value) && value.length % 4 === 0) return value;
   const compact = value.replace(/\s+/g, '');
   // A few gateways use base64url for the b64_json field. Android's file
   // writer expects the ordinary alphabet, so normalize it at the boundary.

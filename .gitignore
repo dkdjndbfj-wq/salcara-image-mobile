@@ -45,3 +45,6 @@ yarn-error.*
 # Local UI review artifacts
 /output/
 /.playwright-cli/
+
+# Local native module build output (sherpa-onnx AAR is downloaded here at build time)
+modules/*/android/build/

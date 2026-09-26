@@ -1,0 +1,64 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'top.salcara'
+version = '1.0.0'
+
+// sherpa-onnx (on-device speech recognition). The official AAR is fetched once
+// and unpacked: a library module may not depend on a local .aar directly, but
+// a .jar plus jniLibs is fine. Only 64-bit ARM is packaged to keep the APK
+// small; on other ABIs the engine reports itself unavailable and cloud speech
+// recognition is used instead.
+def sherpaVersion = '1.13.7'
+def sherpaAbis = ['arm64-v8a']
+// Kept outside build/ so `gradlew clean` can't remove it between configuration and compilation.
+def sherpaDir = new File(rootProject.projectDir, ".sherpa-onnx/${sherpaVersion}")
+def sherpaJar = new File(sherpaDir, 'classes.jar')
+if (!sherpaJar.exists()) {
+  sherpaDir.mkdirs()
+  def aar = new File(sherpaDir, "sherpa-onnx-${sherpaVersion}.aar")
+  if (!aar.exists() || aar.length() < 1024 * 1024) {
+    def url = new URL("https://github.com/k2-fsa/sherpa-onnx/releases/download/v${sherpaVersion}/sherpa-onnx-${sherpaVersion}.aar")
+    logger.lifecycle("Downloading sherpa-onnx ${sherpaVersion} AAR…")
+    def partial = new File(sherpaDir, aar.name + '.part')
+    def connection = url.openConnection()
+    connection.connectTimeout = 30_000
+    connection.readTimeout = 120_000
+    connection.inputStream.withStream { input -> partial.withOutputStream { output -> output << input } }
+    if (partial.length() < 1024 * 1024 || !partial.renameTo(aar)) {
+      partial.delete()
+      throw new GradleException("Failed to download sherpa-onnx ${sherpaVersion} AAR")
+    }
+  }
+  project.copy {
+    from(project.zipTree(aar)) {
+      include 'classes.jar'
+      sherpaAbis.each { abi -> include "jni/${abi}/*.so" }
+      // React Native already ships libc++_shared.so; a second copy breaks packaging.
+      exclude '**/libc++_shared.so'
+    }
+    into sherpaDir
+  }
+  if (!sherpaJar.exists()) throw new GradleException("sherpa-onnx AAR did not contain classes.jar")
+}
+
+android {
+  namespace "expo.modules.salcaravoice"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+  sourceSets {
+    main {
+      // Kotlin sources live in a short path (android/kotlin) on purpose.
+      java.srcDirs += ['kotlin']
+      jniLibs.srcDirs += ["${sherpaDir}/jni"]
+    }
+  }
+}
+
+dependencies {
+  implementation files(sherpaJar)
+}

@@ -41,13 +41,21 @@ export function MaskEditor({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const maskSvgRef = useRef<Svg>(null);
   const frameRef = useRef<number | null>(null);
+  /** Strokes survive closing and reopening the editor for the same image. */
+  const editedUri = useRef<string | null>(null);
+  /** Whether the user changed anything since opening (completing untouched = keep the current mask). */
+  const [touched, setTouched] = useState(false);
 
   useEffect(() => {
     if (!visible || !image) return;
-    setStrokes([]);
-    setRedo([]);
-    setClearBackup(null);
+    setTouched(false);
     setErrorMessage(null);
+    if (editedUri.current !== image.uri) {
+      editedUri.current = image.uri;
+      setStrokes([]);
+      setRedo([]);
+      setClearBackup(null);
+    }
     if (image.width && image.height) {
       setSourceSize({ width: image.width, height: image.height });
     } else {
@@ -104,6 +112,7 @@ export function MaskEditor({
       if (activeRef.current) {
         const completed = { ...activeRef.current, points: [...activeRef.current.points] };
         setStrokes((current) => [...current, completed]);
+        setTouched(true);
       }
       activeRef.current = null;
       setActiveStroke(null);
@@ -120,6 +129,7 @@ export function MaskEditor({
 
   const allStrokes = activeStroke ? [...strokes, activeStroke] : strokes;
   const undo = () => {
+    setTouched(true);
     if (strokes.length) {
       const last = strokes[strokes.length - 1];
       setStrokes(strokes.slice(0, -1));
@@ -132,10 +142,12 @@ export function MaskEditor({
   const redoStroke = () => {
     const last = redo[redo.length - 1];
     if (!last) return;
+    setTouched(true);
     setRedo(redo.slice(0, -1));
     setStrokes((current) => [...current, last]);
   };
   const clear = () => {
+    setTouched(true);
     if (strokes.length) setClearBackup(strokes);
     setStrokes([]);
     setRedo([]);
@@ -143,7 +155,8 @@ export function MaskEditor({
 
   const confirm = async () => {
     if (strokes.length === 0) {
-      onConfirm(null);
+      // Untouched: keep whatever mask exists. Cleared on purpose: remove it.
+      if (touched) onConfirm(null); else onCancel();
       return;
     }
     try {

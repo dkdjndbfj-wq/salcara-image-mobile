@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="aFace" gradientUnits="userSpaceOnUse" x1="380" y1="540" x2="640" y2="60">
+      <stop offset="0" stop-color="#FFE7BD"/>
+      <stop offset="0.16" stop-color="#FFC6D4"/>
+      <stop offset="0.34" stop-color="#F6A9DC"/>
+      <stop offset="0.64" stop-color="#A98BF8"/>
+      <stop offset="1" stop-color="#D9D2FF"/>
+    </linearGradient>
+    <linearGradient id="aFold" gradientUnits="userSpaceOnUse" x1="410" y1="330" x2="800" y2="160">
+      <stop offset="0" stop-color="#2F6BF6"/>
+      <stop offset="0.5" stop-color="#5A9CFC"/>
+      <stop offset="1" stop-color="#A9D4FF"/>
+    </linearGradient>
+    <linearGradient id="bFace" gradientUnits="userSpaceOnUse" x1="460" y1="262" x2="820" y2="760">
+      <stop offset="0" stop-color="#B9E2FF"/>
+      <stop offset="0.38" stop-color="#4D96FB"/>
+      <stop offset="0.66" stop-color="#3E80F8"/>
+      <stop offset="1" stop-color="#BBD7FF"/>
+    </linearGradient>
+    <clipPath id="aClip"><path id="aShape" d="M385 542 C325 542 250 505 224 430 C192 345 208 235 278 160 C345 88 450 54 545 56 C660 58 770 128 808 290 L760 300 C700 245 600 215 520 225 C455 240 415 300 400 370 C390 430 392 500 385 542 Z"/></clipPath>
+    <g id="ribbonA">
+      <path d="M385 542 C325 542 250 505 224 430 C192 345 208 235 278 160 C345 88 450 54 545 56 C660 58 770 128 808 290 L760 300 C700 245 600 215 520 225 C455 240 415 300 400 370 C390 430 392 500 385 542 Z" fill="url(#aFace)"/>
+      <path clip-path="url(#aClip)" d="M390 560 C395 300 430 215 490 150 C550 95 620 78 700 70 L900 60 L900 420 Z" fill="url(#aFold)"/>
+      <path d="M385 542 C325 542 250 505 224 430 C192 345 208 235 278 160 C345 88 450 54 545 56 C660 58 770 128 808 290" fill="none" stroke="#fff" stroke-opacity="0.45" stroke-width="3"/>
+    </g>
+    <g id="ribbonB">
+      <path d="M455 262 C520 215 640 212 760 250 C895 295 992 400 994 515 C996 628 915 718 808 757 C845 690 868 610 838 525 C805 440 720 405 625 385 C545 368 490 320 455 262 Z" fill="url(#bFace)"/>
+      <path d="M470 258 C540 222 650 225 760 262 C880 305 965 400 968 515 C970 615 905 700 815 750" fill="none" stroke="#fff" stroke-opacity="0.22" stroke-width="16" stroke-linecap="round"/>
+      <path d="M455 262 C520 215 640 212 760 250 C895 295 992 400 994 515 C996 628 915 718 808 757" fill="none" stroke="#fff" stroke-opacity="0.5" stroke-width="3"/>
+    </g>
+  </defs>
+  <use href="#ribbonA"/>
+  <use href="#ribbonA" transform="translate(508 520) rotate(180) scale(0.98) translate(-508 -520)"/>
+  <use href="#ribbonB"/>
+  <use href="#ribbonB" transform="translate(508 520) rotate(180) scale(0.98) translate(-508 -520)"/>
+</svg>

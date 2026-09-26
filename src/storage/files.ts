@@ -153,6 +153,40 @@ export function deleteLocalFile(uri: string | null | undefined): void {
   }
 }
 
+/** Last path segment, used to match stored URIs regardless of how the path was spelled. */
+export function fileNameOf(uri: string): string {
+  return decodeURIComponent(uri.split('?')[0].replace(/\/+$/, '').split('/').pop() ?? '');
+}
+
+const SWEEP_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Deletes app-owned files (generated images, picked images / masks, imported
+ * documents) that no saved message refers to — leftovers of discarded drafts,
+ * failed sends or interrupted runs. Recent files are kept, so an attachment
+ * waiting in the composer is never touched. Best effort; returns the count.
+ */
+export function sweepUnreferencedFiles(referencedNames: Set<string>, now = Date.now()): number {
+  let removed = 0;
+  for (const directory of [imageDirectory, referenceDirectory, new Directory(Paths.document, 'reference-documents')]) {
+    try {
+      if (!directory.exists) continue;
+      for (const entry of directory.list()) {
+        if (!(entry instanceof File)) continue;
+        if (referencedNames.has(fileNameOf(entry.uri))) continue;
+        const modified = entry.modificationTime;
+        // modificationTime is in ms on current Expo; treat seconds defensively.
+        const modifiedMs = typeof modified === 'number' ? (modified < 1e12 ? modified * 1000 : modified) : null;
+        if (modifiedMs === null || now - modifiedMs < SWEEP_MIN_AGE_MS) continue;
+        try { entry.delete(); removed += 1; } catch { /* in use or already gone */ }
+      }
+    } catch {
+      // A folder we can't list is simply skipped.
+    }
+  }
+  return removed;
+}
+
 export async function saveToGallery(uri: string): Promise<void> {
   const file = new File(uri);
   if (!file.exists || (file.size ?? 0) === 0) {

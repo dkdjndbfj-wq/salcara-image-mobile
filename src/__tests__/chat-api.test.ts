@@ -27,7 +27,7 @@ jest.mock('expo-file-system', () => ({
 }));
 jest.mock('expo-document-picker', () => ({}));
 
-import { buildChatBody, fetchChatModels, labelConversationImages, MAX_REQUEST_BODY_BYTES, parseChatModels, parseChatText, resetToolSupportCache, runAgentTurn, sendChat, serializeChatBody } from '../api/chat-api';
+import { buildChatBody, clearPdfPageCache, fetchChatModels, labelConversationImages, MAX_REQUEST_BODY_BYTES, parseChatModels, parseChatText, resetToolSupportCache, runAgentTurn, sendChat, serializeChatBody } from '../api/chat-api';
 import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
 
 const request = { baseUrl: 'https://example.com', apiKey: 'test-key', model: 'vision-model', prompt: '按附件做足球场海报' };
@@ -43,6 +43,7 @@ beforeEach(() => {
   resetToolSupportCache();
   mockFetch.mockReset(); mockReadFiles.clear(); mockReadBase64.mockReset();
   mockRenderPdf.mockReset().mockResolvedValue(mockPdfResult);
+  clearPdfPageCache();
   mockCleanupPdf.mockReset();
   mockReadFiles.set(mockPdfResult.pages[0].uri, { size: 128, base64: 'cGFnZS0x' });
   mockReadFiles.set(mockPdfResult.pages[1].uri, { size: 128, base64: 'cGFnZS0y' });
@@ -362,4 +363,66 @@ test('labels images in conversation order and only resends recent history pixels
   await buildChatBody({ ...request, history, references: [image], ...imageTool });
   const read = mockReadBase64.mock.calls.map(([uri]) => uri);
   expect(read).toEqual(['file:///gen-2.png', 'file:///gen-3.png', 'file:///gen-4.png', image.uri]);
+});
+
+test('a 400 that is not about tools does not disable native tools for later turns', async () => {
+  mockFetch
+    .mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ error: { message: 'image input not supported' } }) })
+    .mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ error: { message: 'image input not supported' } }) });
+  await expect(runAgentTurn({ ...request, prompt: '看图', ...imageTool })).rejects.toThrow('image input not supported');
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '你好' } }] }]));
+  await runAgentTurn({ ...request, prompt: '你好', ...imageTool });
+  expect(JSON.parse(mockFetch.mock.calls[2][1].body).tools).toBeDefined();
+});
+
+test('native-tool streams keep text that contains <<< while streaming', async () => {
+  mockFetch.mockResolvedValue(sse([{ choices: [{ delta: { content: 'cat <<<EOF' } }] }]));
+  const seen: string[] = [];
+  await runAgentTurn({ ...request, prompt: 'bash', ...imageTool }, (text) => seen.push(text));
+  expect(seen[0]).toBe('cat <<<EOF');
+});
+
+test('Responses streams keep repeated argument fragments intact', async () => {
+  mockFetch.mockResolvedValue(sse([
+    { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc2', name: 'generate_image', arguments: '' } },
+    { type: 'response.function_call_arguments.delta', item_id: 'fc2', delta: '{"prompt":"a' },
+    { type: 'response.function_call_arguments.delta', item_id: 'fc2', delta: 'a' },
+    { type: 'response.function_call_arguments.delta', item_id: 'fc2', delta: 'a"}' },
+  ]));
+  expect((await runAgentTurn({ ...request, api: 'responses', prompt: '画', ...imageTool })).imageCall?.prompt).toBe('aaa');
+});
+
+test('follow-up questions reuse rendered PDF pages instead of rendering again', async () => {
+  const history: ChatMessage[] = [{ ...baseMessage, id: 'u1', documents: [pdf] }, { ...baseMessage, id: 'a1', role: 'assistant', text: '看完了' }];
+  await buildChatBody({ ...request, documents: [pdf] });
+  const second = await buildChatBody({ ...request, prompt: '第二页讲了什么', history });
+  const third = await buildChatBody({ ...request, prompt: '再总结一下', history: [...history, { ...baseMessage, id: 'u2' }, { ...baseMessage, id: 'a2', role: 'assistant', text: '好的' }] });
+  expect(JSON.stringify(second)).toContain('cGFnZS0y');
+  expect(JSON.stringify(third)).toContain('cGFnZS0y');
+  expect(mockRenderPdf).toHaveBeenCalledTimes(1);
+  expect(mockCleanupPdf).toHaveBeenCalledTimes(1);
+});
+
+test('only the two most recent history turns with files resend them; older ones become a short note', async () => {
+  const doc = (name: string): DocumentAttachment => ({ ...pdf, id: name, uri: `file:///${name}.txt`, name: `${name}.txt`, mimeType: 'text/plain' });
+  ['old', 'mid', 'new'].forEach((name) => mockReadFiles.set(`file:///${name}.txt`, { size: 16, text: `${name}-正文` }));
+  const history: ChatMessage[] = ['old', 'mid', 'new'].flatMap((name) => [
+    { ...baseMessage, id: `u-${name}`, documents: [doc(name)] }, { ...baseMessage, id: `a-${name}`, role: 'assistant' as const, text: '收到' },
+  ]);
+  const serialized = JSON.stringify(await buildChatBody({ ...request, history }));
+  expect(serialized).not.toContain('old-正文');
+  expect(serialized).toContain('较早提供的附件：“old.txt”');
+  expect(serialized).toContain('mid-正文');
+  expect(serialized).toContain('new-正文');
+});
+
+test('a history PDF that can no longer be rendered does not block the current question', async () => {
+  mockRenderPdf.mockRejectedValueOnce(new Error('PDF 文件损坏或已加密'));
+  const body = await buildChatBody({ ...request, prompt: '继续', history: [{ ...baseMessage, documents: [pdf] }, { ...baseMessage, role: 'assistant', text: '好的' }] });
+  expect(JSON.stringify(body)).toContain('已无法读取');
+});
+
+test('a failed Responses stream reports the provider error instead of an empty reply', async () => {
+  mockFetch.mockResolvedValue(sse([{ type: 'response.failed', response: { error: { message: '内容审核未通过' } } }]));
+  await expect(runAgentTurn({ ...request, api: 'responses', toolMode: 'native', imageAvailable: true }, () => undefined)).rejects.toThrow('内容审核未通过');
 });

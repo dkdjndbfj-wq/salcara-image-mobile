@@ -15,7 +15,12 @@ const mockDownload = jest.fn();
 const mockCopyGenerated = jest.fn();
 const mockInsertConversation = jest.fn();
 const mockDeleteEmpty = jest.fn();
+const mockDeleteFile = jest.fn();
 
+jest.mock('expo-crypto', () => {
+  let next = 0;
+  return { randomUUID: () => `test-id-${++next}` };
+});
 jest.mock('../api/chat-api', () => ({ runAgentTurn: (...args: unknown[]) => mockAgent(...args) }));
 jest.mock('../api/image-api', () => ({
   generateImage: (...args: unknown[]) => mockGenerate(...args),
@@ -28,7 +33,7 @@ jest.mock('expo-keep-awake', () => ({ activateKeepAwakeAsync: async () => undefi
 jest.mock('../storage/secure-keys', () => ({ getProviderKey: async () => 'key', deleteProviderKey: async () => undefined }));
 jest.mock('../storage/files', () => ({
   downloadPng: (...args: unknown[]) => mockDownload(...args),
-  deleteLocalFile: () => undefined,
+  deleteLocalFile: (...args: unknown[]) => mockDeleteFile(...args),
   RemoteImageDownloadError: class extends Error {
     remoteImageUrl: string;
     constructor(url: string) { super('图片下载失败'); this.remoteImageUrl = url; }
@@ -85,7 +90,7 @@ beforeEach(() => {
   mockMessages = [];
   mockSettings = {};
   mockOrder.length = 0;
-  [mockAgent, mockGenerate, mockEdit, mockDownload, mockCopyGenerated, mockInsertConversation, mockDeleteEmpty].forEach((mock) => mock.mockReset());
+  [mockAgent, mockGenerate, mockEdit, mockDownload, mockCopyGenerated, mockInsertConversation, mockDeleteEmpty, mockDeleteFile].forEach((mock) => mock.mockReset());
   mockCopyGenerated.mockImplementation(async (uri: string) => ({ id: 'copy', uri: `${uri}.copy.png`, name: 'copy.png', mimeType: 'image/png', size: 1 }));
 });
 
@@ -180,4 +185,113 @@ test('switching models is global and persists', async () => {
   expect(mockSettings.chat_provider_id).toBe('second');
   await act(async () => { await app.selectImageProvider('image', { aspectRatio: '16:9' }); });
   expect(app.imageProvider?.aspectRatio).toBe('16:9');
+});
+
+test('a long drawing keeps running in the background while another conversation is used', async () => {
+  let finishDrawing: (uri: string) => void = () => undefined;
+  let drawingSignal: AbortSignal | undefined;
+  mockAgent.mockImplementation(async (request: { prompt: string }, onText?: (text: string) => void) => {
+    if (request.prompt === '画灯塔') {
+      onText?.('马上画。');
+      return { text: '马上画。', imageCall: { prompt: '灯塔', referenceImages: [], aspectRatio: null, transparent: false }, images: new Map(), toolMode: 'native' };
+    }
+    return { text: '在的。', imageCall: null, images: new Map(), toolMode: 'native' };
+  });
+  mockGenerate.mockImplementation((options: { signal: AbortSignal }) => new Promise<string>((resolve) => { drawingSignal = options.signal; finishDrawing = resolve; }));
+  await mount();
+
+  let drawing: Promise<void> = Promise.resolve();
+  await act(async () => { drawing = app.send({ text: '画灯塔' }); });
+  await waitFor(() => expect(app.phase).toBe('drawing'));
+  const first = app.activeConversationId!;
+  expect(app.busy).toBe(true);
+  await expect(app.send({ text: '再画一张' })).rejects.toThrow('请先等待');
+
+  // Leaving the drawing conversation is allowed and doesn't cancel it.
+  await act(async () => { app.newChat(); });
+  expect(app.busy).toBe(false);
+  expect(app.anyBusy).toBe(true);
+  expect(app.runningConversationIds).toEqual([first]);
+  await act(async () => { await app.send({ text: '你在吗' }); });
+  const second = app.activeConversationId!;
+  expect(second).not.toBe(first);
+  expect(app.messages.map((item) => item.prompt)).toEqual(['你在吗', '你在吗']);
+  expect(app.messages[1]).toMatchObject({ status: 'complete', text: '在的。' });
+  await act(async () => { app.stop(); });
+  expect(drawingSignal?.aborted).toBe(false);
+
+  // Coming back shows the live drawing state, then the finished image.
+  await act(async () => { await app.openConversation(first); });
+  expect(app.busy).toBe(true);
+  expect(app.messages[1]).toMatchObject({ status: 'pending', text: '马上画。', preparedPrompt: '灯塔' });
+  await act(async () => { finishDrawing('file:///lighthouse.png'); await drawing; });
+  expect(app.busy).toBe(false);
+  expect(app.anyBusy).toBe(false);
+  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///lighthouse.png' });
+  // The other conversation was never touched by the drawing's updates.
+  expect(mockMessages.filter((item) => item.conversationId === second).map((item) => item.status)).toEqual(['complete', 'complete']);
+});
+
+test('finishing a background reply does not overwrite the conversation on screen', async () => {
+  let finishReply: () => void = () => undefined;
+  mockAgent.mockImplementationOnce((_request: unknown, onText?: (text: string) => void) => new Promise((resolve) => {
+    onText?.('写到一半');
+    finishReply = () => resolve({ text: '写完了', imageCall: null, images: new Map(), toolMode: 'native' });
+  }));
+  await mount();
+  let pending: Promise<void> = Promise.resolve();
+  await act(async () => { pending = app.send({ text: '写一篇长文' }); });
+  const first = app.activeConversationId!;
+  await act(async () => { app.newChat(); });
+  await act(async () => { finishReply(); await pending; });
+  expect(app.activeConversationId).toBeNull();
+  expect(app.messages).toEqual([]);
+  await act(async () => { await app.openConversation(first); });
+  expect(app.messages[1]).toMatchObject({ status: 'complete', text: '写完了' });
+});
+
+test('deleting a conversation stops its reply; providers cannot be removed mid-reply', async () => {
+  let signal: AbortSignal | undefined;
+  mockAgent.mockImplementationOnce((request: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+    signal = request.signal;
+    request.signal.addEventListener('abort', () => reject(new Error('aborted')));
+  }));
+  await mount();
+  let pending: Promise<void> = Promise.resolve();
+  await act(async () => { pending = app.send({ text: '你好' }); });
+  await expect(app.removeProvider('image')).rejects.toThrow('请先等待');
+  const id = app.activeConversationId!;
+  await act(async () => { await app.deleteConversation(id); await pending; });
+  expect(signal?.aborted).toBe(true);
+  expect(app.anyBusy).toBe(false);
+  expect(app.conversations).toHaveLength(0);
+});
+
+test('regenerating an image deletes the replaced file but keeps the user upload', async () => {
+  mockAgent.mockResolvedValue({ text: '', imageCall: { prompt: '夜景', referenceImages: ['图1'], aspectRatio: null, transparent: false }, images: images([['图1', upload.uri]]), toolMode: 'native' });
+  mockEdit.mockResolvedValueOnce('file:///first.png').mockResolvedValueOnce('file:///second.png');
+  await mount();
+  await act(async () => { await app.send({ text: '改成夜景', images: [upload] }); });
+  expect(app.messages[1].imageUri).toBe('file:///first.png');
+  await act(async () => { await app.retry(app.messages[1]); });
+  expect(app.messages[1].imageUri).toBe('file:///second.png');
+  expect(mockDeleteFile).toHaveBeenCalledWith('file:///first.png');
+  expect(mockDeleteFile).not.toHaveBeenCalledWith(upload.uri);
+});
+
+test('deleting a conversation mid-drawing waits for the run and removes the files it produced', async () => {
+  let finish: (uri: string) => void = () => undefined;
+  mockAgent.mockResolvedValue({ text: '画', imageCall: { prompt: '猫', referenceImages: [], aspectRatio: null, transparent: false }, images: new Map(), toolMode: 'native' });
+  // The provider returns the image just as the user deletes the chat.
+  mockGenerate.mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
+  await mount();
+  let pending: Promise<void> = Promise.resolve();
+  await act(async () => { pending = app.send({ text: '画猫' }); });
+  await waitFor(() => expect(app.phase).toBe('drawing'));
+  const id = app.activeConversationId!;
+  let deleted: Promise<void> = Promise.resolve();
+  await act(async () => { deleted = app.deleteConversation(id); finish('file:///late.png'); await deleted; await pending; });
+  expect(mockMessages).toHaveLength(0);
+  expect(mockDeleteFile).toHaveBeenCalledWith('file:///late.png');
+  expect(app.conversations).toHaveLength(0);
 });

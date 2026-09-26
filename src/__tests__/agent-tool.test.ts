@@ -1,5 +1,5 @@
 import { extractTextToolCall, imageToolDefinition, normalizeImageLabel, parseImageToolArguments, visibleStreamingText } from '../agent/image-tool';
-import { readSse } from '../api/sse';
+import { createUtf8Decoder, readSse } from '../api/sse';
 
 test('parses tool arguments from JSON strings or objects and normalizes labels', () => {
   expect(parseImageToolArguments('{"prompt":" 海边日落 ","reference_images":["图 1","2","图1"],"aspect_ratio":"16:9"}')).toEqual({
@@ -43,4 +43,39 @@ test('SSE reader handles chunk boundaries, comments and JSON fallbacks', async (
   expect(json).toEqual({ kind: 'json', text: '{"ok":true}' });
   const legacy = await readSse({ json: async () => ({ ok: 1 }) }, () => undefined);
   expect(legacy).toEqual({ kind: 'json', text: '{"ok":1}' });
+});
+
+const utf8 = (text: string) => Uint8Array.from(Buffer.from(text, 'utf8'));
+
+test('the built-in UTF-8 decoder keeps Chinese and emoji whole across chunk edges', () => {
+  const bytes = utf8('你好，世界🌙ok');
+  for (let cut = 1; cut < bytes.length; cut += 1) {
+    const decoder = createUtf8Decoder(true);
+    const text = decoder.decode(bytes.slice(0, cut), { stream: true }) + decoder.decode(bytes.slice(cut), { stream: true }) + decoder.decode();
+    expect(text).toBe('你好，世界🌙ok');
+  }
+  expect(createUtf8Decoder(true).decode(Uint8Array.from([0xff, 0x41]))).toBe('�A');
+});
+
+test('streams without a global TextDecoder, with ArrayBuffer chunks and CRLF split across chunks', async () => {
+  const original = (globalThis as { TextDecoder?: unknown }).TextDecoder;
+  (globalThis as { TextDecoder?: unknown }).TextDecoder = undefined;
+  try {
+    const whole = utf8('data: {"t":"流式"}\r\n\r\ndata: [DONE]\r\n\r\n');
+    const cuts = [9, 17, 20, 22];
+    const parts: ArrayBuffer[] = [];
+    let start = 0;
+    for (const cut of [...cuts, whole.length]) { parts.push(whole.slice(start, cut).buffer); start = cut; }
+    const events: string[] = [];
+    let reads = 0;
+    const result = await readSse({
+      headers: { get: () => 'text/event-stream' },
+      body: { getReader: () => ({ read: async () => { reads += 1; return parts.length ? { done: false, value: parts.shift() } : { done: true }; } }) },
+    }, (event) => events.push(event.data));
+    expect(result).toEqual({ kind: 'events' });
+    expect(events).toEqual(['{"t":"流式"}', '[DONE]']);
+    expect(reads).toBeGreaterThan(1);
+  } finally {
+    (globalThis as { TextDecoder?: unknown }).TextDecoder = original;
+  }
 });

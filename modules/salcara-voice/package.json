@@ -1,0 +1,6 @@
+{
+  "name": "salcara-voice",
+  "version": "1.0.0",
+  "private": true,
+  "description": "On-device speech recognition (sherpa-onnx), microphone capture, streaming playback and system TTS for Salcara"
+}

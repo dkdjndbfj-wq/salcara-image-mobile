@@ -1,7 +1,7 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Image, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
-import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg';
+import { Animated, Easing, Image, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
 
 import type { ChatMessage } from '../domain';
 import { attachmentKind } from '../document-inputs';
@@ -10,7 +10,7 @@ import { colors } from '../theme';
 import { LivingMark } from './Brand';
 import { Icon, type IconName } from './Icon';
 import { MessageContent } from './MessageContent';
-import { Appear, useReducedMotion } from './MotionPressable';
+import { Appear, MotionPressable, useReducedMotion } from './MotionPressable';
 import { showToast } from './ui';
 
 type Props = {
@@ -23,13 +23,25 @@ type Props = {
   onPreview: (uri: string) => void;
   onSave: (uri: string) => void;
   onShare: (uri: string) => void;
+  /** Sends a follow-up message, e.g. from the chips under a fresh image. */
+  onFollowUp?: (text: string) => void;
+  /** Long-press on the user's own message (copy / edit and resend). */
+  onUserMessageAction?: (message: ChatMessage) => void;
 };
+
+/** One-tap ways to keep going after an image, like the big assistants offer. */
+const IMAGE_FOLLOW_UPS: Array<{ label: string; prompt: string }> = [
+  { label: '换个风格', prompt: '保持主体和构图，把刚才这张换一种完全不同的艺术风格' },
+  { label: '改成横版', prompt: '把刚才这张改成 16:9 横版构图' },
+  { label: '再来一张', prompt: '同样的想法，再画一张不一样的' },
+  { label: '加点细节', prompt: '在刚才这张的基础上增加更多细节，让画面更精致' },
+];
 
 export const MessageBubble = memo(function MessageBubble(props: Props) {
   return <Appear distance={14} duration={360}>{props.message.role === 'user' ? <UserMessage {...props} /> : <AssistantMessage {...props} />}</Appear>;
 });
 
-function UserMessage({ message, onPreview }: Props) {
+function UserMessage({ message, onPreview, onUserMessageAction }: Props) {
   const docs = message.documents ?? [];
   const single = message.references.length === 1;
   return <View style={styles.userWrap}>
@@ -40,7 +52,11 @@ function UserMessage({ message, onPreview }: Props) {
       </Pressable>)}
     </View>}
     {docs.length > 0 && <View style={styles.userDocs}>{docs.map((doc) => <FileCard key={doc.id} name={doc.name} mimeType={doc.mimeType} size={doc.size} />)}</View>}
-    {message.prompt && !isPlaceholderPrompt(message) ? <View style={styles.userBubble}><Text selectable style={styles.userText}>{message.prompt}</Text></View> : null}
+    {message.prompt && !isPlaceholderPrompt(message) ? <Pressable accessibilityRole="button" accessibilityHint="长按可复制或编辑后重新发送" delayLongPress={320}
+      onLongPress={onUserMessageAction ? () => onUserMessageAction(message) : undefined}
+      style={({ pressed }) => [styles.userBubble, pressed && { opacity: 0.85 }]}>
+      <Text style={styles.userText}>{message.prompt}</Text>
+    </Pressable> : null}
   </View>;
 }
 
@@ -57,7 +73,7 @@ export function FileCard({ name, mimeType, size, onRemove }: { name: string; mim
   </View>;
 }
 
-function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare }: Props) {
+function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare, onFollowUp }: Props) {
   const onRetry = () => retryMessage(message);
   const pending = message.status === 'pending';
   const imageJob = Boolean(message.preparedPrompt) && (message.mode === 'generate' || message.mode === 'edit');
@@ -69,7 +85,7 @@ function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRe
     {pending && !text && !imageJob && <Thinking label={phase === 'downloading' ? '正在取回图片' : '正在思考'} />}
     {text ? <MessageContent text={text} streaming={streaming} /> : null}
     {imageJob && pending && <DrawingCanvas message={message} seconds={elapsedSeconds} onStop={onStop} downloading={phase === 'downloading'} />}
-    {message.imageUri ? <ImageResult message={message} onPreview={onPreview} /> : null}
+    {message.imageUri ? <ImageResult message={message} fresh={isLast} onPreview={onPreview} /> : null}
     {failed && <View style={styles.errorCard}>
       <Icon name="alert" size={18} color={colors.danger} />
       <Text selectable style={styles.errorText}>{message.error || '这次没有完成'}</Text>
@@ -77,7 +93,19 @@ function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRe
     </View>}
     {stopped && <View style={styles.stoppedRow}><Text style={styles.stoppedText}>已停止</Text><Pressable accessibilityRole="button" onPress={onRetry} hitSlop={8}><Text style={styles.retryText}>重新生成</Text></Pressable></View>}
     {!pending && !failed && !stopped && <Actions message={message} text={text} emphasized={isLast} onRetry={onRetry} onSave={onSave} onShare={onShare} />}
+    {isLast && message.imageUri && !pending && onFollowUp ? <FollowUps onPick={onFollowUp} /> : null}
   </View>;
+}
+
+function FollowUps({ onPick }: { onPick: (text: string) => void }) {
+  return <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.followUps} style={styles.followUpRow}>
+    {IMAGE_FOLLOW_UPS.map((item, index) => <Appear key={item.label} delay={420 + index * 60} distance={6}>
+      <MotionPressable accessibilityRole="button" accessibilityLabel={item.label} scaleTo={0.94} onPress={() => onPick(item.prompt)} style={styles.followUp}>
+        <Icon name="sparkles" size={13} color={colors.primary} strokeWidth={2} />
+        <Text style={styles.followUpText}>{item.label}</Text>
+      </MotionPressable>
+    </Appear>)}
+  </ScrollView>;
 }
 
 function Actions({ message, text, emphasized, onRetry, onSave, onShare }: { message: ChatMessage; text: string; emphasized: boolean; onRetry: () => void; onSave: (uri: string) => void; onShare: (uri: string) => void }) {
@@ -169,10 +197,18 @@ function SoftOrb({ color, size }: { color: string; size: number }) {
   </Svg>;
 }
 
-function ImageResult({ message, onPreview }: { message: ChatMessage; onPreview: (uri: string) => void }) {
+/**
+ * A finished image "develops" out of the same aurora the drawing canvas showed,
+ * with one soft light sweep. Older images just fade in quickly.
+ */
+function ImageResult({ message, fresh, onPreview }: { message: ChatMessage; fresh: boolean; onPreview: (uri: string) => void }) {
   const { width } = useWindowDimensions();
+  const reduced = useReducedMotion();
   const [ratio, setRatio] = useState(() => ratioFromSize(message.size));
   const reveal = useRef(new Animated.Value(0)).current;
+  const sweep = useRef(new Animated.Value(0)).current;
+  // Only the image that just finished gets the full reveal (list rows remount on scroll).
+  const [develop] = useState(() => fresh && !reduced && Date.now() - message.createdAt - (message.elapsedMs ?? 0) < 8000);
   const uri = message.imageUri!;
   useEffect(() => {
     let alive = true;
@@ -182,13 +218,39 @@ function ImageResult({ message, onPreview }: { message: ChatMessage; onPreview: 
   const maxWidth = Math.min(width - 40, 420);
   const cardHeight = Math.min(maxWidth / ratio, 520);
   const cardWidth = Math.min(maxWidth, cardHeight * ratio);
-  return <Animated.View style={[styles.imageCard, { width: cardWidth, height: cardHeight, opacity: reveal, transform: [{ scale: reveal.interpolate({ inputRange: [0, 1], outputRange: [0.97, 1] }) }] }]}>
-    <Pressable accessibilityRole="imagebutton" accessibilityLabel="查看大图" onPress={() => onPreview(uri)} style={StyleSheet.absoluteFill}>
-      <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover"
-        onLoad={() => Animated.timing(reveal, { toValue: 1, duration: 520, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start()}
-        onError={() => reveal.setValue(1)} />
-    </Pressable>
-  </Animated.View>;
+  const onLoad = () => {
+    if (!develop) { Animated.timing(reveal, { toValue: 1, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(); return; }
+    Animated.parallel([
+      Animated.timing(reveal, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }),
+      Animated.sequence([Animated.delay(360), Animated.timing(sweep, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver: true })]),
+    ]).start();
+  };
+  const orb = Math.max(cardWidth, cardHeight) * 0.95;
+  const band = Math.max(cardWidth, cardHeight) * 0.5;
+  return <View style={[styles.imageCard, { width: cardWidth, height: cardHeight }]}>
+    {develop && <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <View style={{ position: 'absolute', left: cardWidth * 0.2 - orb / 2, top: cardHeight * 0.2 - orb / 2 }}><SoftOrb color="#8CCBFF" size={orb} /></View>
+      <View style={{ position: 'absolute', left: cardWidth * 0.8 - orb * 0.45, top: cardHeight * 0.65 - orb * 0.45 }}><SoftOrb color="#B9A2FF" size={orb * 0.9} /></View>
+      <View style={{ position: 'absolute', left: cardWidth * 0.45 - orb * 0.37, top: cardHeight * 0.9 - orb * 0.37 }}><SoftOrb color="#FBC2DF" size={orb * 0.75} /></View>
+    </View>}
+    <Animated.View style={[StyleSheet.absoluteFill, { opacity: reveal, transform: [{ scale: reveal.interpolate({ inputRange: [0, 1], outputRange: [develop ? 1.06 : 0.98, 1] }) }] }]}>
+      <Pressable accessibilityRole="imagebutton" accessibilityLabel="查看大图" onPress={() => onPreview(uri)} style={StyleSheet.absoluteFill}>
+        <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" onLoad={onLoad} onError={() => reveal.setValue(1)} />
+      </Pressable>
+    </Animated.View>
+    {develop && <Animated.View pointerEvents="none" style={{
+      position: 'absolute', top: -cardHeight * 0.25, height: cardHeight * 1.5, width: band, left: 0,
+      opacity: sweep.interpolate({ inputRange: [0, 0.15, 0.85, 1], outputRange: [0, 1, 1, 0] }),
+      transform: [{ translateX: sweep.interpolate({ inputRange: [0, 1], outputRange: [-band * 1.2, cardWidth + band * 0.2] }) }, { rotate: '18deg' }],
+    }}>
+      <Svg width={band} height={cardHeight * 1.5}>
+        <Defs><SvgLinearGradient id={`sweep${message.id}`} x1="0" y1="0" x2="1" y2="0">
+          <Stop offset="0" stopColor="#FFFFFF" stopOpacity={0} /><Stop offset="0.5" stopColor="#FFFFFF" stopOpacity={0.38} /><Stop offset="1" stopColor="#FFFFFF" stopOpacity={0} />
+        </SvgLinearGradient></Defs>
+        <Rect x="0" y="0" width={band} height={cardHeight * 1.5} fill={`url(#sweep${message.id})`} />
+      </Svg>
+    </Animated.View>}
+  </View>;
 }
 
 function isPlaceholderPrompt(message: ChatMessage) {
@@ -239,6 +301,10 @@ const styles = StyleSheet.create({
   stopLink: { marginLeft: 'auto', paddingHorizontal: 12, height: 28, borderRadius: 14, backgroundColor: colors.surfaceStrong, justifyContent: 'center' },
   stopText: { color: colors.textSecondary, fontSize: 12.5, fontWeight: '600' },
   imageCard: { borderRadius: 22, overflow: 'hidden', backgroundColor: colors.surface },
+  followUpRow: { marginTop: 2, marginHorizontal: -20, alignSelf: 'stretch', flexGrow: 0 },
+  followUps: { flexDirection: 'row', gap: 8, paddingHorizontal: 20 },
+  followUp: { flexDirection: 'row', alignItems: 'center', gap: 5, height: 34, paddingHorizontal: 12, borderRadius: 17, backgroundColor: colors.primarySoft },
+  followUpText: { color: colors.primaryDeep, fontSize: 13, fontWeight: '500' },
   errorCard: { alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 16, backgroundColor: colors.dangerSurface },
   errorText: { flex: 1, minWidth: 160, color: colors.textSecondary, fontSize: 14, lineHeight: 20 },
   retry: { paddingHorizontal: 4 },

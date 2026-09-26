@@ -13,6 +13,10 @@ const mockGetKey = jest.fn();
 jest.mock('expo/fetch', () => ({ fetch: (...args: unknown[]) => mockFetch(...args) }));
 jest.mock('../storage/secure-keys', () => ({ getProviderKey: (...args: unknown[]) => mockGetKey(...args) }));
 jest.mock('../components/Icon', () => ({ Icon: () => null }));
+jest.mock('react-native-svg', () => {
+  const Stub = () => null;
+  return { __esModule: true, default: Stub, Svg: Stub, Defs: Stub, LinearGradient: Stub, RadialGradient: Stub, Stop: Stub, Rect: Stub, Path: Stub, Circle: Stub, Text: Stub };
+});
 jest.mock('@expo/vector-icons', () => {
   const ReactModule = require('react');
   const { Text } = require('react-native');

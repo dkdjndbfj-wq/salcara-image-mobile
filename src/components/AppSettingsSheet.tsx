@@ -7,12 +7,18 @@ import { colors, prettyModel } from '../theme';
 import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { Group, ListRow, SectionLabel, Sheet } from './ui';
+import { modelById } from '../voice/catalog';
+import { useVoiceSettings } from '../voice/settings';
 
-export function AppSettingsSheet({ visible, onClose, onOpenProviders, onOpenModels, onOpenNetwork, onOpenAbout, onCheckUpdates }: {
+export function AppSettingsSheet({ visible, onClose, onOpenProviders, onOpenModels, onOpenNetwork, onOpenAbout, onCheckUpdates, onOpenVoice }: {
   visible: boolean; onClose: () => void; onOpenProviders: () => void; onOpenModels: () => void; onOpenNetwork: () => void; onOpenAbout: () => void; onCheckUpdates: () => void;
+  onOpenVoice: () => void;
 }) {
+  const voice = useVoiceSettings();
   const { providers, chatProvider, imageProvider } = useApp();
-  const go = (callback: () => void) => () => { onClose(); callback(); };
+  // Sub-pages open on top of Settings, so Back returns here instead of to the chat.
+  const go = (callback: () => void) => () => { callback(); };
+  const leave = (callback: () => void) => () => { onClose(); callback(); };
   return <Sheet visible={visible} title="设置" onClose={onClose} presentation="page">
     <View style={styles.body}>
       <View style={styles.hero}>
@@ -25,13 +31,14 @@ export function AppSettingsSheet({ visible, onClose, onOpenProviders, onOpenMode
       <Group>
         <ListRow first icon="chat" title="对话模型" value={prettyModel(chatProvider?.chatModel) || '未设置'} onPress={go(onOpenModels)} />
         <ListRow icon="palette" title="绘图模型" value={prettyModel(imageProvider?.model) || '未设置'} onPress={go(onOpenModels)} />
+        <ListRow icon="mic" title="语音" value={voice.inputEngine === 'local' ? (modelById(voice.localModel)?.name ?? '本地模型') : '云端识别'} onPress={go(onOpenVoice)} />
         <ListRow icon="server" title="服务" value={providers.length ? `${providers.length} 个` : '未连接'} onPress={go(onOpenProviders)} />
       </Group>
 
       <SectionLabel>通用</SectionLabel>
       <Group>
         <ListRow first icon="globe" title="网络诊断" onPress={go(onOpenNetwork)} />
-        <ListRow icon="cloudDown" title="检查更新" onPress={go(onCheckUpdates)} />
+        <ListRow icon="cloudDown" title="检查更新" onPress={leave(onCheckUpdates)} />
         <ListRow icon="info" title="关于与反馈" onPress={go(onOpenAbout)} />
       </Group>
 

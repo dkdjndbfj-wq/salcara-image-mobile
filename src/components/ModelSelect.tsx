@@ -64,7 +64,7 @@ const styles = StyleSheet.create({
   option: { minHeight: 58, paddingVertical: 10, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 16 },
   selected: { backgroundColor: colors.blueSurface },
   optionTitle: { color: colors.text, fontSize: 15.5, fontWeight: '500' },
-  optionId: { color: colors.faint, fontSize: 12, marginTop: 2 },
+  optionId: { color: colors.subtle, fontSize: 12, marginTop: 2 },
   empty: { paddingVertical: 36, color: colors.subtle, fontSize: 14, textAlign: 'center' },
   manual: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border, marginTop: 4, paddingTop: 4 },
   manualToggle: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14 },

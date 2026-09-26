@@ -12,7 +12,7 @@ import { AppDialog, dismissKeyboardAndBlur, MotionPressable, useReducedMotion, t
 export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings }: {
   visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void;
 }) {
-  const { conversations, activeConversationId, chatProvider, imageProvider, openConversation, deleteConversation, renameConversation, busy } = useApp();
+  const { conversations, activeConversationId, chatProvider, imageProvider, openConversation, deleteConversation, renameConversation, runningConversationIds } = useApp();
   const [query, setQuery] = useState('');
   const [mounted, setMounted] = useState(visible);
   const [menuFor, setMenuFor] = useState<Conversation | null>(null);
@@ -85,11 +85,11 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
               <TextInput placeholder="搜索" accessibilityLabel="搜索对话" value={query} onChangeText={setQuery} style={styles.searchInput} placeholderTextColor={colors.subtle} />
               {query ? <Pressable accessibilityLabel="清空搜索" hitSlop={8} onPress={() => setQuery('')}><Icon name="close" size={15} color={colors.subtle} strokeWidth={2} /></Pressable> : null}
             </View>
-            <MotionPressable scaleTo={0.88} accessibilityRole="button" accessibilityLabel="新对话" disabled={busy} onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={[styles.compose, busy && { opacity: 0.4 }]}>
+            <MotionPressable scaleTo={0.88} accessibilityRole="button" accessibilityLabel="新对话" onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={styles.compose}>
               <Icon name="compose" size={21} color={colors.text} />
             </MotionPressable>
           </View>
-          <Pressable accessibilityRole="button" accessibilityLabel="开始新对话" disabled={busy} onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={({ pressed }) => [styles.brandRow, pressed && { backgroundColor: colors.surface }]}>
+          <Pressable accessibilityRole="button" accessibilityLabel="开始新对话" onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={({ pressed }) => [styles.brandRow, pressed && { backgroundColor: colors.surface }]}>
             <BrandMark size={30} />
             <Text style={styles.brand}>Salcara</Text>
           </Pressable>
@@ -104,7 +104,7 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
               {group.items.map((conversation) => {
                 const active = conversation.id === activeConversationId;
                 const delay = Math.min(rowIndex++, 12) * 22;
-                return <DrawerRow key={conversation.id} delay={visible ? delay : 0} active={active} title={conversation.title}
+                return <DrawerRow key={conversation.id} delay={visible ? delay : 0} active={active} title={conversation.title} running={runningConversationIds.includes(conversation.id)}
                   onPress={() => open(conversation)} onMore={() => setMenuFor(conversation)} />;
               })}
             </View>)}
@@ -136,18 +136,35 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
   </Modal>;
 }
 
-function DrawerRow({ title, active, delay, onPress, onMore }: { title: string; active: boolean; delay: number; onPress: () => void; onMore: () => void }) {
+function DrawerRow({ title, active, running, delay, onPress, onMore }: { title: string; active: boolean; running: boolean; delay: number; onPress: () => void; onMore: () => void }) {
   const appear = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(appear, { toValue: 1, duration: 260, delay, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
   }, [appear, delay]);
   return <Animated.View style={{ opacity: appear, transform: [{ translateX: appear.interpolate({ inputRange: [0, 1], outputRange: [-12, 0] }) }] }}>
-    <Pressable accessibilityRole="button" accessibilityState={{ selected: active }} onPress={onPress} onLongPress={onMore} delayLongPress={320}
+    <Pressable accessibilityRole="button" accessibilityState={{ selected: active, busy: running }} onPress={onPress} onLongPress={onMore} delayLongPress={320}
       style={({ pressed }) => [styles.row, active && styles.rowActive, pressed && !active && { backgroundColor: colors.surface }]}>
-            <Text style={[styles.rowTitle, active && styles.rowTitleActive]} numberOfLines={1}>{title}</Text>
+      <Text style={[styles.rowTitle, active && styles.rowTitleActive]} numberOfLines={1}>{title}</Text>
+      {running && <RunningDot />}
       <Pressable accessibilityLabel={`更多操作：${title}`} hitSlop={6} onPress={onMore} style={styles.more}><Icon name="more" size={18} color={active ? colors.text : colors.faint} /></Pressable>
     </Pressable>
   </Animated.View>;
+}
+
+/** Soft breathing dot: this conversation is still replying or drawing in the background. */
+function RunningDot() {
+  const reduced = useReducedMotion();
+  const pulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (reduced) return;
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 0.35, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, reduced]);
+  return <Animated.View accessibilityLabel="进行中" style={[styles.runningDot, { opacity: pulse }]} />;
 }
 
 const styles = StyleSheet.create({
@@ -170,6 +187,7 @@ const styles = StyleSheet.create({
   rowActive: { backgroundColor: colors.surfaceStrong },
   rowTitle: { flex: 1, color: colors.textSecondary, fontSize: 15 },
   rowTitleActive: { color: colors.text, fontWeight: '500' },
+  runningDot: { width: 7, height: 7, borderRadius: 4, marginLeft: 8, backgroundColor: colors.primary },
   more: { width: 40, height: 44, alignItems: 'center', justifyContent: 'center' },
   settings: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 64, paddingHorizontal: 8, borderRadius: 16, marginBottom: 6, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   avatar: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },

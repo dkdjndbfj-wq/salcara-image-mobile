@@ -10,8 +10,14 @@ export const RESOLUTION_MAP: Record<AspectRatio, Record<ResolutionTier, string>>
 
 export const ALL_QUALITIES: Quality[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
 
+let fallbackCounter = 0;
+/** Unique id. Falls back to a time+random id if the native UUID source is unavailable (e.g. in tests). */
 export function createId(): string {
-  return randomUUID();
+  let id: unknown;
+  try { id = randomUUID?.(); } catch { id = undefined; }
+  if (typeof id === 'string' && id) return id;
+  fallbackCounter = (fallbackCounter + 1) % 1_000_000;
+  return `${Date.now().toString(36)}-${fallbackCounter.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export function normalizeBaseUrl(input: string): string {

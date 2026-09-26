@@ -21,7 +21,7 @@ const PROTOCOLS: { value: ChatApi; title: string }[] = [
 const IMAGE_MODEL = /image|dall-e|flux|imagen|seedream|midjourney|sd-|stable/i;
 
 export function ProviderManager({ visible, onClose, focusProviderId }: { visible: boolean; onClose: () => void; focusProviderId?: string | null }) {
-  const { providers, chatProvider, imageProvider, reloadProviders, selectChatProvider, selectImageProvider, removeProvider, busy } = useApp();
+  const { providers, chatProvider, imageProvider, reloadProviders, selectChatProvider, selectImageProvider, removeProvider } = useApp();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Form>(emptyForm);
   const [showKey, setShowKey] = useState(false);
@@ -81,20 +81,42 @@ export function ProviderManager({ visible, onClose, focusProviderId }: { visible
     }
   };
   const save = async () => {
-    if (saving || busy) return;
+    if (saving) return;
     setSaving(true);
     try {
       const { baseUrl, key } = await connection();
-      if (!form.useChat && !form.useImage) throw new Error('请至少开启“对话”或“绘图”中的一项');
-      if (form.useChat && !form.chatModel.trim()) throw new Error('请选择对话模型');
-      if (form.useImage && !form.model.trim()) throw new Error('请选择图片模型');
-      const existing = providers.find((item) => item.id === form.id);
+      let draft = form;
+      // “连接” works without a separate “测试连接”: fill missing models from the service's list.
+      if ((draft.useChat && !draft.chatModel.trim()) || (draft.useImage && !draft.model.trim())) {
+        try {
+          const list = await fetchChatModels(baseUrl, key, draft.chatApi);
+          if (list.length) {
+            setModels(list);
+            const chatModel = draft.chatModel.trim() || list.find((item) => !IMAGE_MODEL.test(item)) || '';
+            const model = draft.model.trim() || list.find((item) => /gpt-image/i.test(item)) || list.find((item) => IMAGE_MODEL.test(item)) || '';
+            draft = {
+              ...draft, name: draft.name || hostLabel(baseUrl), chatModel, model,
+              // A new service only keeps the capabilities it actually offers.
+              useChat: draft.id ? draft.useChat : draft.useChat && Boolean(chatModel),
+              useImage: draft.id ? draft.useImage : draft.useImage && Boolean(model),
+            };
+            setForm(draft);
+            setStatus({ state: 'ok', message: `连接成功 · ${list.length} 个模型` });
+          }
+        } catch {
+          // Validation below explains what is missing.
+        }
+      }
+      if (!draft.useChat && !draft.useImage) throw new Error('请至少开启“对话”或“绘图”中的一项');
+      if (draft.useChat && !draft.chatModel.trim()) throw new Error('请选择对话模型');
+      if (draft.useImage && !draft.model.trim()) throw new Error('请选择图片模型');
+      const existing = providers.find((item) => item.id === draft.id);
       const now = Date.now();
-      const id = form.id ?? createId();
-      const model = form.useImage ? form.model.trim() : null;
+      const id = draft.id ?? createId();
+      const model = draft.useImage ? draft.model.trim() : null;
       const profile: ProviderProfile = {
-        id, name: form.name.trim() || hostLabel(baseUrl), baseUrl,
-        chatModel: form.useChat ? form.chatModel.trim() : null, chatApi: form.chatApi,
+        id, name: draft.name.trim() || hostLabel(baseUrl), baseUrl,
+        chatModel: draft.useChat ? draft.chatModel.trim() : null, chatApi: draft.chatApi,
         model,
         quality: model ? (existing?.quality && qualitiesForModel(model).includes(existing.quality) ? existing.quality : 'auto') : null,
         aspectRatio: model ? existing?.aspectRatio ?? '1:1' : null,
@@ -103,12 +125,12 @@ export function ProviderManager({ visible, onClose, focusProviderId }: { visible
         createdAt: existing?.createdAt ?? now, updatedAt: now,
       };
       await upsertProvider(profile);
-      if (form.apiKey.trim() || !form.id) await saveProviderKey(id, key);
+      if (draft.apiKey.trim() || !draft.id) await saveProviderKey(id, key);
       await reloadProviders();
-      if (profile.chatModel && (!chatProvider || !form.id)) await selectChatProvider(id);
-      if (profile.model && (!imageProvider || !form.id)) await selectImageProvider(id);
+      if (profile.chatModel && (!chatProvider || !draft.id)) await selectChatProvider(id);
+      if (profile.model && (!imageProvider || !draft.id)) await selectImageProvider(id);
       setEditing(false);
-      if (!form.id && providers.length === 0) onClose();
+      if (!draft.id && providers.length === 0) onClose();
     } catch (error) {
       setDialog({ title: '还差一点', message: error instanceof Error ? error.message : '请检查配置', icon: 'alert' });
     } finally { setSaving(false); }
@@ -122,7 +144,7 @@ export function ProviderManager({ visible, onClose, focusProviderId }: { visible
   };
 
   const footer = editing
-    ? <PrimaryButton label={form.id ? '保存' : '连接'} loading={saving} disabled={busy} onPress={() => void save()} />
+    ? <PrimaryButton label={form.id ? '保存' : '连接'} loading={saving} onPress={() => void save()} />
     : <PrimaryButton label="添加服务" icon="plus" onPress={startNew} />;
   const firstRun = !providers.length;
 

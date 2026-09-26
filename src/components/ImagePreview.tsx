@@ -1,3 +1,4 @@
+import { StatusBar } from 'expo-status-bar';
 import React, { useEffect } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -5,6 +6,7 @@ import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-na
 
 import { colors, radius } from '../theme';
 import { Icon } from './Icon';
+import { ToastHost } from './ui';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 const MIN_SCALE = 1;
@@ -85,6 +87,7 @@ export function ImagePreview({ uri, onClose, onSave, onShare }: { uri: string | 
 
   return <Modal visible={Boolean(uri)} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
     <GestureHandlerRootView style={styles.modalRoot}>
+      <StatusBar style="light" />
       <SafeAreaView style={styles.preview}>
         <View style={styles.topBar}>
           <Pressable accessibilityLabel="关闭预览" onPress={onClose} style={styles.glass}><Icon name="close" size={20} color="#fff" strokeWidth={2} /></Pressable>
@@ -103,6 +106,7 @@ export function ImagePreview({ uri, onClose, onSave, onShare }: { uri: string | 
           {onShare && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.action, pressed && { opacity: 0.85 }]} onPress={() => onShare(uri)}><Icon name="share" size={19} color="#fff" strokeWidth={1.9} /><Text style={styles.actionText}>分享</Text></Pressable>}
         </View>}
       </SafeAreaView>
+      <ToastHost />
     </GestureHandlerRootView>
   </Modal>;
 }

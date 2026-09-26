@@ -76,15 +76,26 @@ describe('OpenAI-compatible image payloads', () => {
     await expect(persistApiResult({ data: [{ url: 'https://cdn.example/result.png' }] })).resolves.toBe('file://download-result.png');
   });
 
-  test('uses one alternate Android fetch transport after a pre-response failure', async () => {
+  test('uses one alternate Android fetch transport only when the request never reached the server', async () => {
     const fetchMock = jest.spyOn(global, 'fetch')
-      .mockRejectedValueOnce(new Error('Network request failed'))
+      .mockRejectedValueOnce(new Error('java.net.ConnectException: Failed to connect to salcara.top/1.2.3.4:443'))
       .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ b64_json: 'YWJjZA==' }] }) } as Response);
     await expect(generateImage({
       ...common, baseUrl: 'https://salcara.top/v1', apiKey: 'test-key', transparent: false,
     })).resolves.toBe('file://base64-YWJj.png');
     expect(fetchMock).toHaveBeenCalledTimes(2);
     fetchMock.mockRestore();
+  });
+
+  test('never resends a paid image request after an ambiguous or mid-response failure', async () => {
+    for (const message of ['Network request failed', 'stream was reset: CANCEL', 'java.net.SocketTimeoutException: timeout']) {
+      const fetchMock = jest.spyOn(global, 'fetch').mockRejectedValueOnce(new Error(message));
+      await expect(generateImage({
+        ...common, baseUrl: 'https://salcara.top/v1', apiKey: 'test-key', transparent: false,
+      })).rejects.toThrow('生图接口');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      fetchMock.mockRestore();
+    }
   });
 
   test('uses inline data URLs without another network dependency', async () => {
@@ -106,4 +117,14 @@ describe('OpenAI-compatible image payloads', () => {
     await expect(persistApiResult({ data: [] })).rejects.toThrow('没有找到图片数据');
     await expect(persistApiResult({ data: [] })).rejects.toThrow('URL 转 base64');
   });
+});
+
+test('never shows the API key even when a relay echoes it without a known prefix', async () => {
+  const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({ error: { message: 'bad key relay-KEY-123456' } }) } as Response);
+  const failure = await generateImage({ prompt: 'x', model: 'gpt-image-2', quality: 'auto', size: '1024x1024', baseUrl: 'https://salcara.top/v1', apiKey: 'relay-KEY-123456', transparent: false })
+    .then(() => null, (error: Error) => error);
+  expect(failure instanceof Error).toBe(true);
+  expect(failure!.message.includes('relay-KEY-123456')).toBe(false);
+  expect(failure!.message).toContain('[已隐藏密钥]');
+  fetchMock.mockRestore();
 });

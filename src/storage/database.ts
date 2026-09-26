@@ -84,8 +84,7 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
           provider_id TEXT NOT NULL,
           transparent INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
+          updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS messages (
           id TEXT PRIMARY KEY NOT NULL,
@@ -136,6 +135,7 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         creation_skill_json: 'TEXT',
         creation_notes: 'TEXT',
       });
+      await detachConversationsFromProviders(db);
       await db.runAsync(
         `UPDATE messages SET status = 'interrupted', error = '应用在生成期间被关闭' WHERE status = 'pending'`,
       );
@@ -143,6 +143,37 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
     });
   }
   return databasePromise;
+}
+
+/**
+ * Installs up to 1.4 created conversations with ON DELETE CASCADE to their
+ * provider, so removing a provider silently deleted its chat history. History
+ * now outlives providers: rebuild the table once without that foreign key
+ * (SQLite's documented table-rebuild procedure; messages are untouched).
+ */
+async function detachConversationsFromProviders(db: SQLite.SQLiteDatabase): Promise<void> {
+  const keys = await db.getAllAsync<{ table: string }>('PRAGMA foreign_key_list(conversations)');
+  if (!keys.some((key) => key.table === 'providers')) return;
+  await db.execAsync(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+    CREATE TABLE conversations_detached (
+      id TEXT PRIMARY KEY NOT NULL,
+      title TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      transparent INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'image'
+    );
+    INSERT INTO conversations_detached (id, title, provider_id, transparent, created_at, updated_at, mode)
+      SELECT id, title, provider_id, transparent, created_at, updated_at, mode FROM conversations;
+    DROP TABLE conversations;
+    ALTER TABLE conversations_detached RENAME TO conversations;
+    CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
 }
 
 async function addMissingColumns(
@@ -244,6 +275,27 @@ export async function reassignConversations(fromProviderId: string, toProviderId
   await (await getDatabase()).runAsync('UPDATE conversations SET provider_id = ? WHERE provider_id = ?', toProviderId, fromProviderId);
 }
 
+/** File names of every local file a saved message refers to (images, masks, references, documents). */
+export async function listReferencedFileNames(): Promise<Set<string>> {
+  const rows = await (await getDatabase()).getAllAsync<{ image_uri: string | null; mask_uri: string | null; references_json: string; documents_json: string }>(
+    'SELECT image_uri, mask_uri, references_json, documents_json FROM messages',
+  );
+  const names = new Set<string>();
+  const add = (uri: unknown) => {
+    if (typeof uri !== 'string' || !uri) return;
+    const name = decodeURIComponent(uri.split('?')[0].replace(/\/+$/, '').split('/').pop() ?? '');
+    if (name) names.add(name);
+  };
+  for (const row of rows) {
+    add(row.image_uri);
+    add(row.mask_uri);
+    for (const json of [row.references_json, row.documents_json]) {
+      try { (JSON.parse(json || '[]') as Array<{ uri?: unknown }>).forEach((item) => add(item?.uri)); } catch { /* malformed row */ }
+    }
+  }
+  return names;
+}
+
 /** Removes conversation rows that never received a message (legacy blank drafts). */
 export async function deleteEmptyConversations(): Promise<void> {
   await (await getDatabase()).runAsync('DELETE FROM conversations WHERE id NOT IN (SELECT DISTINCT conversation_id FROM messages)');
@@ -337,7 +389,8 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
 export async function updateMessage(message: ChatMessage): Promise<void> {
   await (await getDatabase()).runAsync(
     `UPDATE messages SET status = ?, image_uri = ?, remote_image_url = ?, error = ?, elapsed_ms = ?, references_json = ?, mask_uri = ?,
-       documents_json = ?, text = ?, prepared_prompt = ?, analysis_model = ?, analysis_provider_id = ?, request_api = ?, analysis_api = ?, creation_skill_json = ?, creation_notes = ?
+       documents_json = ?, text = ?, prepared_prompt = ?, analysis_model = ?, analysis_provider_id = ?, request_api = ?, analysis_api = ?, creation_skill_json = ?, creation_notes = ?,
+       mode = ?, provider_id = ?, model = ?, quality = ?, size = ?, transparent = ?, prompt = ?
      WHERE id = ?`,
     message.status,
     message.imageUri,
@@ -355,6 +408,13 @@ export async function updateMessage(message: ChatMessage): Promise<void> {
     message.analysisApi ?? null,
     null,
     null,
+    message.mode,
+    message.providerId,
+    message.model,
+    message.quality,
+    message.size,
+    message.transparent ? 1 : 0,
+    message.prompt,
     message.id,
   );
 }

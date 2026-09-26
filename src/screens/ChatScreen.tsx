@@ -1,3 +1,4 @@
+import * as Clipboard from 'expo-clipboard';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
@@ -7,6 +8,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AboutSheet } from '../components/AboutSheet';
 import { AppSettingsSheet } from '../components/AppSettingsSheet';
 import { BrandMark, GradientText, LivingMark } from '../components/Brand';
+import { InspirationGrid, type InspirationItem } from '../components/Inspiration';
+import { useLaunchRevealed } from '../components/LaunchIntro';
+import { LiveMode } from '../components/LiveMode';
+import { VoiceSettingsSheet } from '../components/VoiceSettingsSheet';
+import { useDictation } from '../voice/useDictation';
 import { Icon } from '../components/Icon';
 import { Composer } from '../components/Composer';
 import { ConversationDrawer } from '../components/ConversationDrawer';
@@ -21,25 +27,31 @@ import { UpdateManager } from '../components/UpdateManager';
 import { isImageAttachment, pickAnyFiles, validateAttachments } from '../document-inputs';
 import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
 import { pickFromFiles, pickFromGallery, prepareReferenceForMask, prepareReferenceFromAttachment, takePhoto } from '../image-inputs';
-import { useApp } from '../state/AppContext';
+import { useApp, useElapsedSeconds } from '../state/AppContext';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
-import { colors, prettyModel, shadow } from '../theme';
+import { colors, prettyModel, radius, shadow } from '../theme';
 
 type Dialog = { title: string; message: string; actions?: DialogAction[]; icon?: IconName };
 
-const SUGGESTIONS: { icon: IconName; title: string; hint: string; prompt?: string; action?: 'files' | 'gallery'; draw?: boolean }[] = [
-  { icon: 'palette', title: '创作一幅画', hint: '晨光里在云上打盹的橘猫', prompt: '画一只在云朵上打盹的橘猫，晨光，柔和水彩风格', draw: true },
-  { icon: 'file', title: '读懂一份文件', hint: '总结要点、提炼数据', action: 'files' },
-  { icon: 'scan', title: '看图解答', hint: '拍一张照片来问我', action: 'gallery' },
-  { icon: 'lightbulb', title: '一起想点子', hint: '周末去哪儿玩更有意思', prompt: '帮我策划一个轻松有趣的周末：' },
+/** Quick tools under the inspiration grid. */
+const SUGGESTIONS: { icon: IconName; title: string; hint: string; prompt?: string; action?: 'files' | 'gallery' | 'camera'; draw?: boolean }[] = [
   { icon: 'wand', title: '改一张照片', hint: '换背景、换风格、局部重绘', action: 'gallery', draw: true },
+  { icon: 'file', title: '读懂文件', hint: '总结要点、提炼数据', action: 'files' },
+  { icon: 'scan', title: '拍照提问', hint: '拍一张照片来问我', action: 'camera' },
+  { icon: 'lightbulb', title: '一起想点子', hint: '周末去哪儿玩更有意思', prompt: '帮我策划一个轻松有趣的周末：' },
 ];
 
 export function ChatScreen() {
   const app = useApp();
+  const revealed = useLaunchRevealed();
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const inputRef = useRef<TextInput>(null);
   const followRef = useRef(true);
+  const draggingRef = useRef(false);
+  /** After switching conversations, jump to the end instantly instead of animating through history. */
+  const instantScrollRef = useRef(true);
+  const lastFollowRef = useRef(0);
+  const elapsedSeconds = useElapsedSeconds();
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ReferenceImage[]>([]);
   const [documents, setDocuments] = useState<DocumentAttachment[]>([]);
@@ -48,6 +60,8 @@ export function ChatScreen() {
   const [drawer, setDrawer] = useState(false);
   const [settings, setSettings] = useState(false);
   const [providersOpen, setProvidersOpen] = useState(false);
+  const [liveOpen, setLiveOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [modelsOpen, setModelsOpen] = useState(false);
   const [about, setAbout] = useState(false);
   const [network, setNetwork] = useState(false);
@@ -63,22 +77,48 @@ export function ChatScreen() {
   // Stable callbacks keep memoized message rows from re-rendering on every tick.
   const { retry: retryMessage, stop } = app;
   const onRetry = useCallback((message: ChatMessage) => void retryMessage(message).catch((error) => report('无法重试', error)), [retryMessage, report]);
+  const dictation = useDictation({
+    providers: app.providers, chatProvider: app.chatProvider, onText: setPrompt,
+    onError: (error) => report('语音输入没有完成', error, 'mic'),
+  });
+  const sendMessage = app.send;
+  const followUp = useCallback((text: string) => {
+    followRef.current = true;
+    setShowJump(false);
+    void sendMessage({ text }).catch((error) => report('没有发送出去', error));
+  }, [sendMessage, report]);
+  const userMessageAction = useCallback((message: ChatMessage) => setDialog({
+    title: '这条消息', message: message.prompt.length > 80 ? `${message.prompt.slice(0, 80)}…` : message.prompt, icon: 'chat',
+    actions: [
+      { label: '复制', tone: 'secondary', onPress: () => { setDialog(null); void Clipboard.setStringAsync(message.prompt).then(() => showToast('已复制')); } },
+      { label: '编辑后重新发送', tone: 'primary', onPress: () => { setDialog(null); setPrompt(message.prompt); setTimeout(() => inputRef.current?.focus(), 80); } },
+    ],
+  }), []);
   const saveImage = useCallback((uri: string) => void saveToGallery(uri).then(() => showToast('已保存到相册')).catch((error) => report('保存失败', error)), [report]);
   const share = useCallback((uri: string) => void shareImage(uri).catch((error) => report('分享失败', error)), [report]);
 
 
-  // Drafts belong to the conversation they were written in.
-  const draftRef = useRef({ images, documents, maskUri });
-  draftRef.current = { images, documents, maskUri };
+  // Each conversation keeps its own unsent draft (text + attachments), like a mail app.
+  const draftRef = useRef({ prompt, images, documents, maskUri });
+  draftRef.current = { prompt, images, documents, maskUri };
+  const drafts = useRef(new Map<string, typeof draftRef.current>());
+  const draftKey = useRef(app.activeConversationId ?? 'new');
   useEffect(() => {
     followRef.current = true;
     setShowJump(false);
-    const draft = draftRef.current;
-    if (!draft.images.length && !draft.documents.length && !draft.maskUri) return;
-    draft.images.forEach((item) => deleteLocalFile(item.uri));
-    draft.documents.forEach((item) => deleteLocalFile(item.uri));
-    deleteLocalFile(draft.maskUri);
-    setImages([]); setDocuments([]); setMaskUri(null);
+    const next = app.activeConversationId ?? 'new';
+    if (next === draftKey.current) return;
+    instantScrollRef.current = true;
+    const current = draftRef.current;
+    if (current.prompt.trim() || current.images.length || current.documents.length || current.maskUri) drafts.current.set(draftKey.current, current);
+    else drafts.current.delete(draftKey.current);
+    const restored = drafts.current.get(next);
+    drafts.current.delete(next);
+    draftKey.current = next;
+    setPrompt(restored?.prompt ?? '');
+    setImages(restored?.images ?? []);
+    setDocuments(restored?.documents ?? []);
+    setMaskUri(restored?.maskUri ?? null);
   }, [app.activeConversationId]);
 
   if (!app.ready) {
@@ -150,7 +190,7 @@ export function ChatScreen() {
     followRef.current = true;
     setShowJump(false);
     setPrompt(''); setImages([]); setDocuments([]); setMaskUri(null);
-    draftRef.current = { images: [], documents: [], maskUri: null };
+    draftRef.current = { prompt: '', images: [], documents: [], maskUri: null };
     void app.send(sent).catch((error) => {
       setPrompt(text); setImages(sent.images); setDocuments(sent.documents); setMaskUri(sent.maskUri);
       report('没有发送出去', error);
@@ -170,7 +210,12 @@ export function ChatScreen() {
     if (item.action === 'gallery' && item.draw) setPrompt('把这张照片换成');
     if (item.action === 'files') { void addFiles(); return; }
     if (item.action === 'gallery') { void addImages('gallery'); return; }
+    if (item.action === 'camera') { void addImages('camera'); return; }
     setPrompt(item.prompt ?? '');
+    setTimeout(() => inputRef.current?.focus(), 60);
+  };
+  const useInspiration = (item: InspirationItem) => {
+    setPrompt(item.prompt);
     setTimeout(() => inputRef.current?.focus(), 60);
   };
 
@@ -182,7 +227,7 @@ export function ChatScreen() {
 
   if (!connected) {
     return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
-      <Welcome onStart={() => setProvidersOpen(true)} />
+      <Welcome key={revealed ? 'shown' : 'intro'} onStart={() => setProvidersOpen(true)} />
       <ProviderManager visible={providersOpen} onClose={() => setProvidersOpen(false)} />
       <ToastHost />
     </SafeAreaView>;
@@ -196,12 +241,12 @@ export function ChatScreen() {
         {engine ? <Text style={styles.engine} numberOfLines={1}>{engine}</Text> : null}
         <Icon name="chevronRight" size={15} color={colors.subtle} strokeWidth={2} />
       </MotionPressable>
-      <IconButton icon="compose" label="新对话" disabled={app.busy || isDraft} onPress={newChat} />
+      <IconButton icon="compose" label="新对话" disabled={isDraft} onPress={newChat} />
     </View>
 
     <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       {app.messages.length === 0
-        ? <Home key={app.activeConversationId ?? 'draft'} canDraw={Boolean(app.imageProvider)} onSuggestion={useSuggestion} />
+        ? <Home key={`${app.activeConversationId ?? 'draft'}${revealed ? '' : ':intro'}`} canDraw={Boolean(app.imageProvider)} onSuggestion={useSuggestion} onInspiration={useInspiration} />
         : <View style={{ flex: 1 }}>
           <FlatList
             ref={listRef}
@@ -214,21 +259,41 @@ export function ChatScreen() {
             onScroll={(event) => {
               const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
               const near = contentSize.height - layoutMeasurement.height - contentOffset.y < 120;
-              followRef.current = near;
+              // While the user holds the list, never pull it back down.
+              if (!draggingRef.current) followRef.current = near;
               if (near === showJump) setShowJump(!near);
             }}
+            onScrollBeginDrag={() => { draggingRef.current = true; followRef.current = false; }}
+            onScrollEndDrag={(event) => {
+              draggingRef.current = false;
+              const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
+              followRef.current = contentSize.height - layoutMeasurement.height - contentOffset.y < 40;
+            }}
             scrollEventThrottle={64}
-            onContentSizeChange={() => { if (followRef.current) listRef.current?.scrollToEnd({ animated: true }); }}
+            onContentSizeChange={() => {
+              if (!followRef.current) return;
+              if (instantScrollRef.current) {
+                instantScrollRef.current = false;
+                listRef.current?.scrollToEnd({ animated: false });
+                return;
+              }
+              const now = Date.now();
+              if (now - lastFollowRef.current < 120) return;
+              lastFollowRef.current = now;
+              listRef.current?.scrollToEnd({ animated: true });
+            }}
             renderItem={({ item }) => <MessageBubble
               message={item}
               phase={item.id === lastId ? app.phase : 'idle'}
-              elapsedSeconds={item.id === lastId ? app.elapsedSeconds : 0}
+              elapsedSeconds={item.id === lastId && item.preparedPrompt ? elapsedSeconds : 0}
               isLast={item.id === lastId}
               onStop={stop}
               onRetry={onRetry}
               onPreview={setPreviewUri}
               onSave={saveImage}
               onShare={share}
+              onFollowUp={followUp}
+              onUserMessageAction={userMessageAction}
             />}
           />
           {showJump && <Appear style={styles.jumpWrap} distance={6}>
@@ -252,7 +317,12 @@ export function ChatScreen() {
         onRemoveImage={removeImage}
         onRemoveDocument={removeDocument}
         onEditMask={() => void openMask()}
-        placeholder={images.length ? '想怎么处理这张图？' : documents.length ? '想从文件里了解什么？' : undefined}
+        placeholder={dictation.state !== 'idle' ? '正在听…' : images.length ? '想怎么处理这张图？' : documents.length ? '想从文件里了解什么？' : undefined}
+        dictation={{
+          state: dictation.state, level: dictation.level, startedAt: dictation.startedAt,
+          onStart: () => { void dictation.start(prompt); }, onStop: () => { void dictation.stop(); }, onCancel: dictation.cancel,
+        }}
+        onOpenLive={app.chatProvider ? () => { dismissKeyboardAndBlur(); setLiveOpen(true); } : undefined}
       />
     </KeyboardAvoidingView>
 
@@ -267,7 +337,10 @@ export function ChatScreen() {
     <ConversationDrawer visible={drawer} onClose={() => setDrawer(false)} onNewChat={newChat} onOpenSettings={() => setSettings(true)} />
     <AppSettingsSheet visible={settings} onClose={() => setSettings(false)}
       onOpenProviders={() => setProvidersOpen(true)} onOpenModels={() => setModelsOpen(true)}
-      onOpenNetwork={() => setNetwork(true)} onOpenAbout={() => setAbout(true)} onCheckUpdates={() => setUpdateToken((value) => value + 1)} />
+      onOpenNetwork={() => setNetwork(true)} onOpenAbout={() => setAbout(true)} onCheckUpdates={() => setUpdateToken((value) => value + 1)}
+      onOpenVoice={() => setVoiceOpen(true)} />
+    <LiveMode visible={liveOpen} paused={voiceOpen} onClose={() => setLiveOpen(false)} onOpenSettings={() => setVoiceOpen(true)} />
+    <VoiceSettingsSheet visible={voiceOpen} onClose={() => setVoiceOpen(false)} />
     <ProviderManager visible={providersOpen} onClose={() => setProvidersOpen(false)} />
     <ModelSwitcher visible={modelsOpen} onClose={() => setModelsOpen(false)} onManageProviders={() => setProvidersOpen(true)} />
     <AboutSheet visible={about} onClose={() => setAbout(false)} onCheckUpdates={() => setUpdateToken((value) => value + 1)} />
@@ -290,7 +363,7 @@ function greeting() {
   return hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 13 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
 }
 
-function Home({ canDraw, onSuggestion }: { canDraw: boolean; onSuggestion: (item: typeof SUGGESTIONS[number]) => void }) {
+function Home({ canDraw, onSuggestion, onInspiration }: { canDraw: boolean; onSuggestion: (item: typeof SUGGESTIONS[number]) => void; onInspiration: (item: InspirationItem) => void }) {
   const { width } = useWindowDimensions();
   const items = SUGGESTIONS.filter((item) => canDraw || !item.draw);
   return <View style={{ flex: 1 }}>
@@ -298,13 +371,13 @@ function Home({ canDraw, onSuggestion }: { canDraw: boolean; onSuggestion: (item
       <Appear distance={8}><LivingMark size={34} /></Appear>
       <Appear delay={90} distance={12}><GradientText text={greeting()} fontSize={34} width={Math.min(width - 56, 360)} /></Appear>
       <Appear delay={170} distance={12}><Text style={styles.homeSubtitle}>{canDraw ? '想聊点什么，\n或者让我画点什么？' : '今天想聊点什么？'}</Text></Appear>
+      <InspirationGrid canDraw={canDraw} onPick={onInspiration} />
     </ScrollView>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.suggestions} keyboardShouldPersistTaps="handled">
       {items.map((item, index) => <Appear key={item.title} delay={260 + index * 60} distance={10}>
         <MotionPressable scaleTo={0.96} accessibilityRole="button" accessibilityLabel={item.title} onPress={() => onSuggestion(item)} style={styles.suggestion}>
-          <Icon name={item.icon} size={20} color={colors.primary} />
+          <Icon name={item.icon} size={17} color={colors.primary} />
           <Text style={styles.suggestionTitle}>{item.title}</Text>
-          <Text style={styles.suggestionHint} numberOfLines={1}>{item.hint}</Text>
         </MotionPressable>
       </Appear>)}
     </ScrollView>
@@ -354,12 +427,11 @@ const styles = StyleSheet.create({
   messages: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 28, gap: 26, width: '100%', maxWidth: 780, alignSelf: 'center' },
   jumpWrap: { position: 'absolute', bottom: 12, alignSelf: 'center' },
   jump: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.soft },
-  home: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 28, paddingBottom: 40, gap: 10 },
-  homeSubtitle: { color: '#B3B8CE', fontSize: 30, lineHeight: 40, fontWeight: '500', letterSpacing: -0.6 },
+  home: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 20, paddingTop: 24, paddingBottom: 20, gap: 10 },
+  homeSubtitle: { color: '#8A90A9', fontSize: 26, lineHeight: 35, fontWeight: '500', letterSpacing: -0.5 },
   suggestions: { paddingHorizontal: 12, gap: 8, paddingBottom: 4 },
-  suggestion: { width: 164, minHeight: 104, padding: 14, borderRadius: 20, backgroundColor: colors.surface, gap: 4 },
-  suggestionTitle: { color: colors.text, fontSize: 14.5, fontWeight: '600', marginTop: 10 },
-  suggestionHint: { color: colors.subtle, fontSize: 12.5 },
+  suggestion: { flexDirection: 'row', alignItems: 'center', gap: 7, height: 40, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.surface },
+  suggestionTitle: { color: colors.textSecondary, fontSize: 13.5, fontWeight: '500' },
   attachRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 18, paddingTop: 8 },
   attachTile: { height: 96, borderRadius: 22, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', gap: 10 },
   attachLabel: { color: colors.text, fontSize: 14, fontWeight: '500' },
