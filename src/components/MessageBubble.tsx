@@ -232,7 +232,7 @@ const styles = StyleSheet.create({
   thinking: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 28 },
   thinkingText: { color: colors.textMuted, fontSize: 15 },
   canvas: { borderRadius: 22, overflow: 'hidden', backgroundColor: '#F3F2FF' },
-  canvasGlass: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.18)' },
+  canvasGlass: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(255,255,255,0.18)' },
   drawingCaption: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   drawingText: { color: colors.textSecondary, fontSize: 14.5, fontWeight: '500' },
   drawingSeconds: { color: colors.subtle, fontWeight: '400' },
