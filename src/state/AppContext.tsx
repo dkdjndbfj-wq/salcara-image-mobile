@@ -2,13 +2,15 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 import { editImage, generateImage, normalizeError } from '../api/image-api';
-import { prepareImagePrompt, sendChat } from '../api/chat-api';
+import { prepareCreationSkill, prepareImagePrompt, sendChat } from '../api/chat-api';
+import { creationRequestIntent, snapshotCreationSkill } from '../creation-skills';
 import { validateAttachments } from '../document-inputs';
 import type {
   AspectRatio,
   ChatMessage,
   ChatApi,
   ComposerMode,
+  CreationSkillId,
   Conversation,
   DocumentAttachment,
   ProviderProfile,
@@ -17,7 +19,6 @@ import type {
   ResolutionTier,
 } from '../domain';
 import { createConversationTitle, createId, latestCompletedImage, sizeFor } from '../domain-utils';
-import { inferRequestIntent } from '../request-intent';
 import { createReferenceFromGenerated } from '../image-inputs';
 import {
   deleteConversationRecord,
@@ -48,6 +49,7 @@ type ProviderSettings = {
   chatModel?: string;
   chatApi?: ChatApi;
   analysisProviderId?: string | null;
+  imageProviderId?: string | null;
 };
 
 interface AppContextValue {
@@ -65,6 +67,7 @@ interface AppContextValue {
   reloadProviders: () => Promise<void>;
   activateProvider: (providerId: string) => Promise<void>;
   updateActiveProviderSettings: (settings: ProviderSettings) => Promise<void>;
+  updateProviderSettings: (providerId: string, settings: ProviderSettings) => Promise<void>;
   removeProvider: (providerId: string) => Promise<void>;
   startConversation: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
@@ -76,6 +79,7 @@ interface AppContextValue {
     maskUri?: string | null,
     continueFromPrevious?: boolean,
     documents?: DocumentAttachment[],
+    creationSkillId?: CreationSkillId | null,
   ) => Promise<void>;
   cancelGeneration: () => void;
   retryMessage: (message: ChatMessage) => Promise<void>;
@@ -172,16 +176,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setComposerModeState(mode);
   }, [activeConversation, refreshConversations]);
 
-  const updateActiveProviderSettings = useCallback(
-    async (settings: ProviderSettings) => {
+  const updateProviderSettings = useCallback(
+    async (providerId: string, settings: ProviderSettings) => {
       if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
-      if (!activeProvider) throw new Error('请先添加服务商');
-      const updated: ProviderProfile = { ...activeProvider, ...settings, updatedAt: Date.now() };
+      const provider = providers.find((item) => item.id === providerId);
+      if (!provider) throw new Error('服务商配置已不存在');
+      const updated: ProviderProfile = { ...provider, ...settings, updatedAt: Date.now() };
       await upsertProvider(updated);
       setProviders((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     },
-    [activeProvider],
+    [providers],
   );
+
+  const updateActiveProviderSettings = useCallback(async (settings: ProviderSettings) => {
+    if (!activeProvider) throw new Error('请先添加服务商');
+    await updateProviderSettings(activeProvider.id, settings);
+  }, [activeProvider, updateProviderSettings]);
 
   const startConversation = useCallback(async () => {
     if (requestLockRef.current) throw new Error('请先等待或取消当前请求');
@@ -321,14 +331,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             if (!analyst || !assistantMessage.analysisModel) throw new Error('请先配置用于分析附件和确认作图需求的对话服务商与模型');
             const analysisKey = await getProviderKey(analyst.id);
             if (!analysisKey) throw new Error('解析服务商的 API 密钥不存在');
-            setRequestStage(assistantMessage.documents?.length ? '正在分析附件并确认作图需求' : '正在确认作图需求');
-            const preparedPrompt = await prepareImagePrompt({
+            setRequestStage(assistantMessage.creationSkill ? `正在检查${assistantMessage.creationSkill.title}方案` : assistantMessage.documents?.length ? '正在分析附件并确认作图需求' : '正在确认作图需求');
+            const analysisRequest = {
               baseUrl: analyst.baseUrl, apiKey: analysisKey, model: assistantMessage.analysisModel,
               api: assistantMessage.analysisApi ?? analyst.chatApi,
               history, prompt, references, documents: assistantMessage.documents,
               signal: controller.signal,
-            });
-            workingMessage = { ...workingMessage, preparedPrompt };
+            };
+            const plan = assistantMessage.creationSkill
+              ? await prepareCreationSkill({ ...analysisRequest, skill: assistantMessage.creationSkill, imageSettings: {
+                model: assistantMessage.model, quality: assistantMessage.quality, size: assistantMessage.size,
+                transparent: assistantMessage.transparent, hasMask: Boolean(maskUri),
+              } })
+              : { prompt: await prepareImagePrompt(analysisRequest), notes: null };
+            workingMessage = { ...workingMessage, preparedPrompt: plan.prompt, creationNotes: plan.notes };
             // Persist the analysis before the paid image call so a manual retry
             // can reuse it without charging for the same document analysis again.
             await updateMessage(workingMessage);
@@ -393,20 +409,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       maskUri?: string | null,
       continueFromPrevious = true,
       documents: DocumentAttachment[] = [],
+      creationSkillId?: CreationSkillId | null,
     ) => {
       const provider = activeProvider;
       if (!provider) throw new Error('请先添加服务商');
       if (!prompt.trim() && !references.length && !documents.length) throw new Error('请输入内容，或添加需要解析的图片 / 文件');
       if (requestLockRef.current) throw new Error('当前请求尚未完成');
 
-      const intent = inferRequestIntent(prompt, references, documents, composerMode);
+      const selectedSkill = snapshotCreationSkill(creationSkillId);
+      const intent = creationRequestIntent(prompt, references, documents, composerMode, selectedSkill);
       const isImage = intent !== 'chat';
+      const creationSkill = isImage ? selectedSkill : null;
       // The active provider remains the conversation owner, but each request
       // may use its independent capability provider. This is what allows a
       // chat-only provider and an image-only provider to coexist naturally.
-      const imageProvider = provider.model
-        ? provider
-        : providers.find((item) => Boolean(item.model));
+      const configuredImageProvider = provider.imageProviderId
+        ? providers.find((item) => item.id === provider.imageProviderId && item.model)
+        : undefined;
+      const imageProvider = configuredImageProvider
+        || (provider.model ? provider : undefined)
+        || providers.find((item) => Boolean(item.model));
       const configuredChatProvider = provider.analysisProviderId
         ? providers.find((item) => item.id === provider.analysisProviderId && item.chatModel)
         : undefined;
@@ -416,26 +438,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       if (isImage && !imageProvider) throw new Error('未配置图片服务商，请在服务商管理中添加图片 API');
       if (!isImage && !chatProvider?.chatModel) throw new Error('未配置对话服务商，请在服务商管理中添加对话 API');
-      if (isImage && composerMode === 'auto' && !chatProvider?.chatModel) {
+      if (isImage && (composerMode === 'auto' || creationSkill) && !chatProvider?.chatModel) {
         throw new Error('自动生图需要先由对话 API 确认作图需求。请先添加对话服务商，或手动切换为“仅图片创作”。');
       }
       if (isImage && (!imageProvider?.model || !imageProvider.quality || !imageProvider.aspectRatio || !imageProvider.resolutionTier)) {
-        throw new Error('请先在图片服务商中选择模型、画质、比例和清晰度');
+        throw new Error('请在聊天的“模型与创作参数”中选择图片模型、画质、比例和清晰度');
       }
 
       // If the user analysed a PDF and then asks for an image in the same
       // conversation, carry the latest document into the planning request even
       // though the attachment tray was cleared after the first message.
       const previousDocumentMessage = [...messages].reverse().find((item) => item.documents?.length);
-      const requestDocuments = isImage && composerMode === 'auto' && documents.length === 0
+      const requestDocuments = isImage && (composerMode === 'auto' || creationSkill) && documents.length === 0
         ? previousDocumentMessage?.documents ?? []
         : documents;
       const configuredAnalyst = isImage && imageProvider?.analysisProviderId
         ? providers.find((item) => item.id === imageProvider.analysisProviderId)
         : undefined;
-      const needsImagePlanning = isImage && (composerMode === 'auto' || requestDocuments.length > 0);
+      const needsImagePlanning = isImage && (composerMode === 'auto' || requestDocuments.length > 0 || Boolean(creationSkill));
       const analyst = needsImagePlanning
-        ? (configuredAnalyst?.chatModel ? configuredAnalyst : chatProvider)
+        ? (configuredChatProvider || (configuredAnalyst?.chatModel ? configuredAnalyst : chatProvider))
         : undefined;
       validateAttachments(requestDocuments, references);
       if (requestDocuments.length && isImage && !analyst?.chatModel) {
@@ -453,6 +475,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       }
       validateAttachments(requestDocuments, requestReferences);
+      if (creationSkill?.requiresReference && !requestReferences.length) {
+        throw new Error('“参考图修改”需要一张主图，请添加图片或选择“续改上一张”后发送');
+      }
 
       let conversation = activeConversation;
       const now = Date.now();
@@ -485,7 +510,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const baseMessage = {
         conversationId: conversation.id,
         prompt: prompt.trim() || '请分析所附资料。',
-        mode: intent,
+        mode: isImage && requestReferences.length ? 'edit' as const : intent,
         providerId: isImage ? imageProvider!.id : chatProvider!.id,
         model: (isImage ? imageProvider!.model : chatProvider!.chatModel)!,
         quality: imageProvider?.quality ?? 'auto',
@@ -497,6 +522,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         analysisProviderId: analyst?.id ?? null,
         analysisModel: analyst?.chatModel ?? null,
         analysisApi: analyst?.chatApi ?? 'chat-completions',
+        creationSkill,
         maskUri: isImage ? maskUri ?? null : null,
         error: null,
         elapsedMs: null,
@@ -568,6 +594,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       reloadProviders,
       activateProvider,
       updateActiveProviderSettings,
+      updateProviderSettings,
       removeProvider,
       startConversation,
       selectConversation,
@@ -592,6 +619,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       reloadProviders,
       activateProvider,
       updateActiveProviderSettings,
+      updateProviderSettings,
       removeProvider,
       startConversation,
       selectConversation,

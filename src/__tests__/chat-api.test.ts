@@ -27,7 +27,8 @@ jest.mock('expo-file-system', () => ({
 }));
 jest.mock('expo-document-picker', () => ({}));
 
-import { buildChatBody, fetchChatModels, MAX_REQUEST_BODY_BYTES, parseChatModels, parseChatText, prepareImagePrompt, sendChat, serializeChatBody } from '../api/chat-api';
+import { buildChatBody, fetchChatModels, MAX_REQUEST_BODY_BYTES, parseChatModels, parseChatText, prepareCreationSkill, prepareImagePrompt, sendChat, serializeChatBody } from '../api/chat-api';
+import { snapshotCreationSkill } from '../creation-skills';
 import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
 
 const request = { baseUrl: 'https://example.com', apiKey: 'test-key', model: 'vision-model', prompt: '按附件做足球场海报' };
@@ -272,4 +273,17 @@ test('cancellation during PDF page reads cleans the cache and never sends a paid
   expect(mockCleanupPdf).toHaveBeenCalledWith(mockPdfResult);
   expect(mockFetch).not.toHaveBeenCalled();
   mockReadBase64.mockReset();
+});
+
+test('creation skill requests check actual image settings through the chosen chat API', async () => {
+  mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ decision: 'ready', prompt: '蓝色足球场海报，留出下方正文区', textMode: 'layout', layoutNotes: '底部正文：开放日 10 月 1 日' }) } }] }) });
+  const plan = await prepareCreationSkill({ ...request, skill: snapshotCreationSkill('poster-layout')!, imageSettings: { model: 'user-image-model', quality: 'medium', size: '2048x1152', transparent: true, hasMask: false } });
+  expect(mockFetch).toHaveBeenCalledTimes(1);
+  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+  expect(body.model).toBe('vision-model');
+  expect(body.messages[0].content).toContain('user-image-model');
+  expect(body.messages[0].content).toContain('medium');
+  expect(body.messages[0].content).toContain('当前应用不会在本地叠加文字');
+  expect(plan.prompt).not.toContain('开放日');
+  expect(plan.notes).toContain('开放日 10 月 1 日');
 });

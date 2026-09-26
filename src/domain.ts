@@ -9,6 +9,17 @@ export type ChatApi = 'chat-completions' | 'responses' | 'anthropic';
 /** How a local attachment is prepared before it is sent to a model. */
 export type AttachmentKind = 'pdf' | 'text' | 'office' | 'archive' | 'image' | 'binary';
 
+export type CreationSkillId = 'image-create' | 'reference-edit' | 'poster-layout';
+
+/** A request keeps its selected workflow even when the built-in catalog changes. */
+export interface CreationSkillSnapshot {
+  id: CreationSkillId;
+  revision: number;
+  title: string;
+  instructions: string;
+  requiresReference: boolean;
+}
+
 export interface ProviderProfile {
   id: string;
   name: string;
@@ -20,6 +31,7 @@ export interface ProviderProfile {
   chatModel?: string | null;
   chatApi?: ChatApi;
   analysisProviderId?: string | null;
+  imageProviderId?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -78,6 +90,9 @@ export interface ChatMessage {
   analysisProviderId?: string | null;
   requestApi?: ChatApi;
   analysisApi?: ChatApi;
+  creationSkill?: CreationSkillSnapshot | null;
+  /** Planning notes, including exact copy reserved for later typography. */
+  creationNotes?: string | null;
   maskUri: string | null;
   error: string | null;
   elapsedMs: number | null;

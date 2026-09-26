@@ -16,6 +16,7 @@ type ProviderRow = {
   chat_model: string | null;
   chat_api: ProviderProfile['chatApi'];
   analysis_provider_id: string | null;
+  image_provider_id: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -52,6 +53,8 @@ type MessageRow = {
   analysis_provider_id: string | null;
   request_api: ChatMessage['requestApi'];
   analysis_api: ChatMessage['analysisApi'];
+  creation_skill_json: string | null;
+  creation_notes: string | null;
   mask_uri: string | null;
   error: string | null;
   elapsed_ms: number | null;
@@ -116,6 +119,7 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         chat_model: 'TEXT',
         chat_api: "TEXT NOT NULL DEFAULT 'chat-completions'",
         analysis_provider_id: 'TEXT',
+        image_provider_id: 'TEXT',
       });
       // Existing installs receive the legacy image default for rows created by
       // the old schema; all new rows are written explicitly as auto below.
@@ -129,6 +133,8 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         analysis_provider_id: 'TEXT',
         request_api: 'TEXT',
         analysis_api: 'TEXT',
+        creation_skill_json: 'TEXT',
+        creation_notes: 'TEXT',
       });
       await db.runAsync(
         `UPDATE messages SET status = 'interrupted', error = '应用在生成期间被关闭' WHERE status = 'pending'`,
@@ -165,8 +171,8 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
   const db = await getDatabase();
   await db.runAsync(
     `INSERT INTO providers
-      (id, name, base_url, model, quality, aspect_ratio, resolution_tier, chat_model, chat_api, analysis_provider_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, base_url, model, quality, aspect_ratio, resolution_tier, chat_model, chat_api, analysis_provider_id, image_provider_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       base_url = excluded.base_url,
@@ -177,6 +183,7 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
       chat_model = excluded.chat_model,
       chat_api = excluded.chat_api,
       analysis_provider_id = excluded.analysis_provider_id,
+      image_provider_id = excluded.image_provider_id,
       updated_at = excluded.updated_at`,
     profile.id,
     profile.name,
@@ -188,6 +195,7 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
     profile.chatModel ?? null,
     profile.chatApi ?? 'chat-completions',
     profile.analysisProviderId ?? null,
+    profile.imageProviderId ?? null,
     profile.createdAt,
     profile.updatedAt,
   );
@@ -270,8 +278,8 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
     `INSERT INTO messages
       (id, conversation_id, role, prompt, mode, status, provider_id, model, quality, size,
        transparent, image_uri, remote_image_url, references_json, mask_uri, error, elapsed_ms, created_at,
-       documents_json, text, prepared_prompt, analysis_model, analysis_provider_id, request_api, analysis_api)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       documents_json, text, prepared_prompt, analysis_model, analysis_provider_id, request_api, analysis_api, creation_skill_json, creation_notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     message.id,
     message.conversationId,
     message.role,
@@ -297,13 +305,15 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
     message.analysisProviderId ?? null,
     message.requestApi ?? null,
     message.analysisApi ?? null,
+    message.creationSkill ? JSON.stringify(message.creationSkill) : null,
+    message.creationNotes ?? null,
   );
 }
 
 export async function updateMessage(message: ChatMessage): Promise<void> {
   await (await getDatabase()).runAsync(
     `UPDATE messages SET status = ?, image_uri = ?, remote_image_url = ?, error = ?, elapsed_ms = ?, references_json = ?, mask_uri = ?,
-       documents_json = ?, text = ?, prepared_prompt = ?, analysis_model = ?, analysis_provider_id = ?, request_api = ?, analysis_api = ?
+       documents_json = ?, text = ?, prepared_prompt = ?, analysis_model = ?, analysis_provider_id = ?, request_api = ?, analysis_api = ?, creation_skill_json = ?, creation_notes = ?
      WHERE id = ?`,
     message.status,
     message.imageUri,
@@ -319,6 +329,8 @@ export async function updateMessage(message: ChatMessage): Promise<void> {
     message.analysisProviderId ?? null,
     message.requestApi ?? null,
     message.analysisApi ?? null,
+    message.creationSkill ? JSON.stringify(message.creationSkill) : null,
+    message.creationNotes ?? null,
     message.id,
   );
 }
@@ -335,6 +347,7 @@ function mapProvider(row: ProviderRow): ProviderProfile {
     chatModel: row.chat_model ?? null,
     chatApi: row.chat_api === 'responses' || row.chat_api === 'anthropic' ? row.chat_api : 'chat-completions',
     analysisProviderId: row.analysis_provider_id ?? null,
+    imageProviderId: row.image_provider_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -353,6 +366,15 @@ function mapConversation(row: ConversationRow): Conversation {
 }
 
 function mapMessage(row: MessageRow): ChatMessage {
+  let creationSkill: ChatMessage['creationSkill'] = null;
+  try {
+    const parsed = row.creation_skill_json ? JSON.parse(row.creation_skill_json) as Record<string, unknown> : null;
+    if (parsed && ['image-create', 'reference-edit', 'poster-layout'].includes(String(parsed.id))
+      && Number.isInteger(parsed.revision) && typeof parsed.title === 'string'
+      && typeof parsed.instructions === 'string' && typeof parsed.requiresReference === 'boolean') {
+      creationSkill = parsed as unknown as ChatMessage['creationSkill'];
+    }
+  } catch { /* Older messages do not contain a workflow snapshot. */ }
   let references: ReferenceImage[] = [];
   try {
     references = JSON.parse(row.references_json) as ReferenceImage[];
@@ -388,6 +410,8 @@ function mapMessage(row: MessageRow): ChatMessage {
     analysisProviderId: row.analysis_provider_id ?? null,
     requestApi: row.request_api ?? undefined,
     analysisApi: row.analysis_api ?? undefined,
+    creationSkill,
+    creationNotes: row.creation_notes ?? null,
     maskUri: row.mask_uri,
     error: row.error,
     elapsedMs: row.elapsed_ms,

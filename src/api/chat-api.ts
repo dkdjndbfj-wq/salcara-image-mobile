@@ -6,6 +6,7 @@ import { normalizeBaseUrl, redactSensitiveText } from '../domain-utils';
 import { attachmentKind, MAX_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES, validateAttachments } from '../document-inputs';
 import { prepareAttachment } from '../file-content';
 import { cleanupPdfRender, renderPdfPages } from '../pdf-inputs';
+import { creationPlanningInstructions, parseCreationPlan, type CreationPlan, type CreationSettingsSnapshot, type CreationSkillSnapshot } from '../creation-skills';
 
 export interface ChatRequest {
   baseUrl: string;
@@ -66,6 +67,16 @@ export async function prepareImagePrompt(request: ChatRequest): Promise<string> 
   const result = await execute(request, IMAGE_INSTRUCTIONS);
   if (result.length > 16_000) throw new ChatApiError('文件分析得到的作图说明过长，请缩小文档范围后重试');
   return `用户原始作图要求：\n${request.prompt.trim()}\n\n根据参考资料整理的作图说明：\n${result}`;
+}
+
+/** A skill is local guidance; the model performs the check before image billing. */
+export async function prepareCreationSkill(request: ChatRequest & {
+  skill: CreationSkillSnapshot;
+  imageSettings: CreationSettingsSnapshot;
+}): Promise<CreationPlan> {
+  const instructions = `${CHAT_INSTRUCTIONS}\n${creationPlanningInstructions(request.skill, request.imageSettings)}`;
+  const result = await execute(request, instructions);
+  try { return parseCreationPlan(result); } catch (error) { throw normalizeChatError(error, request.apiKey); }
 }
 
 async function execute(request: ChatRequest, instructions: string): Promise<string> {

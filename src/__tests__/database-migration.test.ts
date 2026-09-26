@@ -12,6 +12,7 @@ jest.mock('expo-sqlite', () => ({
 
 import { initializeDatabase, insertConversation, insertMessage, listConversations, listMessages, listProviders, updateMessage, upsertProvider } from '../storage/database';
 import type { ChatMessage, ProviderProfile } from '../domain';
+import { snapshotCreationSkill } from '../creation-skills';
 
 beforeAll(() => {
   mockNativeDb.exec(`
@@ -34,9 +35,9 @@ afterAll(() => mockNativeDb.close());
 
 test('additive migrations preserve installed providers, conversations and images', async () => {
   await initializeDatabase();
-  expect((await listProviders())[0]).toMatchObject({ id: 'old', model: 'gpt-image-2', chatModel: null, chatApi: 'chat-completions' });
+  expect((await listProviders())[0]).toMatchObject({ id: 'old', model: 'gpt-image-2', chatModel: null, chatApi: 'chat-completions', imageProviderId: null });
   expect((await listConversations())[0]).toMatchObject({ id: 'old-c', mode: 'image', transparent: true });
-  expect((await listMessages('old-c'))[0]).toMatchObject({ imageUri: 'file:///original.png', documents: [], text: null, preparedPrompt: null });
+  expect((await listMessages('old-c'))[0]).toMatchObject({ imageUri: 'file:///original.png', documents: [], text: null, preparedPrompt: null, creationSkill: null, creationNotes: null });
   await initializeDatabase();
   expect(await listProviders()).toHaveLength(1);
 });
@@ -44,7 +45,7 @@ test('additive migrations preserve installed providers, conversations and images
 test('roundtrips chat settings, document attachments and resumable prepared prompts', async () => {
   const profile: ProviderProfile = {
     id: 'new', name: '聊天', baseUrl: 'https://chat.example.com/v1', model: null, quality: null, aspectRatio: null,
-    resolutionTier: null, createdAt: 2, updatedAt: 2, chatModel: 'custom-vision', chatApi: 'responses', analysisProviderId: 'old',
+    resolutionTier: null, createdAt: 2, updatedAt: 2, chatModel: 'custom-vision', chatApi: 'responses', analysisProviderId: 'old', imageProviderId: 'old',
   };
   await upsertProvider(profile);
   await insertConversation({ id: 'new-c', title: '文档对话', providerId: 'new', mode: 'chat', transparent: false, createdAt: 2, updatedAt: 2 });
@@ -53,14 +54,17 @@ test('roundtrips chat settings, document attachments and resumable prepared prom
     model: 'custom-vision', quality: 'auto', size: '', transparent: false, imageUri: null, remoteImageUrl: null, references: [], maskUri: null,
     error: null, elapsedMs: null, createdAt: 2, requestApi: 'responses', analysisApi: 'chat-completions',
     documents: [{ id: 'd', uri: 'file:///source.pdf', name: '方案.pdf', mimeType: 'application/pdf', size: 10 }],
+    creationSkill: snapshotCreationSkill('poster-layout'),
   };
   await insertMessage(message);
-  await updateMessage({ ...message, status: 'complete', text: '已解析', preparedPrompt: '根据场地尺寸生图', analysisModel: 'vision', analysisProviderId: 'old' });
+  expect((await listMessages('new-c'))[0].creationSkill).toEqual(message.creationSkill);
+  await updateMessage({ ...message, status: 'complete', text: '已解析', preparedPrompt: '根据场地尺寸生图', analysisModel: 'vision', analysisProviderId: 'old', creationNotes: '底部正文尚未叠排：欢迎参加' });
   expect((await listProviders()).find((item) => item.id === 'new')).toMatchObject(profile);
   expect((await listConversations()).find((item) => item.id === 'new-c')?.mode).toBe('chat');
   expect((await listMessages('new-c'))[0]).toMatchObject({
     documents: message.documents, text: '已解析', preparedPrompt: '根据场地尺寸生图', analysisModel: 'vision', analysisProviderId: 'old',
     requestApi: 'responses', analysisApi: 'chat-completions',
+    creationSkill: message.creationSkill, creationNotes: '底部正文尚未叠排：欢迎参加',
   });
 });
 

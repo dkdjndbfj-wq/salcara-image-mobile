@@ -33,10 +33,10 @@ export function ReferenceTray({
           const index = getIndex() ?? 0;
           return (
             <ScaleDecorator>
-              <Pressable onLongPress={drag} disabled={isActive} style={[styles.item, isActive && styles.dragging]}>
-                <Image source={{ uri: item.uri }} style={{ width: 76, height: 76 }} />
+              <Pressable accessibilityLabel={index === 0 ? '主图，长按排序' : `参考图 ${index}，长按排序`} onLongPress={drag} disabled={isActive} style={[styles.item, isActive && styles.dragging]}>
+                <Image source={{ uri: item.uri }} style={{ width: 64, height: 64 }} />
                 <View style={styles.tag}><Text style={styles.tagText}>{index === 0 ? '主图' : `参考 ${index}`}</Text></View>
-                <Pressable accessibilityLabel="移除图片" style={styles.remove} onPress={() => onChange(images.filter((image) => image.id !== item.id))}>
+                <Pressable accessibilityLabel="移除图片" hitSlop={8} style={styles.remove} onPress={() => onChange(images.filter((image) => image.id !== item.id))}>
                   <Ionicons name="close" size={14} color="#fff" />
                 </Pressable>
               </Pressable>
@@ -48,15 +48,14 @@ export function ReferenceTray({
         <Ionicons name="brush-outline" size={18} color={hasMask ? colors.primaryStrong : colors.textMuted} />
         <Text style={[styles.maskText, hasMask && styles.maskTextActive]}>{hasMask ? '已加蒙版' : '编辑蒙版'}</Text>
       </Pressable>}
-      <Text style={styles.hint}>{allowMask ? '长按拖动排序；蒙版只作用于第一张主图。' : '长按拖动排序；图片将发送给所选对话模型分析。'}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  wrapper: { borderTopWidth: 1, borderColor: colors.border, paddingTop: spacing.sm, gap: spacing.sm },
+  wrapper: { paddingTop: 12, gap: 4 },
   list: { paddingHorizontal: spacing.md, gap: spacing.sm },
-  item: { width: 76, height: 76, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, overflow: 'hidden', backgroundColor: colors.surface },
+  item: { width: 64, height: 64, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, overflow: 'hidden', backgroundColor: colors.surface },
   dragging: { opacity: 0.6 },
   tag: { position: 'absolute', left: 4, bottom: 4, backgroundColor: 'rgba(17,24,39,0.75)', borderRadius: 5, paddingHorizontal: 5, paddingVertical: 2 },
   tagText: { color: '#fff', fontSize: 10, fontWeight: '700' },

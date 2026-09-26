@@ -11,6 +11,7 @@ const mockGenerate = jest.fn();
 const mockEdit = jest.fn();
 const mockSendChat = jest.fn();
 const mockPrepare = jest.fn();
+const mockPrepareSkill = jest.fn();
 const mockDownload = jest.fn();
 const mockDeleteLocal = jest.fn();
 const mockGetKey = jest.fn();
@@ -23,6 +24,7 @@ jest.mock('../api/image-api', () => ({
 jest.mock('../api/chat-api', () => ({
   sendChat: (...args: unknown[]) => mockSendChat(...args),
   prepareImagePrompt: (...args: unknown[]) => mockPrepare(...args),
+  prepareCreationSkill: (...args: unknown[]) => mockPrepareSkill(...args),
 }));
 jest.mock('../document-inputs', () => ({ validateAttachments: jest.fn() }));
 jest.mock('../image-inputs', () => ({
@@ -90,6 +92,7 @@ beforeEach(() => {
   mockEdit.mockReset().mockResolvedValue('file:///edited.png');
   mockSendChat.mockReset().mockResolvedValue('足球场有两侧看台。');
   mockPrepare.mockReset().mockImplementation(async () => { mockOrder.push('analyze'); return '用户要求与文档整合后的作图说明'; });
+  mockPrepareSkill.mockReset().mockImplementation(async () => { mockOrder.push('skill-check'); return { prompt: '技能检查后的作图要求', notes: null }; });
   mockDownload.mockReset().mockResolvedValue('file:///downloaded.png');
   mockGetKey.mockReset().mockImplementation(async (id: string) => `${id}-test-key`);
 });
@@ -237,4 +240,83 @@ test('deleting a conversation cleans local document attachments together with im
   expect(mockDeleteLocal).toHaveBeenCalledWith(pdf.uri);
   expect(mockDeleteLocal).toHaveBeenCalledWith('file:///result.png');
   expect(app.messages).toHaveLength(0);
+});
+
+test('an explicit skill uses the separate analyst and preserves image settings before a paid call', async () => {
+  await mount('auto');
+  await act(async () => { await app.sendPrompt('清晨水彩猫咪', [], null, false, [], 'image-create'); });
+  expect(mockPrepareSkill).toHaveBeenCalledWith(expect.objectContaining({
+    baseUrl: 'https://chat.example.com/v1', apiKey: 'analysis-provider-test-key',
+    skill: expect.objectContaining({ id: 'image-create', revision: 1 }),
+    imageSettings: { model: 'image-model', quality: 'high', size: '2048x1152', transparent: false, hasMask: false },
+  }));
+  expect(mockOrder).toEqual(['skill-check', 'persist-prepared', 'generate']);
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ prompt: '技能检查后的作图要求', model: 'image-model', quality: 'high' }));
+  expect(app.messages[1].creationSkill).toMatchObject({ id: 'image-create', revision: 1 });
+});
+
+test('a selected skill never overrides an explicit analysis-only request', async () => {
+  await mount('auto');
+  await act(async () => { await app.sendPrompt('先分析这张图片，不要生成', [illustrativeImage], null, false, [], 'reference-edit'); });
+  expect(mockSendChat).toHaveBeenCalledTimes(1);
+  expect(mockPrepareSkill).not.toHaveBeenCalled();
+  expect(mockGenerate).not.toHaveBeenCalled();
+  expect(mockEdit).not.toHaveBeenCalled();
+  expect(app.messages[1]).toMatchObject({ mode: 'chat', creationSkill: null });
+});
+
+test('reference skill refuses missing primary image before any request', async () => {
+  await mount('auto');
+  await act(async () => { await expect(app.sendPrompt('改成水彩风格', [], null, false, [], 'reference-edit')).rejects.toThrow('需要一张主图'); });
+  expect(mockPrepareSkill).not.toHaveBeenCalled();
+  expect(mockGenerate).not.toHaveBeenCalled();
+  expect(app.messages).toHaveLength(0);
+});
+
+test('skill preflight failure prevents image billing and repeated image attempts', async () => {
+  mockPrepareSkill.mockRejectedValueOnce(new Error('创作检查没有给出可执行的方案'));
+  await mount('image');
+  await act(async () => { await app.sendPrompt('猫咪', [], null, false, [], 'image-create'); });
+  expect(mockPrepareSkill).toHaveBeenCalledTimes(1);
+  expect(mockGenerate).not.toHaveBeenCalled();
+  expect(mockEdit).not.toHaveBeenCalled();
+  expect(app.messages[1]).toMatchObject({ status: 'error', creationSkill: { id: 'image-create' } });
+});
+
+test('skill retry reuses its exact plan and snapshot with the saved typography notes', async () => {
+  mockPrepareSkill.mockResolvedValueOnce({ prompt: '标题“春日”，底部正文留白', notes: '正文尚未叠加：9 月 30 日，票价 20 元' });
+  mockGenerate.mockRejectedValueOnce(new Error('上游暂不可用')).mockResolvedValueOnce('file:///retry.png');
+  await mount('auto');
+  await act(async () => { await app.sendPrompt('春日活动海报', [], null, false, [], 'poster-layout'); });
+  const failed = app.messages[1];
+  await act(async () => { await app.updateActiveProviderSettings({ quality: 'low' }); });
+  await act(async () => { await app.retryMessage(failed); });
+  expect(mockPrepareSkill).toHaveBeenCalledTimes(1);
+  expect(mockGenerate).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: '标题“春日”，底部正文留白', quality: 'high' }));
+  expect(app.messages[1]).toMatchObject({ creationSkill: failed.creationSkill, creationNotes: failed.creationNotes, status: 'complete' });
+});
+
+test('independent image selection changes routing without switching conversation or following chained mappings', async () => {
+  mockProviders.push({ ...mockProviders[0], id: 'second-image', name: '第二生图', model: 'second-model', imageProviderId: 'image-provider' });
+  await mount('auto');
+  await act(async () => { await app.sendPrompt('你好', [], null, false); });
+  const conversationId = app.activeConversation?.id;
+  await act(async () => { await app.updateProviderSettings('second-image', { quality: 'medium' }); });
+  await act(async () => { await app.updateActiveProviderSettings({ imageProviderId: 'second-image' }); });
+  await act(async () => { await app.sendPrompt('生成一张猫咪图片', [], null, false); });
+  expect(app.activeConversation?.id).toBe(conversationId);
+  expect(app.activeProvider?.id).toBe('image-provider');
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'second-model', quality: 'medium', apiKey: 'second-image-test-key' }));
+});
+
+test('the conversation chat selection wins over the image provider legacy analyst mapping', async () => {
+  mockProviders.push(
+    { ...mockProviders[1], id: 'preferred-chat', name: '当前选中的对话', chatModel: 'preferred-model' },
+    { ...mockProviders[0], id: 'second-image', name: '第二生图', model: 'second-image-model', analysisProviderId: 'analysis-provider' },
+  );
+  await mount('auto');
+  await act(async () => { await app.updateActiveProviderSettings({ analysisProviderId: 'preferred-chat', imageProviderId: 'second-image' }); });
+  await act(async () => { await app.sendPrompt('先分析 PDF 再生成一张活动海报', [], null, false, [pdf], 'poster-layout'); });
+  expect(mockPrepareSkill).toHaveBeenCalledWith(expect.objectContaining({ model: 'preferred-model', apiKey: 'preferred-chat-test-key', documents: [pdf] }));
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'second-image-model', apiKey: 'second-image-test-key' }));
 });

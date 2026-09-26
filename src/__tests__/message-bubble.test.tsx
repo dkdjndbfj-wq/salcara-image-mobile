@@ -116,9 +116,9 @@ describe('MessageBubble', () => {
     await pending.unmount();
     const result = await renderMessage({ ...base, status: 'complete', imageUri: 'file:///result.png', preparedPrompt: '保留 PDF 中的场地尺寸与配色。' });
     expect(result.queryByText('保留 PDF 中的场地尺寸与配色。')).toBeNull();
-    await fireEvent.press(result.getByText('查看文件解析后的提示词'));
+    await fireEvent.press(result.getByText('查看创作说明'));
     expect(result.getByText('保留 PDF 中的场地尺寸与配色。')).toBeTruthy();
-    await fireEvent.press(result.getByText('收起文件解析结果'));
+    await fireEvent.press(result.getByText('收起创作说明'));
     expect(result.queryByText('保留 PDF 中的场地尺寸与配色。')).toBeNull();
   });
 });
