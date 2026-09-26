@@ -51,13 +51,14 @@ export function useLaunchRevealed(): boolean {
 type Key = { at: number; value: number; ease?: (value: number) => number };
 
 /** Samples an eased keyframe track into interpolate() tables. */
-function track(keys: Key[], unit = '') {
+/** Samples an eased keyframe track into (input, value) pairs. */
+function sample(keys: Key[]): { inputRange: number[]; values: number[] } {
   const inputRange: number[] = [];
-  const outputRange: Array<number | string> = [];
+  const values: number[] = [];
   const push = (at: number, value: number) => {
     if (inputRange.length && at <= inputRange[inputRange.length - 1]) return;
     inputRange.push(at);
-    outputRange.push(unit ? `${value}${unit}` : value);
+    values.push(value);
   };
   keys.forEach((key, index) => {
     if (index === 0) { push(key.at, key.value); return; }
@@ -69,8 +70,21 @@ function track(keys: Key[], unit = '') {
       push(prev.at + (key.at - prev.at) * t, prev.value + (key.value - prev.value) * ease(t));
     }
   });
-  if (inputRange.length === 1) { inputRange.push(inputRange[0] + 1); outputRange.push(outputRange[0]); }
-  return { inputRange, outputRange, extrapolate: 'clamp' as const };
+  if (inputRange.length === 1) { inputRange.push(inputRange[0] + 1); values.push(values[0]); }
+  return { inputRange, values };
+}
+
+/**
+ * interpolate() tables. RN types outputRange as number[] | string[] (never
+ * mixed), so numeric tracks and unit tracks ('deg') are built separately.
+ */
+function track(keys: Key[]): { inputRange: number[]; outputRange: number[]; extrapolate: 'clamp' };
+function track(keys: Key[], unit: string): { inputRange: number[]; outputRange: string[]; extrapolate: 'clamp' };
+function track(keys: Key[], unit?: string) {
+  const { inputRange, values } = sample(keys);
+  return unit
+    ? { inputRange, outputRange: values.map((value) => `${value}${unit}`), extrapolate: 'clamp' as const }
+    : { inputRange, outputRange: values, extrapolate: 'clamp' as const };
 }
 
 const out = Easing.out(Easing.cubic);
