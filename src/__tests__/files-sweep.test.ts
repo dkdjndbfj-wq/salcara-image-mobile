@@ -2,8 +2,15 @@ const mockDeleted: string[] = [];
 jest.mock('expo-file-system', () => {
   const DAY = 24 * 60 * 60 * 1000;
   const NOW = Date.UTC(2026, 8, 27);
+  // Plain fields (no TS parameter properties): babel-plugin-jest-hoist rejects
+  // the identifiers those compile to as out-of-scope references.
   class File {
-    constructor(public uri: string, public modificationTime: number | null = null) {}
+    uri: string;
+    modificationTime: number | null;
+    constructor(path: string, modified: number | null = null) {
+      this.uri = path;
+      this.modificationTime = modified;
+    }
     get exists() { return true; }
     delete() { mockDeleted.push(this.uri); }
   }
@@ -14,7 +21,7 @@ jest.mock('expo-file-system', () => {
   };
   class Directory {
     name: string;
-    constructor(_base: unknown, name: string) { this.name = name; }
+    constructor(_base: unknown, folder: string) { this.name = folder; }
     get exists() { return true; }
     create() {}
     list() { return listings[this.name] ?? []; }
