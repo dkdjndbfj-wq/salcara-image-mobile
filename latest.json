@@ -1,15 +1,15 @@
 {
-  "version": "1.3.4",
-  "tagName": "v1.3.4",
-  "title": "Salcara AI v1.3.4",
-  "notes": "# Salcara AI v1.3.4\n\n## 更保守的自动生图判断\n\n- “帮我生成图片提示词”“生成图片需要什么参数”“把文字改得更正式”等普通对话不会触发生图扣费。\n- “把这张图变成赛博朋克风格”“将背景改成蓝色”等明确图片编辑请求仍会自动进入图片编辑流程。\n- 继续保留图片附件仅用于分析时的对话路由，以及生图前先由对话 API 整理要求的安全步骤。\n- 自动模式的网络诊断会分别探测对话服务商和图片服务商，避免把“对话能连通”误认为“图片接口也能连通”。\n\n这是 Android `versionCode 12` 的覆盖安装版本。APK、SHA-256、安装说明和隐私说明见 GitHub Release 页面。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.3.4",
-  "publishedAt": "2026-09-23T16:30:07Z",
+  "version": "1.3.6",
+  "tagName": "v1.3.6",
+  "title": "Salcara AI v1.3.6",
+  "notes": "# Salcara AI v1.3.6\n\n这是 v1.3.5 的构建修复版，Android `versionCode` 为 14，可覆盖安装在已有版本上。\n\n本版包含：\n\n- Cherry Studio 风格的单一对话工作区、侧边栏会话管理和统一输入区；\n- 对话、文件分析、图片理解与图片创作在同一会话中自动路由；\n- 独立的对话 / 图片服务商与模型选择；\n- 创作技能预检、参考图复用、图片预览缩放、底部弹层动画和改进后的设置页面；\n- CI 使用兼容 peer 依赖的锁文件安装方式，确保 Release 可以稳定构建。\n\n安装后数据仍保存在本机，服务商密钥不会进入会话数据库或日志。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.3.6",
+  "publishedAt": "2026-09-26T12:11:24Z",
   "apk": {
-    "name": "salcara-image-android-v1.3.4.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.3.4/salcara-image-android-v1.3.4.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/584157638",
-    "size": 100109368,
-    "digest": "sha256:011fff0e581bf833ae0ec581e7977462c9fae84ba7df8e89e7a9dfc3afa86f13"
+    "name": "salcara-image-android-v1.3.6.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.3.6/salcara-image-android-v1.3.6.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/590599012",
+    "size": 100147732,
+    "digest": "sha256:47693f144f2ec54ada8ec6f69515c10f8c548f790b34235a053ced77d23dbc45"
   }
 }
