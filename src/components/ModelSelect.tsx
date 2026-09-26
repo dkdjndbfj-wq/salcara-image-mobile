@@ -1,11 +1,11 @@
-import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { colors, radius } from '../theme';
+import { colors, prettyModel, radius } from '../theme';
+import { Icon } from './Icon';
 import { PrimaryButton, Sheet } from './ui';
 
-/** Shared searchable selection surface. Typing a model ID is an optional fallback. */
+/** Searchable model list. Typing a model ID is an optional fallback. */
 export function ModelSelect({ visible, title, value, models, loading = false, error, onClose, onSelect, onRefresh }: {
   visible: boolean; title: string; value: string; models: string[]; loading?: boolean; error?: string | null;
   onClose: () => void; onSelect: (model: string) => void; onRefresh: () => void;
@@ -17,43 +17,58 @@ export function ModelSelect({ visible, title, value, models, loading = false, er
   const options = useMemo(() => [...new Set([value, ...models].filter(Boolean))]
     .filter((item) => item.toLowerCase().includes(query.trim().toLowerCase())), [value, models, query]);
   const choose = (model: string) => { if (!model.trim()) return; onSelect(model.trim()); onClose(); };
-  return <Sheet visible={visible} title={title} onClose={onClose} scroll={false}>
+  return <Sheet visible={visible} title={title} onClose={onClose} scroll={false}
+    headerRight={<Pressable accessibilityLabel="刷新模型列表" disabled={loading} onPress={onRefresh} hitSlop={8} style={styles.refresh}>
+      {loading ? <ActivityIndicator size="small" color={colors.primary} /> : <Icon name="regenerate" size={19} color={colors.textMuted} />}
+    </Pressable>}>
     <View style={styles.body}>
       <View style={styles.search}>
-        <Ionicons name="search-outline" size={18} color={colors.textMuted} />
-        <TextInput accessibilityLabel="搜索模型" placeholder="搜索模型名称" value={query} onChangeText={setQuery} autoCapitalize="none" autoCorrect={false} placeholderTextColor={colors.textMuted} style={styles.searchInput} />
-        {query ? <Pressable accessibilityLabel="清空模型搜索" onPress={() => setQuery('')} style={styles.clear}><Ionicons name="close-circle" size={17} color={colors.textMuted} /></Pressable> : null}
+        <Icon name="search" size={17} color={colors.subtle} />
+        <TextInput accessibilityLabel="搜索模型" placeholder="搜索模型" value={query} onChangeText={setQuery} autoCapitalize="none" autoCorrect={false} placeholderTextColor={colors.subtle} style={styles.searchInput} />
+        {query ? <Pressable accessibilityLabel="清空模型搜索" hitSlop={8} onPress={() => setQuery('')}><Icon name="close" size={15} color={colors.subtle} strokeWidth={2} /></Pressable> : null}
       </View>
-      <View style={styles.listHeader}><Text style={styles.caption}>{loading ? '正在读取模型…' : `${options.length} 个可选模型`}</Text><Pressable accessibilityLabel="刷新模型列表" disabled={loading} onPress={onRefresh} style={styles.refresh}>{loading ? <ActivityIndicator size="small" color={colors.primaryStrong} /> : <Ionicons name="refresh-outline" size={17} color={colors.primaryStrong} />}<Text style={styles.link}>刷新</Text></Pressable></View>
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      <FlatList data={options} keyExtractor={(item) => item} style={styles.list} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" renderItem={({ item }) => <Pressable accessibilityRole="button" accessibilityState={{ selected: item === value }} style={({ pressed }) => [styles.option, item === value && styles.selected, pressed && styles.pressed]} onPress={() => choose(item)}><Text style={[styles.optionText, item === value && styles.selectedText]}>{item}</Text>{item === value && <Ionicons name="checkmark" size={20} color={colors.primaryStrong} />}</Pressable>} ListEmptyComponent={!loading ? <Text style={styles.empty}>{query ? '没有找到匹配的模型' : '点击刷新读取服务商的模型列表'}</Text> : null} />
+      <FlatList data={options} keyExtractor={(item) => item} style={styles.list} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag"
+        renderItem={({ item }) => {
+          const selected = item === value;
+          return <Pressable accessibilityRole="button" accessibilityState={{ selected }} onPress={() => choose(item)}
+            style={({ pressed }) => [styles.option, selected && styles.selected, pressed && { backgroundColor: colors.surfaceStrong }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.optionTitle, selected && { color: colors.primaryDeep }]}>{prettyModel(item)}</Text>
+              <Text style={styles.optionId}>{item}</Text>
+            </View>
+            {selected && <Icon name="check" size={20} color={colors.primary} strokeWidth={2.2} />}
+          </Pressable>;
+        }}
+        ListEmptyComponent={!loading ? <Text style={styles.empty}>{query ? '没有找到匹配的模型' : '没有读取到模型，可以手动填写'}</Text> : <Text style={styles.empty}>正在读取模型…</Text>} />
       <View style={styles.manual}>
-        <Pressable style={styles.manualToggle} onPress={() => setManual((open) => !open)}><Text style={styles.caption}>没有找到需要的模型？</Text><Text style={styles.link}>{manual ? '收起' : '手动添加'}</Text></Pressable>
-        {manual && <View style={styles.manualBody}><TextInput accessibilityLabel="自定义模型 ID" value={customModel} onChangeText={setCustomModel} placeholder="输入服务商提供的模型 ID" placeholderTextColor={colors.textMuted} autoCapitalize="none" autoCorrect={false} style={styles.manualInput} /><PrimaryButton label="使用这个模型" disabled={!customModel.trim()} onPress={() => choose(customModel)} /></View>}
+        {manual ? <View style={styles.manualBody}>
+          <TextInput accessibilityLabel="自定义模型 ID" value={customModel} onChangeText={setCustomModel} autoFocus placeholder="输入模型 ID" placeholderTextColor={colors.faint} autoCapitalize="none" autoCorrect={false} style={styles.manualInput} />
+          <PrimaryButton label="使用这个模型" disabled={!customModel.trim()} onPress={() => choose(customModel)} />
+        </View> : <Pressable accessibilityRole="button" onPress={() => setManual(true)} style={styles.manualToggle}>
+          <Icon name="edit" size={17} color={colors.textMuted} />
+          <Text style={styles.manualText}>手动填写模型 ID</Text>
+        </Pressable>}
       </View>
     </View>
   </Sheet>;
 }
 
 const styles = StyleSheet.create({
-  body: { paddingHorizontal: 20, paddingBottom: 16, gap: 8, flexShrink: 1 },
-  search: { flexDirection: 'row', alignItems: 'center', gap: 9, minHeight: 46, paddingLeft: 13, borderRadius: radius.md, backgroundColor: colors.surface },
-  searchInput: { flex: 1, minHeight: 46, color: colors.text, fontSize: 15 },
-  clear: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  listHeader: { minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  caption: { color: colors.textMuted, fontSize: 12, lineHeight: 18 },
-  refresh: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 12 },
-  link: { color: colors.primaryStrong, fontSize: 13, fontWeight: '600' },
-  list: { flexGrow: 0, maxHeight: 340 },
-  option: { minHeight: 52, paddingVertical: 13, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: radius.sm },
-  optionText: { flex: 1, fontSize: 14, lineHeight: 21, color: colors.text },
+  body: { paddingHorizontal: 16, paddingBottom: 12, gap: 8, flexShrink: 1 },
+  refresh: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
+  search: { flexDirection: 'row', alignItems: 'center', gap: 8, height: 44, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.surfaceStrong },
+  searchInput: { flex: 1, height: 44, color: colors.text, fontSize: 15.5, padding: 0 },
+  error: { color: colors.warningText, fontSize: 12.5, lineHeight: 18, paddingHorizontal: 6 },
+  list: { flexGrow: 0, maxHeight: 380, marginTop: 4 },
+  option: { minHeight: 58, paddingVertical: 10, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 16 },
   selected: { backgroundColor: colors.blueSurface },
-  selectedText: { color: colors.primaryStrong, fontWeight: '600' },
-  pressed: { opacity: 0.65 },
-  error: { color: colors.warningText, fontSize: 12, lineHeight: 18, paddingBottom: 4 },
-  empty: { paddingVertical: 30, color: colors.textMuted, fontSize: 13, textAlign: 'center' },
-  manual: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border, marginTop: 6 },
-  manualToggle: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  manualBody: { gap: 12, paddingBottom: 8 },
-  manualInput: { minHeight: 46, borderBottomWidth: 1, borderColor: colors.border, color: colors.text, fontSize: 14, paddingHorizontal: 2 },
+  optionTitle: { color: colors.text, fontSize: 15.5, fontWeight: '500' },
+  optionId: { color: colors.faint, fontSize: 12, marginTop: 2 },
+  empty: { paddingVertical: 36, color: colors.subtle, fontSize: 14, textAlign: 'center' },
+  manual: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border, marginTop: 4, paddingTop: 4 },
+  manualToggle: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14 },
+  manualText: { color: colors.textMuted, fontSize: 14.5 },
+  manualBody: { gap: 12, paddingTop: 8 },
+  manualInput: { height: 50, borderRadius: 16, backgroundColor: colors.surfaceStrong, color: colors.text, fontSize: 15.5, paddingHorizontal: 16 },
 });

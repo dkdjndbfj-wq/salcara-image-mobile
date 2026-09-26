@@ -1,67 +1,64 @@
 import { act, render, waitFor } from '@testing-library/react-native';
 import React from 'react';
 
-import type { ChatMessage, ComposerMode, Conversation, DocumentAttachment, ProviderProfile, ReferenceImage } from '../domain';
+import type { ChatMessage, Conversation, ProviderProfile, ReferenceImage } from '../domain';
 
 let mockProviders: ProviderProfile[] = [];
 let mockConversations: Conversation[] = [];
 let mockMessages: ChatMessage[] = [];
+let mockSettings: Record<string, string> = {};
 const mockOrder: string[] = [];
+const mockAgent = jest.fn();
 const mockGenerate = jest.fn();
 const mockEdit = jest.fn();
-const mockSendChat = jest.fn();
-const mockPrepare = jest.fn();
-const mockPrepareSkill = jest.fn();
 const mockDownload = jest.fn();
-const mockDeleteLocal = jest.fn();
-const mockGetKey = jest.fn();
+const mockCopyGenerated = jest.fn();
+const mockInsertConversation = jest.fn();
+const mockDeleteEmpty = jest.fn();
 
+jest.mock('../api/chat-api', () => ({ runAgentTurn: (...args: unknown[]) => mockAgent(...args) }));
 jest.mock('../api/image-api', () => ({
   generateImage: (...args: unknown[]) => mockGenerate(...args),
   editImage: (...args: unknown[]) => mockEdit(...args),
   normalizeError: (error: unknown) => error instanceof Error ? error : new Error('请求失败'),
 }));
-jest.mock('../api/chat-api', () => ({
-  sendChat: (...args: unknown[]) => mockSendChat(...args),
-  prepareImagePrompt: (...args: unknown[]) => mockPrepare(...args),
-  prepareCreationSkill: (...args: unknown[]) => mockPrepareSkill(...args),
-}));
-jest.mock('../document-inputs', () => ({ validateAttachments: jest.fn() }));
-jest.mock('../image-inputs', () => ({
-  createReferenceFromGenerated: async (uri: string) => ({ id: 'copied-ref', uri: `${uri}-copied.png`, name: '上张图片.png', mimeType: 'image/png', size: 128 }),
-}));
-jest.mock('expo-keep-awake', () => ({ activateKeepAwakeAsync: jest.fn(async () => {}), deactivateKeepAwake: jest.fn(async () => {}) }));
-jest.mock('../storage/secure-keys', () => ({ getProviderKey: (...args: unknown[]) => mockGetKey(...args), deleteProviderKey: jest.fn(async () => {}) }));
+jest.mock('../document-inputs', () => ({ validateAttachments: () => undefined }));
+jest.mock('../image-inputs', () => ({ createReferenceFromGenerated: (...args: unknown[]) => mockCopyGenerated(...args) }));
+jest.mock('expo-keep-awake', () => ({ activateKeepAwakeAsync: async () => undefined, deactivateKeepAwake: async () => undefined }));
+jest.mock('../storage/secure-keys', () => ({ getProviderKey: async () => 'key', deleteProviderKey: async () => undefined }));
 jest.mock('../storage/files', () => ({
   downloadPng: (...args: unknown[]) => mockDownload(...args),
-  deleteLocalFile: (...args: unknown[]) => mockDeleteLocal(...args),
+  deleteLocalFile: () => undefined,
   RemoteImageDownloadError: class extends Error {
     remoteImageUrl: string;
     constructor(url: string) { super('图片下载失败'); this.remoteImageUrl = url; }
   },
 }));
 jest.mock('../storage/database', () => ({
-  initializeDatabase: async () => {},
-  getActiveProviderId: async () => 'image-provider',
-  setActiveProviderId: async () => {},
+  initializeDatabase: async () => undefined,
+  deleteEmptyConversations: async () => { mockDeleteEmpty(); },
+  getActiveProviderId: async () => null,
+  getSetting: async (key: string) => mockSettings[key] ?? null,
+  setSetting: async (key: string, value: string | null) => { if (value === null) delete mockSettings[key]; else mockSettings[key] = value; },
   listProviders: async () => [...mockProviders],
-  listConversations: async () => [...mockConversations],
-  listMessages: async (id: string) => mockMessages.filter((item) => item.conversationId === id),
-  insertConversation: async (conversation: Conversation) => { mockConversations.push(conversation); },
-  updateConversation: async (conversation: Conversation) => { mockConversations = mockConversations.map((item) => item.id === conversation.id ? conversation : item); },
-  insertMessage: async (message: ChatMessage) => { mockMessages.push(message); },
-  updateMessage: async (message: ChatMessage) => {
-    if (message.preparedPrompt && message.status === 'pending') mockOrder.push('persist-prepared');
-    mockMessages = mockMessages.map((item) => item.id === message.id ? message : item);
-  },
   upsertProvider: async (profile: ProviderProfile) => { mockProviders = mockProviders.map((item) => item.id === profile.id ? profile : item); },
+  deleteProviderRecord: async (id: string) => { mockProviders = mockProviders.filter((item) => item.id !== id); },
+  reassignConversations: async () => undefined,
+  listConversations: async () => [...mockConversations].sort((a, b) => b.updatedAt - a.updatedAt),
+  insertConversation: async (conversation: Conversation) => { mockInsertConversation(conversation); mockConversations.push(conversation); },
+  updateConversation: async (conversation: Conversation) => { mockConversations = mockConversations.map((item) => item.id === conversation.id ? conversation : item); },
   deleteConversationRecord: async (id: string) => {
-    const messages = mockMessages.filter((item) => item.conversationId === id);
+    const removed = mockMessages.filter((item) => item.conversationId === id);
     mockMessages = mockMessages.filter((item) => item.conversationId !== id);
     mockConversations = mockConversations.filter((item) => item.id !== id);
-    return messages;
+    return removed;
   },
-  deleteProviderRecord: async (id: string) => { mockProviders = mockProviders.filter((item) => item.id !== id); },
+  listMessages: async (id: string) => mockMessages.filter((item) => item.conversationId === id),
+  insertMessage: async (message: ChatMessage) => { mockMessages.push(message); },
+  updateMessage: async (message: ChatMessage) => {
+    if (message.preparedPrompt && message.status === 'pending' && !message.imageUri) mockOrder.push('saved-image-job');
+    mockMessages = mockMessages.map((item) => item.id === message.id ? message : item);
+  },
 }));
 
 import { AppProvider, useApp } from '../state/AppContext';
@@ -69,254 +66,118 @@ import { RemoteImageDownloadError } from '../storage/files';
 
 let app: ReturnType<typeof useApp>;
 function Probe() { app = useApp(); return null; }
-async function mount(mode: ComposerMode = 'image') {
+async function mount() {
   await render(<AppProvider><Probe /></AppProvider>);
   await waitFor(() => expect(app.ready).toBe(true));
-  await act(async () => { await app.setComposerMode(mode); });
 }
-const pdf: DocumentAttachment = { id: 'doc', uri: 'file:///document.pdf', name: '场地方案.pdf', mimeType: 'application/pdf', size: 128 };
-const illustrativeImage: ReferenceImage = { id: 'ref', uri: 'file:///示意.png', name: '示意.png', mimeType: 'image/png', size: 128 };
+const provider = (patch: Partial<ProviderProfile>): ProviderProfile => ({
+  id: 'p', name: '服务', baseUrl: 'https://api.example', model: null, quality: null, aspectRatio: null, resolutionTier: null,
+  chatModel: null, chatApi: 'chat-completions', createdAt: 1, updatedAt: 1, ...patch,
+});
+const chat = provider({ id: 'chat', name: '对话', chatModel: 'vision-model' });
+const image = provider({ id: 'image', name: '绘图', model: 'gpt-image-2', quality: 'high', aspectRatio: '1:1', resolutionTier: '2K' });
+const upload: ReferenceImage = { id: 'up', uri: 'file:///upload.png', name: 'upload.png', mimeType: 'image/png', size: 64 };
+const images = (entries: Array<[string, string]>) => new Map(entries.map(([label, uri]) => [label, { label, uri, name: 'x.png', mimeType: 'image/png', size: 1 }]));
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  mockProviders = [chat, image];
   mockConversations = [];
   mockMessages = [];
+  mockSettings = {};
   mockOrder.length = 0;
-  mockProviders = [
-    { id: 'image-provider', name: '生图', baseUrl: 'https://images.example.com/v1', model: 'image-model', quality: 'high',
-      aspectRatio: '16:9', resolutionTier: '2K', chatModel: 'own-chat-model', chatApi: 'chat-completions', analysisProviderId: 'analysis-provider', createdAt: 1, updatedAt: 1 },
-    { id: 'analysis-provider', name: '解析', baseUrl: 'https://chat.example.com/v1', model: null, quality: null,
-      aspectRatio: null, resolutionTier: null, chatModel: 'vision-model', chatApi: 'responses', createdAt: 1, updatedAt: 1 },
-  ];
-  mockGenerate.mockReset().mockImplementation(async () => { mockOrder.push('generate'); return 'file:///result.png'; });
-  mockEdit.mockReset().mockResolvedValue('file:///edited.png');
-  mockSendChat.mockReset().mockResolvedValue('足球场有两侧看台。');
-  mockPrepare.mockReset().mockImplementation(async () => { mockOrder.push('analyze'); return '用户要求与文档整合后的作图说明'; });
-  mockPrepareSkill.mockReset().mockImplementation(async () => { mockOrder.push('skill-check'); return { prompt: '技能检查后的作图要求', notes: null }; });
-  mockDownload.mockReset().mockResolvedValue('file:///downloaded.png');
-  mockGetKey.mockReset().mockImplementation(async (id: string) => `${id}-test-key`);
+  [mockAgent, mockGenerate, mockEdit, mockDownload, mockCopyGenerated, mockInsertConversation, mockDeleteEmpty].forEach((mock) => mock.mockReset());
+  mockCopyGenerated.mockImplementation(async (uri: string) => ({ id: 'copy', uri: `${uri}.copy.png`, name: 'copy.png', mimeType: 'image/png', size: 1 }));
 });
 
-test('chat stores assistant text in the conversation without invoking generation', async () => {
-  mockProviders[0].analysisProviderId = null;
-  await mount('chat');
-  await act(async () => { await app.sendPrompt('描述足球场', [], undefined, false, [pdf]); });
-  expect(mockSendChat).toHaveBeenCalledWith(expect.objectContaining({ model: 'own-chat-model', documents: [pdf], prompt: '描述足球场' }));
-  expect(mockGenerate).not.toHaveBeenCalled();
-  expect(mockPrepare).not.toHaveBeenCalled();
-  expect(app.messages[1]).toMatchObject({ role: 'assistant', mode: 'chat', status: 'complete', text: '足球场有两侧看台。', imageUri: null });
-});
-
-test('auto mode confirms a paid image request through chat before generation', async () => {
-  await mount('auto');
-  await act(async () => { await app.sendPrompt('生成一张足球场宣传海报', [], undefined, false); });
-  expect(mockPrepare).toHaveBeenCalledTimes(1);
-  expect(mockGenerate).toHaveBeenCalledTimes(1);
-  expect(mockOrder).toEqual(['analyze', 'persist-prepared', 'generate']);
-  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ prompt: '用户要求与文档整合后的作图说明' }));
-});
-
-test('auto mode can start from a chat-only provider and use a separate image provider', async () => {
-  await mount('auto');
-  await act(async () => { await app.activateProvider('analysis-provider'); });
-  await act(async () => { await app.sendPrompt('生成一张足球场图片', [], undefined, false); });
-  expect(mockPrepare).toHaveBeenCalledWith(expect.objectContaining({
-    baseUrl: 'https://chat.example.com/v1', model: 'vision-model', apiKey: 'analysis-provider-test-key',
-  }));
-  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({
-    baseUrl: 'https://images.example.com/v1', model: 'image-model', apiKey: 'image-provider-test-key',
-  }));
-  expect(app.activeConversation).toMatchObject({ providerId: 'analysis-provider', mode: 'auto' });
-  expect(app.messages[1]).toMatchObject({ providerId: 'image-provider', mode: 'generate' });
-});
-
-test('auto mode analyses a PDF first, then reuses it when the next turn asks for an image', async () => {
-  await mount('auto');
-  await act(async () => { await app.sendPrompt('请分析这份方案', [], undefined, false, [pdf]); });
-  expect(mockSendChat).toHaveBeenCalledTimes(1);
-  expect(mockGenerate).not.toHaveBeenCalled();
-  await act(async () => { await app.sendPrompt('根据刚才的方案生成一张宣传海报', [], undefined, false); });
-  expect(mockPrepare).toHaveBeenCalledWith(expect.objectContaining({ documents: [pdf], history: expect.any(Array) }));
-  expect(mockGenerate).toHaveBeenCalledTimes(1);
-});
-
-test('auto mode treats a reference image used for analysis as chat context', async () => {
-  await mount('auto');
-  await act(async () => { await app.sendPrompt('请分析这张示意图', [illustrativeImage], undefined, false); });
-  expect(mockSendChat).toHaveBeenCalledTimes(1);
-  expect(mockPrepare).not.toHaveBeenCalled();
-  expect(mockGenerate).not.toHaveBeenCalled();
-});
-
-test('PDF-assisted generation uses the selected analysis key and persists analysis before generation', async () => {
+test('new chat is an unsaved draft: repeated taps never create empty conversations', async () => {
   await mount();
-  await act(async () => { await app.sendPrompt('按 PDF 生成足球场', [], undefined, false, [pdf]); });
-  expect(mockPrepare).toHaveBeenCalledWith(expect.objectContaining({
-    baseUrl: 'https://chat.example.com/v1', apiKey: 'analysis-provider-test-key', model: 'vision-model', api: 'responses', documents: [pdf],
-  }));
-  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({
-    baseUrl: 'https://images.example.com/v1', apiKey: 'image-provider-test-key', model: 'image-model', prompt: '用户要求与文档整合后的作图说明',
-  }));
-  expect(mockOrder).toEqual(['analyze', 'persist-prepared', 'generate']);
-  expect(app.messages[1]).toMatchObject({ status: 'complete', preparedPrompt: '用户要求与文档整合后的作图说明', imageUri: 'file:///result.png' });
+  expect(mockDeleteEmpty).toHaveBeenCalled();
+  await act(async () => { app.newChat(); app.newChat(); app.newChat(); });
+  expect(app.activeConversationId).toBeNull();
+  expect(mockInsertConversation).not.toHaveBeenCalled();
+
+  mockAgent.mockResolvedValue({ text: '你好！', imageCall: null, images: new Map(), toolMode: 'native' });
+  await act(async () => { await app.send({ text: '你好' }); });
+  expect(mockInsertConversation).toHaveBeenCalledTimes(1);
+  expect(app.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+  expect(app.messages[1]).toMatchObject({ status: 'complete', text: '你好！', imageUri: null });
+
+  await act(async () => { app.newChat(); app.newChat(); });
+  expect(app.activeConversationId).toBeNull();
+  expect(app.messages).toEqual([]);
+  expect(mockInsertConversation).toHaveBeenCalledTimes(1);
+  expect(app.conversations).toHaveLength(1);
 });
 
-test('analysis failure prevents the image charge and leaves a manual retry record', async () => {
-  mockPrepare.mockRejectedValue(new Error('模型不支持 PDF'));
+test('the chat model decides to draw; the tool call is saved before the paid image request', async () => {
+  mockAgent.mockImplementation(async (_request: unknown, onText?: (text: string) => void) => {
+    onText?.('好的，我来画。');
+    return { text: '好的，我来画。', imageCall: { prompt: '竖版橘猫', referenceImages: [], aspectRatio: '9:16', transparent: true }, images: new Map(), toolMode: 'native' };
+  });
+  mockGenerate.mockImplementation(async () => { mockOrder.push('generate'); return 'file:///cat.png'; });
   await mount();
-  await act(async () => { await app.sendPrompt('按 PDF 生成足球场', [], undefined, false, [pdf]); });
-  expect(mockGenerate).not.toHaveBeenCalled();
-  expect(mockEdit).not.toHaveBeenCalled();
-  expect(app.messages[1]).toMatchObject({ status: 'error', error: '模型不支持 PDF' });
-  expect(app.generating).toBe(false);
+  await act(async () => { await app.send({ text: '画一只橘猫，竖版，透明背景' }); });
+  const request = mockAgent.mock.calls[0][0];
+  expect(request).toMatchObject({ model: 'vision-model', toolMode: 'native', imageAvailable: true, prompt: '画一只橘猫，竖版，透明背景' });
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'gpt-image-2', prompt: '竖版橘猫', size: '1152x2048', quality: 'high', transparent: true }));
+  expect(mockOrder).toEqual(['saved-image-job', 'generate']);
+  expect(app.messages[1]).toMatchObject({ status: 'complete', mode: 'generate', text: '好的，我来画。', imageUri: 'file:///cat.png', preparedPrompt: '竖版橘猫', analysisModel: 'vision-model', providerId: 'image' });
 });
 
-test('manual retry reuses a saved preparedPrompt without paying to analyze the document again', async () => {
-  mockGenerate.mockRejectedValueOnce(new Error('上游生图暂不可用')).mockResolvedValueOnce('file:///retry.png');
+test('references resolve to the current upload (with mask) or a copy of an earlier generated image', async () => {
+  mockAgent.mockResolvedValueOnce({ text: '', imageCall: { prompt: '换成夜景', referenceImages: ['图1'], aspectRatio: null, transparent: false }, images: images([['图1', upload.uri]]), toolMode: 'native' });
+  mockEdit.mockResolvedValue('file:///night.png');
   await mount();
-  await act(async () => { await app.sendPrompt('按 PDF 生成足球场', [], undefined, false, [pdf]); });
-  const failed = app.messages[1];
-  expect(failed.preparedPrompt).toBe('用户要求与文档整合后的作图说明');
-  await act(async () => { await app.retryMessage(failed); });
-  expect(mockPrepare).toHaveBeenCalledTimes(1);
+  await act(async () => { await app.send({ text: '把背景换成夜景', images: [upload], maskUri: 'file:///mask.png' }); });
+  expect(mockEdit.mock.calls[0][0]).toMatchObject({ references: [upload], maskUri: 'file:///mask.png', prompt: '换成夜景', size: '2048x2048' });
+
+  mockAgent.mockResolvedValueOnce({ text: '', imageCall: { prompt: '再加一轮月亮', referenceImages: ['图2'], aspectRatio: null, transparent: false }, images: images([['图1', upload.uri], ['图2', 'file:///night.png']]), toolMode: 'native' });
+  mockEdit.mockResolvedValue('file:///moon.png');
+  await act(async () => { await app.send({ text: '再加个月亮' }); });
+  expect(mockCopyGenerated).toHaveBeenCalledWith('file:///night.png');
+  expect(mockEdit.mock.calls[1][0]).toMatchObject({ references: [expect.objectContaining({ uri: 'file:///night.png.copy.png' })], maskUri: null });
+  // The second turn saw the first turn as history.
+  expect(mockAgent.mock.calls[1][0].history).toHaveLength(2);
+});
+
+test('with only an image service every message is drawn directly', async () => {
+  mockProviders = [image];
+  mockGenerate.mockResolvedValue('file:///direct.png');
+  await mount();
+  await act(async () => { await app.send({ text: '一座雪山' }); });
+  expect(mockAgent).not.toHaveBeenCalled();
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ prompt: '一座雪山', size: '2048x2048' }));
+  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///direct.png' });
+  await expect(app.send({ text: '读一下', documents: [{ id: 'd', uri: 'file:///a.pdf', name: 'a.pdf', mimeType: 'application/pdf', size: 1 }] })).rejects.toThrow('对话模型');
+});
+
+test('retrying a failed drawing repeats only the image call; a failed download only downloads', async () => {
+  mockAgent.mockResolvedValue({ text: '画一下', imageCall: { prompt: '灯塔', referenceImages: [], aspectRatio: null, transparent: false }, images: new Map(), toolMode: 'native' });
+  mockGenerate.mockRejectedValueOnce(new Error('上游超时'));
+  await mount();
+  await act(async () => { await app.send({ text: '画灯塔' }); });
+  expect(app.messages[1]).toMatchObject({ status: 'error', error: '上游超时', preparedPrompt: '灯塔' });
+
+  mockGenerate.mockRejectedValueOnce(new RemoteImageDownloadError('https://cdn.example/lighthouse.png'));
+  await act(async () => { await app.retry(app.messages[1]); });
+  expect(mockAgent).toHaveBeenCalledTimes(1);
+  expect(app.messages[1]).toMatchObject({ status: 'error', remoteImageUrl: 'https://cdn.example/lighthouse.png' });
+
+  mockDownload.mockResolvedValue('file:///lighthouse.png');
+  await act(async () => { await app.retry(app.messages[1]); });
   expect(mockGenerate).toHaveBeenCalledTimes(2);
-  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///retry.png' });
+  expect(mockDownload).toHaveBeenCalledWith('https://cdn.example/lighthouse.png', expect.anything());
+  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///lighthouse.png', remoteImageUrl: null });
 });
 
-test('a returned image URL is only downloaded on retry and never regenerated', async () => {
-  mockGenerate.mockRejectedValueOnce(new RemoteImageDownloadError('https://cdn.example.com/result.png'));
+test('switching models is global and persists', async () => {
+  const second = provider({ id: 'second', chatModel: 'claude-x', chatApi: 'anthropic' });
+  mockProviders = [chat, image, second];
   await mount();
-  await act(async () => { await app.sendPrompt('生成足球场', [], undefined, false); });
-  expect(app.messages[1]).toMatchObject({ status: 'error', remoteImageUrl: 'https://cdn.example.com/result.png' });
-  await act(async () => { await app.retryMessage(app.messages[1]); });
-  expect(mockGenerate).toHaveBeenCalledTimes(1);
-  expect(mockDownload).toHaveBeenCalledWith('https://cdn.example.com/result.png', expect.any(AbortSignal));
-  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///downloaded.png', remoteImageUrl: null });
-});
-
-test('in-flight requests reject double submissions and changes to provider, mode and conversation', async () => {
-  let finish!: (uri: string) => void;
-  mockGenerate.mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
-  await mount();
-  let pending!: Promise<void>;
-  await act(async () => { pending = app.sendPrompt('生成足球场', [], undefined, false); });
-  await waitFor(() => expect(mockGenerate).toHaveBeenCalledTimes(1));
-  await expect(app.sendPrompt('第二次点击', [], undefined, false)).rejects.toThrow('当前请求尚未完成');
-  await expect(app.activateProvider('analysis-provider')).rejects.toThrow('切换服务商');
-  await expect(app.setComposerMode('chat')).rejects.toThrow('等待或取消');
-  await expect(app.startConversation()).rejects.toThrow('等待或取消');
-  await act(async () => { finish('file:///result.png'); await pending; });
-  expect(mockGenerate).toHaveBeenCalledTimes(1);
-  expect(app.messages).toHaveLength(2);
-});
-
-test('continuing an image conversation copies the last generated file as an edit reference', async () => {
-  await mount();
-  await act(async () => { await app.sendPrompt('生成足球场', [], undefined, false); });
-  await act(async () => { await app.sendPrompt('把看台改成蓝色', []); });
-  expect(mockGenerate).toHaveBeenCalledTimes(1);
-  expect(mockEdit).toHaveBeenCalledWith(expect.objectContaining({ prompt: '把看台改成蓝色', references: [expect.objectContaining({ uri: 'file:///result.png-copied.png' })] }));
-});
-
-test('a separate chat group can discuss generated images without changing the conversation owner', async () => {
-  await mount();
-  await act(async () => { await app.sendPrompt('生成足球场', [], undefined, false); });
-  const conversationId = app.activeConversation!.id;
-  await act(async () => { await app.setComposerMode('chat'); });
-  await act(async () => { await app.sendPrompt('描述刚才那张图', [], undefined, false); });
-  expect(app.activeConversation).toMatchObject({ id: conversationId, providerId: 'image-provider' });
-  expect(app.messages[3]).toMatchObject({ providerId: 'analysis-provider', model: 'vision-model', mode: 'chat' });
-  expect(mockSendChat).toHaveBeenCalledWith(expect.objectContaining({
-    apiKey: 'analysis-provider-test-key', api: 'responses', model: 'vision-model',
-    history: expect.arrayContaining([expect.objectContaining({ role: 'assistant', imageUri: 'file:///result.png' })]),
-  }));
-});
-
-test('deleting a conversation cleans local document attachments together with images', async () => {
-  await mount();
-  await act(async () => { await app.sendPrompt('按 PDF 生成足球场', [], undefined, false, [pdf]); });
-  const id = app.activeConversation!.id;
-  await act(async () => { await app.removeConversation(id); });
-  expect(mockDeleteLocal).toHaveBeenCalledWith(pdf.uri);
-  expect(mockDeleteLocal).toHaveBeenCalledWith('file:///result.png');
-  expect(app.messages).toHaveLength(0);
-});
-
-test('an explicit skill uses the separate analyst and preserves image settings before a paid call', async () => {
-  await mount('auto');
-  await act(async () => { await app.sendPrompt('清晨水彩猫咪', [], null, false, [], 'image-create'); });
-  expect(mockPrepareSkill).toHaveBeenCalledWith(expect.objectContaining({
-    baseUrl: 'https://chat.example.com/v1', apiKey: 'analysis-provider-test-key',
-    skill: expect.objectContaining({ id: 'image-create', revision: 1 }),
-    imageSettings: { model: 'image-model', quality: 'high', size: '2048x1152', transparent: false, hasMask: false },
-  }));
-  expect(mockOrder).toEqual(['skill-check', 'persist-prepared', 'generate']);
-  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ prompt: '技能检查后的作图要求', model: 'image-model', quality: 'high' }));
-  expect(app.messages[1].creationSkill).toMatchObject({ id: 'image-create', revision: 1 });
-});
-
-test('a selected skill never overrides an explicit analysis-only request', async () => {
-  await mount('auto');
-  await act(async () => { await app.sendPrompt('先分析这张图片，不要生成', [illustrativeImage], null, false, [], 'reference-edit'); });
-  expect(mockSendChat).toHaveBeenCalledTimes(1);
-  expect(mockPrepareSkill).not.toHaveBeenCalled();
-  expect(mockGenerate).not.toHaveBeenCalled();
-  expect(mockEdit).not.toHaveBeenCalled();
-  expect(app.messages[1]).toMatchObject({ mode: 'chat', creationSkill: null });
-});
-
-test('reference skill refuses missing primary image before any request', async () => {
-  await mount('auto');
-  await act(async () => { await expect(app.sendPrompt('改成水彩风格', [], null, false, [], 'reference-edit')).rejects.toThrow('需要一张主图'); });
-  expect(mockPrepareSkill).not.toHaveBeenCalled();
-  expect(mockGenerate).not.toHaveBeenCalled();
-  expect(app.messages).toHaveLength(0);
-});
-
-test('skill preflight failure prevents image billing and repeated image attempts', async () => {
-  mockPrepareSkill.mockRejectedValueOnce(new Error('创作检查没有给出可执行的方案'));
-  await mount('image');
-  await act(async () => { await app.sendPrompt('猫咪', [], null, false, [], 'image-create'); });
-  expect(mockPrepareSkill).toHaveBeenCalledTimes(1);
-  expect(mockGenerate).not.toHaveBeenCalled();
-  expect(mockEdit).not.toHaveBeenCalled();
-  expect(app.messages[1]).toMatchObject({ status: 'error', creationSkill: { id: 'image-create' } });
-});
-
-test('skill retry reuses its exact plan and snapshot with the saved typography notes', async () => {
-  mockPrepareSkill.mockResolvedValueOnce({ prompt: '标题“春日”，底部正文留白', notes: '正文尚未叠加：9 月 30 日，票价 20 元' });
-  mockGenerate.mockRejectedValueOnce(new Error('上游暂不可用')).mockResolvedValueOnce('file:///retry.png');
-  await mount('auto');
-  await act(async () => { await app.sendPrompt('春日活动海报', [], null, false, [], 'poster-layout'); });
-  const failed = app.messages[1];
-  await act(async () => { await app.updateActiveProviderSettings({ quality: 'low' }); });
-  await act(async () => { await app.retryMessage(failed); });
-  expect(mockPrepareSkill).toHaveBeenCalledTimes(1);
-  expect(mockGenerate).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: '标题“春日”，底部正文留白', quality: 'high' }));
-  expect(app.messages[1]).toMatchObject({ creationSkill: failed.creationSkill, creationNotes: failed.creationNotes, status: 'complete' });
-});
-
-test('independent image selection changes routing without switching conversation or following chained mappings', async () => {
-  mockProviders.push({ ...mockProviders[0], id: 'second-image', name: '第二生图', model: 'second-model', imageProviderId: 'image-provider' });
-  await mount('auto');
-  await act(async () => { await app.sendPrompt('你好', [], null, false); });
-  const conversationId = app.activeConversation?.id;
-  await act(async () => { await app.updateProviderSettings('second-image', { quality: 'medium' }); });
-  await act(async () => { await app.updateActiveProviderSettings({ imageProviderId: 'second-image' }); });
-  await act(async () => { await app.sendPrompt('生成一张猫咪图片', [], null, false); });
-  expect(app.activeConversation?.id).toBe(conversationId);
-  expect(app.activeProvider?.id).toBe('image-provider');
-  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'second-model', quality: 'medium', apiKey: 'second-image-test-key' }));
-});
-
-test('the conversation chat selection wins over the image provider legacy analyst mapping', async () => {
-  mockProviders.push(
-    { ...mockProviders[1], id: 'preferred-chat', name: '当前选中的对话', chatModel: 'preferred-model' },
-    { ...mockProviders[0], id: 'second-image', name: '第二生图', model: 'second-image-model', analysisProviderId: 'analysis-provider' },
-  );
-  await mount('auto');
-  await act(async () => { await app.updateActiveProviderSettings({ analysisProviderId: 'preferred-chat', imageProviderId: 'second-image' }); });
-  await act(async () => { await app.sendPrompt('先分析 PDF 再生成一张活动海报', [], null, false, [pdf], 'poster-layout'); });
-  expect(mockPrepareSkill).toHaveBeenCalledWith(expect.objectContaining({ model: 'preferred-model', apiKey: 'preferred-chat-test-key', documents: [pdf] }));
-  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'second-image-model', apiKey: 'second-image-test-key' }));
+  expect(app.chatProvider?.id).toBe('chat');
+  await act(async () => { await app.selectChatProvider('second', 'claude-y'); });
+  expect(app.chatProvider).toMatchObject({ id: 'second', chatModel: 'claude-y' });
+  expect(mockSettings.chat_provider_id).toBe('second');
+  await act(async () => { await app.selectImageProvider('image', { aspectRatio: '16:9' }); });
+  expect(app.imageProvider?.aspectRatio).toBe('16:9');
 });

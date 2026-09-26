@@ -1,4 +1,3 @@
-import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Modal, PanResponder, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
@@ -9,6 +8,7 @@ import type { ReferenceImage } from '../domain';
 import { saveBase64Png } from '../storage/files';
 import { colors, radius, spacing } from '../theme';
 import { AppDialog } from './ui';
+import { Icon, type IconName } from './Icon';
 
 type Point = { x: number; y: number };
 type Stroke = { id: number; mode: 'draw' | 'erase'; size: number; points: Point[] };
@@ -207,10 +207,10 @@ export function MaskEditor({
         <View style={styles.controls}>
           <View style={styles.toolRow}>
             <Tool icon="brush" label="画笔" active={tool === 'draw'} onPress={() => setTool('draw')} />
-            <Tool icon="color-fill-outline" label="橡皮擦" active={tool === 'erase'} onPress={() => setTool('erase')} />
-            <Tool icon="arrow-undo" label="撤销" disabled={!strokes.length && !clearBackup} onPress={undo} />
-            <Tool icon="arrow-redo" label="重做" disabled={!redo.length} onPress={redoStroke} />
-            <Tool icon="trash-outline" label="清空" disabled={!strokes.length} onPress={clear} />
+            <Tool icon="eraser" label="橡皮擦" active={tool === 'erase'} onPress={() => setTool('erase')} />
+            <Tool icon="undo" label="撤销" disabled={!strokes.length && !clearBackup} onPress={undo} />
+            <Tool icon="redo" label="重做" disabled={!redo.length} onPress={redoStroke} />
+            <Tool icon="trash" label="清空" disabled={!strokes.length} onPress={clear} />
           </View>
           <View style={styles.sliderRow}>
             <Text style={styles.sliderLabel}>笔刷</Text>
@@ -219,15 +219,15 @@ export function MaskEditor({
           </View>
         </View>
       </SafeAreaView>
-      <AppDialog visible={Boolean(errorMessage)} title="蒙版没有保存" message={errorMessage ?? ''} icon="alert-circle-outline" onClose={() => setErrorMessage(null)} />
+      <AppDialog visible={Boolean(errorMessage)} title="蒙版没有保存" message={errorMessage ?? ''} icon="alert" onClose={() => setErrorMessage(null)} />
     </Modal>
   );
 }
 
-function Tool({ icon, label, active, disabled, onPress }: { icon: React.ComponentProps<typeof Ionicons>['name']; label: string; active?: boolean; disabled?: boolean; onPress: () => void }) {
+function Tool({ icon, label, active, disabled, onPress }: { icon: IconName; label: string; active?: boolean; disabled?: boolean; onPress: () => void }) {
   return (
     <Pressable disabled={disabled} onPress={onPress} style={[styles.tool, active && styles.activeTool, disabled && styles.disabled]}>
-      <Ionicons name={icon} size={21} color={active ? colors.primaryStrong : colors.text} />
+      <Icon name={icon} size={22} color={active ? colors.primary : colors.textSecondary} />
       <Text style={[styles.toolText, active && styles.activeToolText]}>{label}</Text>
     </Pressable>
   );
@@ -254,7 +254,7 @@ const styles = StyleSheet.create({
   cancel: { color: colors.textMuted, fontWeight: '600' },
   done: { color: colors.primaryStrong, fontWeight: '700' },
   canvasArea: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg, backgroundColor: colors.surface },
-  canvas: { overflow: 'hidden', borderRadius: radius.md, backgroundColor: '#DDE3EA', borderWidth: 1, borderColor: colors.border },
+  canvas: { overflow: 'hidden', borderRadius: radius.md, backgroundColor: colors.tint, borderWidth: 1, borderColor: colors.border },
   hiddenMask: { position: 'absolute', zIndex: -1 },
   controls: { padding: spacing.lg, gap: spacing.lg, borderTopWidth: 1, borderColor: colors.border },
   toolRow: { flexDirection: 'row', justifyContent: 'space-between' },

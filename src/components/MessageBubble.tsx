@@ -1,227 +1,250 @@
-import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import React, { memo, useEffect, useRef, useState } from 'react';
+import { Animated, Easing, Image, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg';
 
-import { MessageContent } from './MessageContent';
 import type { ChatMessage } from '../domain';
 import { attachmentKind } from '../document-inputs';
-import { colors, radius, spacing } from '../theme';
+import type { RequestPhase } from '../state/AppContext';
+import { colors } from '../theme';
+import { LivingMark } from './Brand';
+import { Icon, type IconName } from './Icon';
+import { MessageContent } from './MessageContent';
+import { Appear, useReducedMotion } from './MotionPressable';
+import { showToast } from './ui';
 
-export function MessageBubble({
-  message,
-  elapsedSeconds,
-  requestStage,
-  onCancel,
-  onRetry,
-  onSave,
-  onShare,
-  onReuse,
-  onPreview,
-}: {
+type Props = {
   message: ChatMessage;
+  phase: RequestPhase;
   elapsedSeconds: number;
-  requestStage?: string;
-  onCancel: () => void;
-  onRetry: () => void;
-  onSave: () => void;
-  onShare: () => void;
-  onReuse: () => void;
-  onPreview: () => void;
-}) {
-  const [actualSize, setActualSize] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [showDetails, setShowDetails] = useState(false);
-  const [showAnalysis, setShowAnalysis] = useState(false);
-  const [imageRatio, setImageRatio] = useState(() => ratioFromSize(message.size));
-  const window = useWindowDimensions();
+  isLast: boolean;
+  onStop: () => void;
+  onRetry: (message: ChatMessage) => void;
+  onPreview: (uri: string) => void;
+  onSave: (uri: string) => void;
+  onShare: (uri: string) => void;
+};
 
-  useEffect(() => {
-    setActualSize(null);
-    setImageRatio(ratioFromSize(message.size));
-  }, [message.imageUri, message.size]);
+export const MessageBubble = memo(function MessageBubble(props: Props) {
+  return <Appear distance={14} duration={360}>{props.message.role === 'user' ? <UserMessage {...props} /> : <AssistantMessage {...props} />}</Appear>;
+});
 
-  const imageLayout = fitImageCard(imageRatio, Math.min(window.width, 760) - 40, Math.min(window.height * 0.62, 560));
-  if (message.role === 'user') {
-    return (
-      <View style={styles.userWrap}>
-        {message.references.length > 0 && (
-          <View style={styles.referenceRow}>
-            {message.references.map((reference, index) => (
-              <View key={reference.id} style={styles.referenceItem}>
-                <Image source={{ uri: reference.uri }} style={styles.referenceImage} />
-                {index === 0 && <Text style={styles.referenceTag}>主图</Text>}
-              </View>
-            ))}
-          </View>
-        )}
-        {!!message.documents?.length && <View style={styles.referenceRow}>{message.documents.map((document) => <View key={document.id} style={styles.document}><Ionicons name={fileIcon(document.name, document.mimeType)} size={16} color={colors.primaryStrong} /><View style={styles.documentTextWrap}><Text numberOfLines={2} style={styles.documentText}>{document.name}</Text><Text style={styles.documentKind}>{fileKindLabel(document.name, document.mimeType)}</Text></View></View>)}</View>}
-        {!!message.prompt && <View style={styles.userBubble}><Text selectable style={styles.userText}>{message.prompt}</Text></View>}
-      </View>
-    );
-  }
+function UserMessage({ message, onPreview }: Props) {
+  const docs = message.documents ?? [];
+  const single = message.references.length === 1;
+  return <View style={styles.userWrap}>
+    {message.references.length > 0 && <View style={styles.userImages}>
+      {message.references.map((reference, index) => <Pressable key={reference.id} accessibilityLabel="查看图片" onPress={() => onPreview(reference.uri)} style={styles.userImageFrame}>
+        <Image source={{ uri: reference.uri }} style={single ? styles.userImageLarge : styles.userImage} />
+        {index === 0 && message.maskUri ? <View style={styles.maskBadge}><Icon name="brush" size={11} color="#fff" strokeWidth={2} /></View> : null}
+      </Pressable>)}
+    </View>}
+    {docs.length > 0 && <View style={styles.userDocs}>{docs.map((doc) => <FileCard key={doc.id} name={doc.name} mimeType={doc.mimeType} size={doc.size} />)}</View>}
+    {message.prompt && !isPlaceholderPrompt(message) ? <View style={styles.userBubble}><Text selectable style={styles.userText}>{message.prompt}</Text></View> : null}
+  </View>;
+}
 
-  if (message.status === 'pending') {
-    return (
-      <View style={styles.assistantBlock}>
-        <View style={styles.progressCard}>
-          <ActivityIndicator color={colors.primaryStrong} />
-          <View style={styles.progressText}><Text style={styles.progressTitle}>{requestStage || (message.mode === 'chat' ? '正在回答' : message.mode === 'edit' ? '正在编辑图片' : '正在生成图片')}</Text><Text style={styles.meta}>已等待 {formatDuration(elapsedSeconds)} · 最长 10 分钟</Text></View>
-          <Pressable onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelText}>取消</Text></Pressable>
-        </View>
-      </View>
-    );
-  }
-
-  if (message.status === 'complete' && message.mode === 'chat' && message.text) {
-    return <View style={styles.assistantBlock}>
-      <View style={styles.assistantIdentity}><View style={styles.assistantAvatar}><Ionicons name="sparkles" size={13} color={colors.primaryStrong} /></View><Text style={styles.assistantLabel}>Salcara AI</Text></View>
-      <MessageContent text={message.text} />
-      <Text style={styles.meta}>{message.model}{message.elapsedMs ? ` · ${formatDuration(Math.round(message.elapsedMs / 1000))}` : ''}</Text>
-      <Action icon="copy-outline" label={copied ? '已复制' : '复制回答'} onPress={() => void Clipboard.setStringAsync(message.text!).then(() => setCopied(true)).catch(() => setCopied(false))} />
-    </View>;
-  }
-
-  if (message.status !== 'complete' || !message.imageUri) {
-    return (
-      <View style={styles.assistantBlock}>
-        <View style={styles.errorCard}>
-          <Ionicons name="alert-circle-outline" size={22} color={colors.danger} />
-          <View style={styles.progressText}>
-            <Text style={styles.errorTitle}>{statusTitle(message.status, Boolean(message.remoteImageUrl))}</Text>
-            <Text selectable style={styles.errorText}>{message.error ?? '请求未完成'}</Text>
-          </View>
-        </View>
-        <Pressable onPress={onRetry} style={styles.retryButton}><Ionicons name="refresh" size={17} color={colors.primaryStrong} /><Text style={styles.retryText}>{message.remoteImageUrl ? '重新下载' : '手动重试'}</Text></Pressable>
-      </View>
-    );
-  }
-
-  return (
-    <View style={styles.assistantBlock}>
-      <View style={styles.assistantIdentity}><View style={styles.assistantAvatar}><Ionicons name="sparkles-outline" size={15} color={colors.primaryStrong} /></View><Text style={styles.assistantLabel}>{message.creationSkill?.title ?? 'Salcara AI'}</Text></View>
-      <Pressable accessibilityLabel="预览图片" accessibilityHint="打开后可双指缩放或双击放大" onPress={onPreview} style={[styles.imageCard, imageLayout]}>
-        <Image
-          source={{ uri: message.imageUri }}
-          style={styles.resultImage}
-          resizeMode="contain"
-          onLoad={(event) => {
-            const { width, height } = event.nativeEvent.source;
-            if (width && height) {
-              setActualSize(`${Math.round(width)}x${Math.round(height)}`);
-              setImageRatio(width / height);
-            }
-          }}
-        />
-      </Pressable>
-      <View style={styles.resultMeta}><Text style={styles.meta}>{actualSize ?? message.size}{message.elapsedMs ? ' · ' + formatDuration(Math.round(message.elapsedMs / 1000)) : ''}</Text><Pressable accessibilityRole="button" onPress={() => setShowDetails((value) => !value)} style={styles.detailButton}><Text style={styles.meta}>图片信息</Text><Ionicons name={showDetails ? 'chevron-up' : 'chevron-down'} size={12} color={colors.textMuted} /></Pressable></View>
-      {showDetails && <View style={styles.details}>
-        <Text selectable style={styles.meta}>{message.model} · {message.quality}</Text>
-        <Text style={styles.meta}>请求 {message.size} · 实际 {actualSize ?? '读取中'}</Text>
-        {actualSize && actualSize !== message.size && <Text style={styles.sizeWarningText}>上游未按请求尺寸返回，图片未在手机端缩放</Text>}
-      </View>}
-      <View style={styles.actions}>
-        <Action icon="download-outline" label="保存" onPress={onSave} />
-        <Action icon="share-outline" label="分享" onPress={onShare} />
-        <Action icon="images-outline" label="作为参考图" onPress={onReuse} />
-      </View>
-      {message.creationNotes && <View style={styles.notes}><View style={styles.notesHeading}><Ionicons name="text-outline" size={17} color={colors.primaryStrong} /><Text style={styles.notesTitle}>文字与排版说明</Text></View><Text selectable style={styles.analysis}>{message.creationNotes}</Text></View>}
-      {message.preparedPrompt && <>
-        <Action icon="document-text-outline" label={showAnalysis ? '收起创作说明' : '查看创作说明'} onPress={() => setShowAnalysis((value) => !value)} />
-        {showAnalysis && <Text selectable style={styles.analysis}>{message.preparedPrompt}</Text>}
-      </>}
+export function FileCard({ name, mimeType, size, onRemove }: { name: string; mimeType: string; size: number; onRemove?: () => void }) {
+  const kind = attachmentKind(name, mimeType);
+  const tint = kind === 'pdf' ? '#F2555A' : kind === 'office' ? colors.primary : kind === 'text' ? '#12A150' : '#8A94A6';
+  return <View style={styles.fileCard}>
+    <View style={[styles.fileIcon, { backgroundColor: tint }]}><Icon name={docIcon(name, mimeType)} size={17} color="#fff" strokeWidth={1.9} /></View>
+    <View style={{ flexShrink: 1, flex: onRemove ? 1 : undefined }}>
+      <Text style={styles.fileName} numberOfLines={1}>{name}</Text>
+      <Text style={styles.fileMeta}>{fileLabel(name)} · {formatSize(size)}</Text>
     </View>
-  );
+    {onRemove && <Pressable accessibilityLabel={`移除 ${name}`} hitSlop={10} onPress={onRemove} style={styles.fileRemove}><Icon name="close" size={14} color={colors.textMuted} strokeWidth={2} /></Pressable>}
+  </View>;
 }
 
-function Action({ icon, label, onPress }: { icon: React.ComponentProps<typeof Ionicons>['name']; label: string; onPress: () => void }) {
-  return <Pressable onPress={onPress} style={styles.action}><Ionicons name={icon} size={17} color={colors.textMuted} /><Text style={styles.actionText}>{label}</Text></Pressable>;
+function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare }: Props) {
+  const onRetry = () => retryMessage(message);
+  const pending = message.status === 'pending';
+  const imageJob = Boolean(message.preparedPrompt) && (message.mode === 'generate' || message.mode === 'edit');
+  const text = message.text?.trim() ?? '';
+  const streaming = pending && !imageJob && Boolean(text);
+  const failed = message.status === 'error' || message.status === 'interrupted';
+  const stopped = message.status === 'cancelled';
+  return <View style={styles.assistantWrap}>
+    {pending && !text && !imageJob && <Thinking label={phase === 'downloading' ? '正在取回图片' : '正在思考'} />}
+    {text ? <MessageContent text={text} streaming={streaming} /> : null}
+    {imageJob && pending && <DrawingCanvas message={message} seconds={elapsedSeconds} onStop={onStop} downloading={phase === 'downloading'} />}
+    {message.imageUri ? <ImageResult message={message} onPreview={onPreview} /> : null}
+    {failed && <View style={styles.errorCard}>
+      <Icon name="alert" size={18} color={colors.danger} />
+      <Text selectable style={styles.errorText}>{message.error || '这次没有完成'}</Text>
+      <Pressable accessibilityRole="button" onPress={onRetry} hitSlop={8} style={styles.retry}><Text style={styles.retryText}>{message.remoteImageUrl ? '重新下载' : imageJob ? '重新绘制' : '重试'}</Text></Pressable>
+    </View>}
+    {stopped && <View style={styles.stoppedRow}><Text style={styles.stoppedText}>已停止</Text><Pressable accessibilityRole="button" onPress={onRetry} hitSlop={8}><Text style={styles.retryText}>重新生成</Text></Pressable></View>}
+    {!pending && !failed && !stopped && <Actions message={message} text={text} emphasized={isLast} onRetry={onRetry} onSave={onSave} onShare={onShare} />}
+  </View>;
 }
 
-function statusTitle(status: ChatMessage['status'], hasRemoteImage = false): string {
-  if (hasRemoteImage && status === 'error') return '图片已生成，但下载失败';
-  if (status === 'cancelled') return '已取消';
-  if (status === 'interrupted') return '请求已中断';
-  return '请求失败';
+function Actions({ message, text, emphasized, onRetry, onSave, onShare }: { message: ChatMessage; text: string; emphasized: boolean; onRetry: () => void; onSave: (uri: string) => void; onShare: (uri: string) => void }) {
+  const copy = () => void Clipboard.setStringAsync(text || message.preparedPrompt || '').then(() => showToast(text ? '已复制' : '已复制作图描述'));
+  return <View style={[styles.actions, !emphasized && { opacity: 0.6 }]}>
+    {message.imageUri ? <ActionIcon icon="download" label="保存到相册" onPress={() => onSave(message.imageUri!)} /> : null}
+    {message.imageUri ? <ActionIcon icon="share" label="分享" onPress={() => onShare(message.imageUri!)} /> : null}
+    {(text || message.preparedPrompt) ? <ActionIcon icon="copy" label="复制" onPress={copy} /> : null}
+    <ActionIcon icon="regenerate" label="重新生成" onPress={onRetry} />
+  </View>;
 }
 
-function formatDuration(totalSeconds: number): string {
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes ? `${minutes}分${seconds.toString().padStart(2, '0')}秒` : `${seconds}秒`;
+function ActionIcon({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} hitSlop={4} style={({ pressed }) => [styles.actionIcon, pressed && { backgroundColor: colors.surfaceStrong }]}>
+    <Icon name={icon} size={18} color={colors.textMuted} />
+  </Pressable>;
 }
 
+/** Living brand mark plus a softly pulsing label. */
+function Thinking({ label }: { label: string }) {
+  const reduced = useReducedMotion();
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (reduced) return;
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [reduced, pulse]);
+  return <View style={styles.thinking} accessibilityLabel={label}>
+    <LivingMark size={20} />
+    <Animated.Text style={[styles.thinkingText, { opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] }) }]}>{label}…</Animated.Text>
+  </View>;
+}
+
+/** Aurora placeholder: soft colour fields drifting while the image is drawn. */
+function DrawingCanvas({ message, seconds, onStop, downloading }: { message: ChatMessage; seconds: number; onStop: () => void; downloading: boolean }) {
+  const { width } = useWindowDimensions();
+  const reduced = useReducedMotion();
+  const drift = useRef(new Animated.Value(0)).current;
+  const ratio = ratioFromSize(message.size);
+  const cardWidth = Math.min(width - 40, 400);
+  const cardHeight = Math.min(cardWidth / ratio, 460);
+  useEffect(() => {
+    if (reduced) return;
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(drift, { toValue: 1, duration: 3200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      Animated.timing(drift, { toValue: 0, duration: 3200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [reduced, drift]);
+  const blob = (color: string, size: number, x: [number, number], y: [number, number]) => <Animated.View pointerEvents="none" style={{
+    position: 'absolute', left: -size / 2, top: -size / 2, width: size, height: size,
+    transform: [
+      { translateX: drift.interpolate({ inputRange: [0, 1], outputRange: [x[0] * cardWidth, x[1] * cardWidth] }) },
+      { translateY: drift.interpolate({ inputRange: [0, 1], outputRange: [y[0] * cardHeight, y[1] * cardHeight] }) },
+    ],
+  }}><SoftOrb color={color} size={size} /></Animated.View>;
+  const orb = Math.max(cardWidth, cardHeight) * 0.95;
+  return <View style={{ gap: 12 }}>
+    <View style={[styles.canvas, { width: cardWidth, height: cardHeight }]}>
+      {blob('#8CCBFF', orb, [0.2, 0.55], [0.25, 0.1])}
+      {blob('#B9A2FF', orb * 0.9, [0.85, 0.5], [0.55, 0.85])}
+      {blob('#FBC2DF', orb * 0.75, [0.35, 0.8], [0.95, 0.6])}
+      {blob('#FFE0C6', orb * 0.5, [0.7, 0.25], [0.2, 0.45])}
+      <View style={styles.canvasGlass} />
+    </View>
+    <View style={styles.drawingCaption}>
+      <LivingMark size={16} />
+      <Text style={styles.drawingText}>{downloading ? '正在取回图片' : message.mode === 'edit' ? '正在修改图片' : '正在绘制'}<Text style={styles.drawingSeconds}>  {formatElapsed(seconds)}</Text></Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="停止绘制" onPress={onStop} hitSlop={10} style={styles.stopLink}><Text style={styles.stopText}>停止</Text></Pressable>
+    </View>
+  </View>;
+}
+
+function SoftOrb({ color, size }: { color: string; size: number }) {
+  const id = useRef(`orb${Math.random().toString(36).slice(2, 8)}`).current;
+  return <Svg width={size} height={size}>
+    <Defs>
+      <RadialGradient id={id} cx="50%" cy="50%" r="50%">
+        <Stop offset="0" stopColor={color} stopOpacity="0.95" />
+        <Stop offset="1" stopColor={color} stopOpacity="0" />
+      </RadialGradient>
+    </Defs>
+    <Circle cx={size / 2} cy={size / 2} r={size / 2} fill={`url(#${id})`} />
+  </Svg>;
+}
+
+function ImageResult({ message, onPreview }: { message: ChatMessage; onPreview: (uri: string) => void }) {
+  const { width } = useWindowDimensions();
+  const [ratio, setRatio] = useState(() => ratioFromSize(message.size));
+  const reveal = useRef(new Animated.Value(0)).current;
+  const uri = message.imageUri!;
+  useEffect(() => {
+    let alive = true;
+    Image.getSize(uri, (w, h) => { if (alive && w > 0 && h > 0) setRatio(w / h); }, () => undefined);
+    return () => { alive = false; };
+  }, [uri]);
+  const maxWidth = Math.min(width - 40, 420);
+  const cardHeight = Math.min(maxWidth / ratio, 520);
+  const cardWidth = Math.min(maxWidth, cardHeight * ratio);
+  return <Animated.View style={[styles.imageCard, { width: cardWidth, height: cardHeight, opacity: reveal, transform: [{ scale: reveal.interpolate({ inputRange: [0, 1], outputRange: [0.97, 1] }) }] }]}>
+    <Pressable accessibilityRole="imagebutton" accessibilityLabel="查看大图" onPress={() => onPreview(uri)} style={StyleSheet.absoluteFill}>
+      <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover"
+        onLoad={() => Animated.timing(reveal, { toValue: 1, duration: 520, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start()}
+        onError={() => reveal.setValue(1)} />
+    </Pressable>
+  </Animated.View>;
+}
+
+function isPlaceholderPrompt(message: ChatMessage) {
+  return (message.references.length > 0 || (message.documents?.length ?? 0) > 0) && /^请(?:阅读并分析这些文件|看看这张图片)。$/.test(message.prompt);
+}
 function ratioFromSize(size: string): number {
-  const match = size.match(/(\d+)\s*[x×]\s*(\d+)/i);
-  if (!match) return 1;
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  return width > 0 && height > 0 ? width / height : 1;
+  const match = size?.match(/^(\d+)x(\d+)$/);
+  return match ? Number(match[1]) / Number(match[2]) : 1;
 }
-
-function fitImageCard(ratio: number, maxWidth: number, maxHeight: number): { width: number; height: number } {
-  const safeRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
-  const heightAtFullWidth = maxWidth / safeRatio;
-  if (heightAtFullWidth <= maxHeight) return { width: maxWidth, height: heightAtFullWidth };
-  return { width: maxHeight * safeRatio, height: maxHeight };
+function formatElapsed(seconds: number) {
+  return seconds >= 60 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : `${seconds}s`;
+}
+function formatSize(bytes: number) {
+  return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+function fileLabel(name: string) {
+  const ext = name.split('.').pop();
+  return ext && ext !== name ? ext.toUpperCase() : '文件';
+}
+export function docIcon(name: string, mimeType: string): IconName {
+  const kind = attachmentKind(name, mimeType);
+  return kind === 'archive' ? 'archive' : kind === 'text' ? 'code' : 'file';
 }
 
 const styles = StyleSheet.create({
-  resultMeta: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  detailButton: { minHeight: 30, flexDirection: 'row', alignItems: 'center', gap: 4 },
-  details: { width: '100%', backgroundColor: colors.surface, padding: 12, gap: 6, borderRadius: 12 },
-  notes: { width: '100%', backgroundColor: colors.blueSurface, padding: 12, gap: 8, borderRadius: 14 },
-  notesHeading: { flexDirection: 'row', alignItems: 'center', gap: 7 },
-  notesTitle: { color: colors.primaryStrong, fontSize: 12, fontWeight: '600' },
-  userWrap: { alignItems: 'flex-end', paddingHorizontal: 20, gap: spacing.sm },
-  userBubble: { maxWidth: '87%', backgroundColor: colors.surface, borderRadius: 20, borderBottomRightRadius: 6, paddingHorizontal: 17, paddingVertical: 12 },
-  userText: { color: colors.text, fontSize: 15, lineHeight: 24 },
-  answer: { color: colors.text, fontSize: 15, lineHeight: 23, paddingVertical: 4 },
-  analysis: { color: colors.textMuted, fontSize: 13, lineHeight: 21, padding: 12, backgroundColor: colors.surface, borderRadius: radius.md },
-  document: { flexDirection: 'row', alignItems: 'center', gap: 6, maxWidth: '100%', borderRadius: radius.md, padding: 10, backgroundColor: colors.surface },
-  documentTextWrap: { flexShrink: 1, gap: 2 },
-  documentText: { color: colors.text, fontSize: 12 },
-  documentKind: { color: colors.textMuted, fontSize: 10 },
-  referenceRow: { maxWidth: '90%', flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 },
-  referenceItem: { width: 58, height: 58, borderRadius: radius.sm, overflow: 'hidden', backgroundColor: colors.surface },
-  referenceImage: { width: 58, height: 58 },
-  referenceTag: { position: 'absolute', left: 3, bottom: 3, color: '#fff', backgroundColor: 'rgba(17,24,39,.7)', borderRadius: 4, paddingHorizontal: 4, fontSize: 9 },
-  assistantBlock: { alignItems: 'flex-start', paddingHorizontal: 20, gap: 12 },
-  assistantIdentity: { flexDirection: 'row', alignItems: 'center', gap: 7 },
-  assistantAvatar: { width: 25, height: 25, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.blueSurface },
-  assistantLabel: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
-  progressCard: { width: '100%', minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: spacing.md, borderRadius: 18, padding: 14, backgroundColor: colors.surface },
-  progressText: { flex: 1, gap: 4 },
-  progressTitle: { color: colors.text, fontSize: 13, fontWeight: '500' },
-  meta: { color: colors.textMuted, fontSize: 11, lineHeight: 16 },
-  sizeWarning: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 6, borderRadius: radius.sm, backgroundColor: colors.warningSurface },
-  sizeWarningText: { color: colors.warningText, fontSize: 11, lineHeight: 16 },
-  cancelButton: { minHeight: 34, paddingHorizontal: 12, justifyContent: 'center', borderRadius: radius.pill, backgroundColor: colors.surface },
-  cancelText: { color: colors.textMuted, fontWeight: '600', fontSize: 12 },
-  errorCard: { width: '100%', flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md, backgroundColor: colors.dangerSurface, borderRadius: radius.lg, padding: spacing.md },
-  errorTitle: { color: colors.danger, fontWeight: '600', fontSize: 14 },
-  errorText: { color: colors.text, lineHeight: 19, fontSize: 13 },
-  retryButton: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 36, paddingHorizontal: 12, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.primary },
-  retryText: { color: colors.primaryStrong, fontWeight: '700', fontSize: 12 },
-  imageCard: { overflow: 'hidden', borderRadius: radius.lg, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
-  resultImage: { width: '100%', height: '100%' },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  action: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, borderRadius: 12 },
-  actionText: { color: colors.textMuted, fontSize: 12, fontWeight: '500' },
+  userWrap: { alignItems: 'flex-end', gap: 8, paddingLeft: 52 },
+  userBubble: { maxWidth: '100%', backgroundColor: colors.userBubble, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 22 },
+  userText: { color: colors.text, fontSize: 16, lineHeight: 24 },
+  userImages: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 },
+  userImageFrame: { borderRadius: 18, overflow: 'hidden', backgroundColor: colors.surface },
+  userImage: { width: 96, height: 96 },
+  userImageLarge: { width: 180, height: 180 },
+  maskBadge: { position: 'absolute', left: 8, bottom: 8, width: 22, height: 22, borderRadius: 11, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  userDocs: { alignItems: 'flex-end', gap: 6 },
+  fileCard: { flexDirection: 'row', alignItems: 'center', gap: 10, maxWidth: 260, padding: 8, paddingRight: 14, borderRadius: 16, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
+  fileIcon: { width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  fileName: { color: colors.text, fontSize: 13.5, fontWeight: '500' },
+  fileMeta: { color: colors.subtle, fontSize: 11.5, marginTop: 2 },
+  fileRemove: { width: 22, height: 22, borderRadius: 11, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
+  assistantWrap: { gap: 12, alignItems: 'flex-start' },
+  thinking: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 28 },
+  thinkingText: { color: colors.textMuted, fontSize: 15 },
+  canvas: { borderRadius: 22, overflow: 'hidden', backgroundColor: '#F3F2FF' },
+  canvasGlass: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.18)' },
+  drawingCaption: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  drawingText: { color: colors.textSecondary, fontSize: 14.5, fontWeight: '500' },
+  drawingSeconds: { color: colors.subtle, fontWeight: '400' },
+  stopLink: { marginLeft: 'auto', paddingHorizontal: 12, height: 28, borderRadius: 14, backgroundColor: colors.surfaceStrong, justifyContent: 'center' },
+  stopText: { color: colors.textSecondary, fontSize: 12.5, fontWeight: '600' },
+  imageCard: { borderRadius: 22, overflow: 'hidden', backgroundColor: colors.surface },
+  errorCard: { alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 16, backgroundColor: colors.dangerSurface },
+  errorText: { flex: 1, minWidth: 160, color: colors.textSecondary, fontSize: 14, lineHeight: 20 },
+  retry: { paddingHorizontal: 4 },
+  retryText: { color: colors.primary, fontSize: 14, fontWeight: '600' },
+  stoppedRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  stoppedText: { color: colors.subtle, fontSize: 14 },
+  actions: { flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: -7, marginTop: -2 },
+  actionIcon: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
 });
-
-function fileIcon(name: string, mimeType: string): React.ComponentProps<typeof Ionicons>['name'] {
-  switch (attachmentKind(name, mimeType)) {
-    case 'image': return 'image-outline';
-    case 'pdf': return 'document-text-outline';
-    case 'office': return 'briefcase-outline';
-    case 'archive': return 'archive-outline';
-    case 'text': return 'code-slash-outline';
-    default: return 'attach-outline';
-  }
-}
-
-function fileKindLabel(name: string, mimeType: string): string {
-  const kind = attachmentKind(name, mimeType);
-  return kind === 'office' ? '办公文件' : kind === 'archive' ? '压缩包目录' : kind === 'text' ? '文本 / 代码' : kind === 'pdf' ? 'PDF 文档' : kind === 'image' ? '图片' : '文件附件';
-}

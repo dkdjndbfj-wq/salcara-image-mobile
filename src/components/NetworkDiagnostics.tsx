@@ -109,7 +109,7 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
         </View>
       ))}
       {!imageUrl && <Text style={styles.detail}>当前没有可探测的图片外链。若 API 检测通过但下载失败，请把下载错误中的图片服务器域名反馈给服务商。</Text>}
-      <PrimaryButton label="检测当前网络" icon="pulse-outline" onPress={() => void run()} loading={busy} />
+      <PrimaryButton label="检测当前网络" icon="pulse" onPress={() => void run()} loading={busy} />
       <Text style={styles.detail}>对于 sub2api 服务商，可在上游账户中启用“生图结果 URL 转 base64”，让 API 直接返回图片内容，减少对外部图片域名的依赖。</Text>
       </View>
     </Sheet>

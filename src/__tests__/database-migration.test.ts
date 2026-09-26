@@ -10,9 +10,8 @@ jest.mock('expo-sqlite', () => ({
   }),
 }));
 
-import { initializeDatabase, insertConversation, insertMessage, listConversations, listMessages, listProviders, updateMessage, upsertProvider } from '../storage/database';
+import { deleteEmptyConversations, getSetting, initializeDatabase, insertConversation, insertMessage, listConversations, listMessages, listProviders, reassignConversations, setSetting, updateMessage, upsertProvider } from '../storage/database';
 import type { ChatMessage, ProviderProfile } from '../domain';
-import { snapshotCreationSkill } from '../creation-skills';
 
 beforeAll(() => {
   mockNativeDb.exec(`
@@ -37,7 +36,7 @@ test('additive migrations preserve installed providers, conversations and images
   await initializeDatabase();
   expect((await listProviders())[0]).toMatchObject({ id: 'old', model: 'gpt-image-2', chatModel: null, chatApi: 'chat-completions', imageProviderId: null });
   expect((await listConversations())[0]).toMatchObject({ id: 'old-c', mode: 'image', transparent: true });
-  expect((await listMessages('old-c'))[0]).toMatchObject({ imageUri: 'file:///original.png', documents: [], text: null, preparedPrompt: null, creationSkill: null, creationNotes: null });
+  expect((await listMessages('old-c'))[0]).toMatchObject({ imageUri: 'file:///original.png', documents: [], text: null, preparedPrompt: null });
   await initializeDatabase();
   expect(await listProviders()).toHaveLength(1);
 });
@@ -54,17 +53,14 @@ test('roundtrips chat settings, document attachments and resumable prepared prom
     model: 'custom-vision', quality: 'auto', size: '', transparent: false, imageUri: null, remoteImageUrl: null, references: [], maskUri: null,
     error: null, elapsedMs: null, createdAt: 2, requestApi: 'responses', analysisApi: 'chat-completions',
     documents: [{ id: 'd', uri: 'file:///source.pdf', name: '方案.pdf', mimeType: 'application/pdf', size: 10 }],
-    creationSkill: snapshotCreationSkill('poster-layout'),
   };
   await insertMessage(message);
-  expect((await listMessages('new-c'))[0].creationSkill).toEqual(message.creationSkill);
-  await updateMessage({ ...message, status: 'complete', text: '已解析', preparedPrompt: '根据场地尺寸生图', analysisModel: 'vision', analysisProviderId: 'old', creationNotes: '底部正文尚未叠排：欢迎参加' });
+  await updateMessage({ ...message, status: 'complete', text: '已解析', preparedPrompt: '根据场地尺寸生图', analysisModel: 'vision', analysisProviderId: 'old' });
   expect((await listProviders()).find((item) => item.id === 'new')).toMatchObject(profile);
   expect((await listConversations()).find((item) => item.id === 'new-c')?.mode).toBe('chat');
   expect((await listMessages('new-c'))[0]).toMatchObject({
     documents: message.documents, text: '已解析', preparedPrompt: '根据场地尺寸生图', analysisModel: 'vision', analysisProviderId: 'old',
     requestApi: 'responses', analysisApi: 'chat-completions',
-    creationSkill: message.creationSkill, creationNotes: '底部正文尚未叠排：欢迎参加',
   });
 });
 
@@ -74,4 +70,20 @@ test('retains the native Claude protocol after reloading a saved provider', asyn
     resolutionTier: null, createdAt: 3, updatedAt: 3, chatModel: 'claude-test', chatApi: 'anthropic',
   });
   expect((await listProviders()).find((item) => item.id === 'claude')).toMatchObject({ chatApi: 'anthropic', chatModel: 'claude-test' });
+});
+
+test('cleans legacy blank conversations, stores global model choices and keeps chats when a provider moves', async () => {
+  await insertConversation({ id: 'blank-1', title: '新会话', providerId: 'old', mode: 'auto', transparent: false, createdAt: 4, updatedAt: 4 });
+  await insertConversation({ id: 'blank-2', title: '新会话', providerId: 'old', mode: 'auto', transparent: false, createdAt: 5, updatedAt: 5 });
+  await deleteEmptyConversations();
+  const ids = (await listConversations()).map((item) => item.id);
+  expect(ids).not.toContain('blank-1');
+  expect(ids).not.toContain('blank-2');
+  expect(ids).toContain('old-c');
+  await setSetting('chat_provider_id', 'claude');
+  expect(await getSetting('chat_provider_id')).toBe('claude');
+  await setSetting('chat_provider_id', null);
+  expect(await getSetting('chat_provider_id')).toBeNull();
+  await reassignConversations('old', 'claude');
+  expect((await listConversations()).find((item) => item.id === 'old-c')?.providerId).toBe('claude');
 });

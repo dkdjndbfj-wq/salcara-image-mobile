@@ -225,6 +225,30 @@ export async function setActiveProviderId(providerId: string | null): Promise<vo
   );
 }
 
+export async function getSetting(key: string): Promise<string | null> {
+  const row = await (await getDatabase()).getFirstAsync<{ value: string }>('SELECT value FROM app_settings WHERE key = ?', key);
+  return row?.value ?? null;
+}
+
+export async function setSetting(key: string, value: string | null): Promise<void> {
+  const db = await getDatabase();
+  if (value === null) { await db.runAsync('DELETE FROM app_settings WHERE key = ?', key); return; }
+  await db.runAsync(
+    `INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    key, value,
+  );
+}
+
+/** Conversations are no longer owned by one provider; keep them when a provider is removed. */
+export async function reassignConversations(fromProviderId: string, toProviderId: string): Promise<void> {
+  await (await getDatabase()).runAsync('UPDATE conversations SET provider_id = ? WHERE provider_id = ?', toProviderId, fromProviderId);
+}
+
+/** Removes conversation rows that never received a message (legacy blank drafts). */
+export async function deleteEmptyConversations(): Promise<void> {
+  await (await getDatabase()).runAsync('DELETE FROM conversations WHERE id NOT IN (SELECT DISTINCT conversation_id FROM messages)');
+}
+
 export async function listConversations(): Promise<Conversation[]> {
   const rows = await (await getDatabase()).getAllAsync<ConversationRow>(
     'SELECT * FROM conversations ORDER BY updated_at DESC',
@@ -305,8 +329,8 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
     message.analysisProviderId ?? null,
     message.requestApi ?? null,
     message.analysisApi ?? null,
-    message.creationSkill ? JSON.stringify(message.creationSkill) : null,
-    message.creationNotes ?? null,
+    null,
+    null,
   );
 }
 
@@ -329,8 +353,8 @@ export async function updateMessage(message: ChatMessage): Promise<void> {
     message.analysisProviderId ?? null,
     message.requestApi ?? null,
     message.analysisApi ?? null,
-    message.creationSkill ? JSON.stringify(message.creationSkill) : null,
-    message.creationNotes ?? null,
+    null,
+    null,
     message.id,
   );
 }
@@ -366,15 +390,6 @@ function mapConversation(row: ConversationRow): Conversation {
 }
 
 function mapMessage(row: MessageRow): ChatMessage {
-  let creationSkill: ChatMessage['creationSkill'] = null;
-  try {
-    const parsed = row.creation_skill_json ? JSON.parse(row.creation_skill_json) as Record<string, unknown> : null;
-    if (parsed && ['image-create', 'reference-edit', 'poster-layout'].includes(String(parsed.id))
-      && Number.isInteger(parsed.revision) && typeof parsed.title === 'string'
-      && typeof parsed.instructions === 'string' && typeof parsed.requiresReference === 'boolean') {
-      creationSkill = parsed as unknown as ChatMessage['creationSkill'];
-    }
-  } catch { /* Older messages do not contain a workflow snapshot. */ }
   let references: ReferenceImage[] = [];
   try {
     references = JSON.parse(row.references_json) as ReferenceImage[];
@@ -410,8 +425,6 @@ function mapMessage(row: MessageRow): ChatMessage {
     analysisProviderId: row.analysis_provider_id ?? null,
     requestApi: row.request_api ?? undefined,
     analysisApi: row.analysis_api ?? undefined,
-    creationSkill,
-    creationNotes: row.creation_notes ?? null,
     maskUri: row.mask_uri,
     error: row.error,
     elapsedMs: row.elapsed_ms,

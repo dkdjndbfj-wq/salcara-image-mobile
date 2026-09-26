@@ -12,6 +12,7 @@ const mockFetch = jest.fn();
 const mockGetKey = jest.fn();
 jest.mock('expo/fetch', () => ({ fetch: (...args: unknown[]) => mockFetch(...args) }));
 jest.mock('../storage/secure-keys', () => ({ getProviderKey: (...args: unknown[]) => mockGetKey(...args) }));
+jest.mock('../components/Icon', () => ({ Icon: () => null }));
 jest.mock('@expo/vector-icons', () => {
   const ReactModule = require('react');
   const { Text } = require('react-native');

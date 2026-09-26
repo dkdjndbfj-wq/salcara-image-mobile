@@ -1,16 +1,16 @@
-import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 
-import { colors, radius, spacing } from '../theme';
+import { colors, radius } from '../theme';
+import { Icon } from './Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 const MIN_SCALE = 1;
 const MAX_SCALE = 5;
 
-export function ImagePreview({ uri, onClose, onReuse, onSave, onShare }: { uri: string | null; onClose: () => void; onReuse: (uri: string) => void; onSave?: (uri: string) => void; onShare?: (uri: string) => void }) {
+export function ImagePreview({ uri, onClose, onSave, onShare }: { uri: string | null; onClose: () => void; onSave?: (uri: string) => void; onShare?: (uri: string) => void }) {
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);
   const translateX = useSharedValue(0);
@@ -87,40 +87,35 @@ export function ImagePreview({ uri, onClose, onReuse, onSave, onShare }: { uri: 
     <GestureHandlerRootView style={styles.modalRoot}>
       <SafeAreaView style={styles.preview}>
         <View style={styles.topBar}>
-          <Pressable accessibilityLabel="关闭预览" onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={24} color={colors.text} /></Pressable>
-          <Text style={styles.previewTitle}>图片预览</Text>
-          {onShare && uri ? <Pressable accessibilityLabel="分享图片" onPress={() => onShare(uri)} style={styles.iconButton}><Ionicons name="share-outline" size={22} color={colors.text} /></Pressable> : <View style={styles.iconButton} />}
+          <Pressable accessibilityLabel="关闭预览" onPress={onClose} style={styles.glass}><Icon name="close" size={20} color="#fff" strokeWidth={2} /></Pressable>
+          <View style={styles.zoomGroup}>
+            <Pressable accessibilityLabel="缩小图片" style={styles.glass} onPress={() => zoom(-0.5)}><Icon name="minus" size={20} color="#fff" strokeWidth={2} /></Pressable>
+            <Pressable accessibilityLabel="放大图片" style={styles.glass} onPress={() => zoom(0.5)}><Icon name="plus" size={20} color="#fff" strokeWidth={2} /></Pressable>
+          </View>
         </View>
         <GestureDetector gesture={gesture}>
           <Animated.View style={styles.imageStage} onLayout={(event) => { stageWidth.value = event.nativeEvent.layout.width; stageHeight.value = event.nativeEvent.layout.height; }}>
             {uri && <Animated.Image source={{ uri }} style={[styles.previewImage, imageStyle]} resizeMode="contain" />}
           </Animated.View>
         </GestureDetector>
-        <View style={styles.zoomToolbar}>
-          <Pressable accessibilityLabel="缩小图片" style={styles.iconButton} onPress={() => zoom(-0.5)}><Ionicons name="remove" size={22} color={colors.text} /></Pressable>
-          <Text style={styles.tipText}>双指缩放 · 双击切换</Text>
-          <Pressable accessibilityLabel="放大图片" style={styles.iconButton} onPress={() => zoom(0.5)}><Ionicons name="add" size={22} color={colors.text} /></Pressable>
-        </View>
         {uri && <View style={styles.bottomBar}>
-          {onSave && <Pressable style={styles.saveButton} onPress={() => onSave(uri)}><Ionicons name="download-outline" size={19} color={colors.text} /><Text style={styles.saveText}>保存图片</Text></Pressable>}
-          <Pressable style={({ pressed }) => [styles.previewReuse, pressed && { opacity: 0.7 }]} onPress={() => onReuse(uri)}><Ionicons name="sparkles-outline" size={18} color="#fff" /><Text style={styles.previewReuseText}>引用创作</Text></Pressable>
+          {onSave && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.action, styles.actionPrimary, pressed && { opacity: 0.85 }]} onPress={() => onSave(uri)}><Icon name="download" size={19} color={colors.text} strokeWidth={1.9} /><Text style={styles.actionTextDark}>保存</Text></Pressable>}
+          {onShare && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.action, pressed && { opacity: 0.85 }]} onPress={() => onShare(uri)}><Icon name="share" size={19} color="#fff" strokeWidth={1.9} /><Text style={styles.actionText}>分享</Text></Pressable>}
         </View>}
       </SafeAreaView>
     </GestureHandlerRootView>
   </Modal>;
 }
 const styles = StyleSheet.create({
-  modalRoot: { flex: 1 }, preview: { flex: 1, backgroundColor: colors.background, alignItems: 'center' },
-  topBar: { width: '100%', minHeight: 60, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 2 },
-  previewTitle: { fontSize: 16, color: colors.text, fontWeight: '600' },
-  iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
-  tipText: { color: colors.textMuted, fontSize: 12 },
-  imageStage: { flex: 1, width: '100%', overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
+  modalRoot: { flex: 1 }, preview: { flex: 1, backgroundColor: '#05080F', alignItems: 'center' },
+  topBar: { width: '100%', minHeight: 60, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 2 },
+  zoomGroup: { flexDirection: 'row', gap: 8 },
+  glass: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.12)' },
+  imageStage: { flex: 1, width: '100%', overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
   previewImage: { width: '100%', height: '100%' },
-  previewReuse: { flex: 1, minHeight: 48, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, paddingHorizontal: 16, borderRadius: 14, backgroundColor: colors.primaryStrong },
-  previewReuseText: { color: '#fff', fontSize: 14, fontWeight: '600' },
-  zoomToolbar: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 8 },
-  bottomBar: { width: '100%', paddingHorizontal: 20, paddingBottom: 12, flexDirection: 'row', gap: 12 },
-  saveButton: { flex: 1, minHeight: 48, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface, borderRadius: 14 },
-  saveText: { color: colors.text, fontSize: 14, fontWeight: '500' },
+  bottomBar: { width: '100%', paddingHorizontal: 20, paddingVertical: 14, flexDirection: 'row', gap: 10 },
+  action: { flex: 1, height: 52, flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.12)' },
+  actionPrimary: { backgroundColor: '#FFFFFF' },
+  actionText: { color: '#fff', fontSize: 15.5, fontWeight: '600' },
+  actionTextDark: { color: colors.text, fontSize: 15.5, fontWeight: '600' },
 });

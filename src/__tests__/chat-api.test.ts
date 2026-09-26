@@ -27,8 +27,7 @@ jest.mock('expo-file-system', () => ({
 }));
 jest.mock('expo-document-picker', () => ({}));
 
-import { buildChatBody, fetchChatModels, MAX_REQUEST_BODY_BYTES, parseChatModels, parseChatText, prepareCreationSkill, prepareImagePrompt, sendChat, serializeChatBody } from '../api/chat-api';
-import { snapshotCreationSkill } from '../creation-skills';
+import { buildChatBody, fetchChatModels, labelConversationImages, MAX_REQUEST_BODY_BYTES, parseChatModels, parseChatText, resetToolSupportCache, runAgentTurn, sendChat, serializeChatBody } from '../api/chat-api';
 import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
 
 const request = { baseUrl: 'https://example.com', apiKey: 'test-key', model: 'vision-model', prompt: '按附件做足球场海报' };
@@ -41,6 +40,7 @@ const baseMessage: ChatMessage = {
 };
 
 beforeEach(() => {
+  resetToolSupportCache();
   mockFetch.mockReset(); mockReadFiles.clear(); mockReadBase64.mockReset();
   mockRenderPdf.mockReset().mockResolvedValue(mockPdfResult);
   mockCleanupPdf.mockReset();
@@ -69,7 +69,7 @@ test('builds Chat Completions with every locally rendered PDF page and local tex
 
 test('builds Responses with rendered PDF input_images and does not request server storage', async () => {
   const body = await buildChatBody({ ...request, api: 'responses', documents: [pdf], references: [image] });
-  expect(body).toMatchObject({ store: false, stream: false });
+  expect(body).toMatchObject({ store: false, stream: true });
   const input = body.input as Array<{ content: unknown }>;
   expect(input[0].content).toEqual(expect.arrayContaining([
     { type: 'input_image', image_url: 'data:image/jpeg;base64,cGFnZS0x', detail: 'auto' },
@@ -145,14 +145,6 @@ test('forwards cancellation and never sends an already-cancelled request', async
   expect(mockFetch).not.toHaveBeenCalled();
 });
 
-test('prepares a single image prompt while preserving the original user requirement', async () => {
-  mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ output_text: '俯视足球场，保留文档中的尺寸标注' }) });
-  await expect(prepareImagePrompt({ ...request, api: 'responses', documents: [pdf] })).resolves.toContain(request.prompt);
-  expect(mockFetch).toHaveBeenCalledTimes(1);
-  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-  expect(body.instructions).toContain('不得虚构文档内容');
-});
-
 test('models list keeps compatible provider IDs without inventing defaults', async () => {
   expect(parseChatModels({ data: [{ id: 'custom-vision' }, { id: 'custom-vision' }, { id: 'gpt-image-2' }, { id: 3 }] })).toEqual(['custom-vision', 'gpt-image-2']);
   mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ data: [] }) });
@@ -171,7 +163,7 @@ test('sends an unknown local file through compatible file-input protocols', asyn
 
 test('Claude Messages receives PDF page images instead of ignored native document blocks', async () => {
   const body = await buildChatBody({ ...request, api: 'anthropic', model: 'claude-test', documents: [pdf], references: [image] });
-  expect(body).toMatchObject({ model: 'claude-test', max_tokens: 4096, stream: false, system: expect.any(String) });
+  expect(body).toMatchObject({ model: 'claude-test', max_tokens: 8192, stream: true, system: expect.any(String) });
   expect(body).not.toHaveProperty('instructions');
   const messages = body.messages as Array<{ role: string; content: unknown[] }>;
   expect(messages[0].role).toBe('user');
@@ -275,15 +267,99 @@ test('cancellation during PDF page reads cleans the cache and never sends a paid
   mockReadBase64.mockReset();
 });
 
-test('creation skill requests check actual image settings through the chosen chat API', async () => {
-  mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ decision: 'ready', prompt: '蓝色足球场海报，留出下方正文区', textMode: 'layout', layoutNotes: '底部正文：开放日 10 月 1 日' }) } }] }) });
-  const plan = await prepareCreationSkill({ ...request, skill: snapshotCreationSkill('poster-layout')!, imageSettings: { model: 'user-image-model', quality: 'medium', size: '2048x1152', transparent: true, hasMask: false } });
-  expect(mockFetch).toHaveBeenCalledTimes(1);
+const sse = (events: unknown[]) => ({
+  ok: true, status: 200, headers: { get: () => 'text/event-stream' },
+  text: async () => events.map((event) => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join(''),
+});
+const imageTool = { imageAvailable: true, toolMode: 'native' as const, imageDefaults: '比例 1:1' };
+
+test('agent streams text and returns the image tool call from Chat Completions deltas', async () => {
+  mockFetch.mockResolvedValue(sse([
+    { choices: [{ delta: { content: '好的，' } }] },
+    { choices: [{ delta: { content: '我来画。' } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'generate_image', arguments: '{"prompt":"橘猫' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '睡在云上","aspect_ratio":"9:16"}' } }] }, finish_reason: 'tool_calls' }] },
+    '[DONE]',
+  ]));
+  const seen: string[] = [];
+  const result = await runAgentTurn({ ...request, prompt: '画一只猫，竖版', ...imageTool }, (text) => seen.push(text));
+  expect(result.text).toBe('好的，我来画。');
+  expect(result.imageCall).toEqual({ prompt: '橘猫睡在云上', referenceImages: [], aspectRatio: '9:16', transparent: false });
+  expect(seen).toContain('好的，');
   const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-  expect(body.model).toBe('vision-model');
-  expect(body.messages[0].content).toContain('user-image-model');
-  expect(body.messages[0].content).toContain('medium');
-  expect(body.messages[0].content).toContain('当前应用不会在本地叠加文字');
-  expect(plan.prompt).not.toContain('开放日');
-  expect(plan.notes).toContain('开放日 10 月 1 日');
+  expect(body.stream).toBe(true);
+  expect(body.tools[0].function.name).toBe('generate_image');
+  expect(body.messages[0].content).toContain('generate_image');
+});
+
+test('agent reads Claude tool_use streams and resolves image labels to conversation files', async () => {
+  mockFetch.mockResolvedValue(sse([
+    { type: 'message_start', message: {} },
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't1', name: 'generate_image', input: {} } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"prompt":"改成夜景",' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"reference_images":["图 2"]}' } },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+  ]));
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'u1', references: [image] },
+    { ...baseMessage, id: 'a1', role: 'assistant', imageUri: 'file:///generated.png', preparedPrompt: '海边小屋', text: '画好了' },
+  ];
+  const result = await runAgentTurn({ ...request, api: 'anthropic', prompt: '把刚才那张改成夜景', history, ...imageTool });
+  expect(result.imageCall?.referenceImages).toEqual(['图2']);
+  expect(result.images.get('图2')?.uri).toBe('file:///generated.png');
+  expect(result.images.get('图1')?.uri).toBe(image.uri);
+  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+  expect(body.tools[0]).toMatchObject({ name: 'generate_image', input_schema: expect.any(Object) });
+  expect(JSON.stringify(body.messages)).toContain('图2（上一轮你生成的图片）');
+  expect(body.messages.map((message: { role: string }) => message.role)).toEqual(['user', 'assistant', 'user']);
+});
+
+test('agent accepts a non-streaming Responses payload with a function call', async () => {
+  mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ output: [
+    { type: 'message', content: [{ type: 'output_text', text: '马上画' }] },
+    { type: 'function_call', name: 'generate_image', arguments: '{"prompt":"透明背景贴纸","transparent_background":true}' },
+  ] }) });
+  const result = await runAgentTurn({ ...request, api: 'responses', prompt: '做个贴纸', ...imageTool });
+  expect(result.text).toBe('马上画');
+  expect(result.imageCall).toMatchObject({ prompt: '透明背景贴纸', transparent: true });
+});
+
+test('a relay that rejects tool definitions is retried once in text-tool mode', async () => {
+  mockFetch
+    .mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ error: { message: 'tools not supported' } }) })
+    .mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '这就画。\n<<<IMAGE {"prompt":"雪山日出"}>>>' } }] }, '[DONE]']));
+  const result = await runAgentTurn({ ...request, prompt: '画雪山', ...imageTool });
+  expect(mockFetch).toHaveBeenCalledTimes(2);
+  expect(result.text).toBe('这就画。');
+  expect(result.imageCall?.prompt).toBe('雪山日出');
+  const retry = JSON.parse(mockFetch.mock.calls[1][1].body);
+  expect(retry.tools).toBeUndefined();
+  expect(retry.messages[0].content).toContain('<<<IMAGE');
+  // Remembered for the session: the next turn goes straight to text mode.
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '你好' } }] }]));
+  await runAgentTurn({ ...request, prompt: '你好', ...imageTool });
+  expect(JSON.parse(mockFetch.mock.calls[2][1].body).tools).toBeUndefined();
+});
+
+test('without an image service the model is told it cannot draw and no tools are sent', async () => {
+  mockFetch.mockResolvedValue(sse([{ choices: [{ delta: { content: '需要先添加图片服务' } }] }]));
+  const result = await runAgentTurn({ ...request, prompt: '画一只猫', imageAvailable: false, toolMode: 'native' });
+  expect(result.imageCall).toBeNull();
+  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+  expect(body.tools).toBeUndefined();
+  expect(body.messages[0].content).toContain('没有配置图片服务');
+});
+
+test('labels images in conversation order and only resends recent history pixels', async () => {
+  const history: ChatMessage[] = [];
+  for (let index = 0; index < 5; index += 1) history.push(
+    { ...baseMessage, id: `u${index}` },
+    { ...baseMessage, id: `a${index}`, role: 'assistant', imageUri: `file:///gen-${index}.png` },
+  );
+  const labels = labelConversationImages(history, [image]);
+  expect(labels.map((item) => item.label)).toEqual(['图1', '图2', '图3', '图4', '图5', '图6']);
+  expect(labels[5].uri).toBe(image.uri);
+  await buildChatBody({ ...request, history, references: [image], ...imageTool });
+  const read = mockReadBase64.mock.calls.map(([uri]) => uri);
+  expect(read).toEqual(['file:///gen-2.png', 'file:///gen-3.png', 'file:///gen-4.png', image.uri]);
 });

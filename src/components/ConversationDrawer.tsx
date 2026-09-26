@@ -1,101 +1,179 @@
-import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { Animated, Easing, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Conversation } from '../domain';
 import { useApp } from '../state/AppContext';
-import { colors, radius } from '../theme';
-import { AppDialog, dismissKeyboardAndBlur, type DialogAction } from './ui';
-import { useReducedMotion } from './MotionPressable';
+import { colors, prettyModel, radius, shadow } from '../theme';
+import { BrandMark } from './Brand';
+import { Icon } from './Icon';
+import { AppDialog, dismissKeyboardAndBlur, MotionPressable, useReducedMotion, type DialogAction } from './ui';
 
-export function ConversationDrawer({ visible, onClose, onOpenProviders, onOpenSettings }: {
-  visible: boolean; onClose: () => void; onOpenProviders: () => void; onOpenAbout: () => void; onOpenNetwork: () => void; onOpenSettings: () => void;
+export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings }: {
+  visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void;
 }) {
-  const { conversations, activeConversation, providers, startConversation, selectConversation, removeConversation } = useApp();
+  const { conversations, activeConversationId, chatProvider, imageProvider, openConversation, deleteConversation, renameConversation, busy } = useApp();
   const [query, setQuery] = useState('');
   const [mounted, setMounted] = useState(visible);
-  const reduceMotion = useReducedMotion();
-  const [dialog, setDialog] = useState<{ title: string; message: string; actions?: DialogAction[] } | null>(null);
+  const [menuFor, setMenuFor] = useState<Conversation | null>(null);
+  const [renaming, setRenaming] = useState<Conversation | null>(null);
+  const [renameText, setRenameText] = useState('');
+  const [dialog, setDialog] = useState<{ title: string; message: string; actions?: DialogAction[]; icon?: string } | null>(null);
+  const reduced = useReducedMotion();
   const progress = useRef(new Animated.Value(0)).current;
-  const drawerWidth = Math.min(useWindowDimensions().width * 0.86, 360);
+  const drag = useRef(new Animated.Value(0)).current;
+  const width = Math.min(useWindowDimensions().width * 0.86, 340);
+  const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
+
   useEffect(() => {
-    if (visible) { setMounted(true); setQuery(''); }
-    const animation = Animated.timing(progress, { toValue: visible ? 1 : 0, duration: reduceMotion ? 0 : visible ? 240 : 180, easing: Easing.out(Easing.cubic), useNativeDriver: true });
+    if (visible) { setMounted(true); setQuery(''); drag.setValue(0); }
+    const animation = visible
+      ? Animated.spring(progress, { toValue: 1, damping: 24, stiffness: 230, useNativeDriver: true })
+      : Animated.timing(progress, { toValue: 0, duration: reduced ? 0 : 200, easing: Easing.in(Easing.cubic), useNativeDriver: true });
     animation.start(({ finished }) => { if (finished && !visible) setMounted(false); });
     return () => animation.stop();
-  }, [visible, progress, reduceMotion]);
+  }, [visible, progress, drag, reduced]);
+
+  const pan = useRef(PanResponder.create({
+    onMoveShouldSetPanResponder: (_, g) => g.dx < -10 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
+    onPanResponderMove: (_, g) => drag.setValue(Math.min(0, g.dx)),
+    onPanResponderRelease: (_, g) => {
+      if (g.dx < -80 || g.vx < -0.6) onCloseRef.current();
+      else Animated.spring(drag, { toValue: 0, useNativeDriver: true }).start();
+    },
+  })).current;
 
   const groups = useMemo(() => {
     const search = query.trim().toLowerCase();
-    const matches = conversations.filter((conversation) => !search || conversation.title.toLowerCase().includes(search));
+    const matches = conversations.filter((item) => !search || item.title.toLowerCase().includes(search));
     const start = new Date(); start.setHours(0, 0, 0, 0);
-    const yesterday = new Date(start); yesterday.setDate(yesterday.getDate() - 1);
-    const week = new Date(start); week.setDate(week.getDate() - 7);
-    const result: { title: string; items: Conversation[] }[] = ['今天', '昨天', '最近 7 天', '更早'].map((title) => ({ title, items: [] }));
+    const day = 86_400_000;
+    const buckets: { title: string; items: Conversation[] }[] = ['今天', '昨天', '7 天内', '30 天内', '更早'].map((title) => ({ title, items: [] }));
     for (const item of [...matches].sort((a, b) => b.updatedAt - a.updatedAt)) {
-      const index = item.updatedAt >= start.getTime() ? 0 : item.updatedAt >= yesterday.getTime() ? 1 : item.updatedAt >= week.getTime() ? 2 : 3;
-      result[index].items.push(item);
+      const t = item.updatedAt;
+      const index = t >= start.getTime() ? 0 : t >= start.getTime() - day ? 1 : t >= start.getTime() - 7 * day ? 2 : t >= start.getTime() - 30 * day ? 3 : 4;
+      buckets[index].items.push(item);
     }
-    return result.filter((group) => group.items.length);
+    return buckets.filter((group) => group.items.length);
   }, [conversations, query]);
 
-  const createConversation = async () => {
+  const report = (title: string, error: unknown) => setDialog({ title, message: error instanceof Error ? error.message : '请稍后再试', icon: 'alert' });
+  const open = (conversation: Conversation) => {
     dismissKeyboardAndBlur();
-    if (!providers.length) { onClose(); onOpenProviders(); return; }
-    try { await startConversation(); onClose(); }
-    catch (error) { setDialog({ title: '无法新建会话', message: error instanceof Error ? error.message : '请先检查服务商配置。' }); }
+    if (conversation.id === activeConversationId) { onClose(); return; }
+    void openConversation(conversation.id).then(onClose).catch((error) => report('暂时无法切换', error));
   };
   const confirmDelete = (conversation: Conversation) => setDialog({
-    title: '删除会话？', message: `“${conversation.title}”及其中的本地图片和文件将从此设备删除。`,
+    title: '删除这个对话？', message: `“${conversation.title}”及其中的图片和文件会从这台设备上删除，无法恢复。`, icon: 'trash',
     actions: [
       { label: '取消', tone: 'secondary', onPress: () => setDialog(null) },
-      { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeConversation(conversation.id).catch((error) => setDialog({ title: '无法删除', message: error.message })); } },
+      { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void deleteConversation(conversation.id).catch((error) => report('无法删除', error)); } },
     ],
   });
+  const engineSummary = [prettyModel(chatProvider?.chatModel), prettyModel(imageProvider?.model)].filter(Boolean).join(' · ') || '连接你的 AI 服务';
 
+  let rowIndex = 0;
   return <Modal visible={mounted} transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
     <View style={styles.overlay}>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.shade, { opacity: progress }]} />
-      <Pressable accessibilityLabel="关闭会话列表" style={StyleSheet.absoluteFill} onPress={onClose} />
-      <Animated.View style={[styles.panel, { width: drawerWidth, transform: [{ translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [-drawerWidth, 0] }) }] }]}>
+      <Pressable accessibilityLabel="关闭侧边栏" style={StyleSheet.absoluteFill} onPress={onClose} />
+      <Animated.View {...pan.panHandlers} style={[styles.panel, { width, transform: [{ translateX: Animated.add(drag, progress.interpolate({ inputRange: [0, 1], outputRange: [-width - 20, 0] })) }] }]}>
         <SafeAreaView style={styles.drawer} edges={['top', 'bottom']}>
-          <View style={styles.header}><Text style={styles.brand}>Salcara AI</Text><Pressable accessibilityLabel="关闭侧边栏" onPress={onClose} style={styles.icon}><Ionicons name="chevron-back" size={22} color={colors.textMuted} /></Pressable></View>
-          <View style={styles.search}><Ionicons name="search-outline" size={18} color={colors.textMuted} /><TextInput placeholder="搜索会话" accessibilityLabel="搜索会话" value={query} onChangeText={setQuery} style={styles.searchInput} placeholderTextColor={colors.textMuted} />{query ? <Pressable accessibilityLabel="清空搜索" style={styles.clear} onPress={() => setQuery('')}><Ionicons name="close-circle" size={16} color={colors.textMuted} /></Pressable> : null}</View>
-          <Pressable accessibilityRole="button" style={({ pressed }) => [styles.newButton, pressed && styles.pressed]} onPress={() => void createConversation()}><Ionicons name="create-outline" size={20} color={colors.primaryStrong} /><Text style={styles.newText}>新会话</Text><Ionicons name="add" size={19} color={colors.primaryStrong} /></Pressable>
-          <ScrollView style={styles.list} contentContainerStyle={styles.listContent} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
-            {!groups.length && <View style={styles.empty}><Ionicons name={query ? 'search-outline' : 'chatbubbles-outline'} size={28} color={colors.textMuted} /><Text style={styles.emptyText}>{query ? '没有找到相关会话' : '从一个问题开始'}</Text></View>}
-            {groups.map((group) => <View key={group.title}><Text style={styles.sectionLabel}>{group.title}</Text>{group.items.map((conversation) => <Pressable key={conversation.id} accessibilityRole="button" accessibilityState={{ selected: conversation.id === activeConversation?.id }} onPress={() => { dismissKeyboardAndBlur(); void selectConversation(conversation.id).then(onClose).catch((error) => setDialog({ title: '无法切换', message: error.message })); }} onLongPress={() => confirmDelete(conversation)} style={({ pressed }) => [styles.row, conversation.id === activeConversation?.id && styles.activeRow, pressed && styles.pressed]}><Text style={[styles.title, conversation.id === activeConversation?.id && styles.activeTitle]} numberOfLines={1}>{conversation.title}</Text><Pressable accessibilityLabel={`会话选项：${conversation.title}`} onPress={() => confirmDelete(conversation)} style={styles.more}><Ionicons name="ellipsis-horizontal" size={16} color={colors.textMuted} /></Pressable></Pressable>)}</View>)}
+          <View style={styles.topRow}>
+            <View style={styles.search}>
+              <Icon name="search" size={17} color={colors.subtle} />
+              <TextInput placeholder="搜索" accessibilityLabel="搜索对话" value={query} onChangeText={setQuery} style={styles.searchInput} placeholderTextColor={colors.subtle} />
+              {query ? <Pressable accessibilityLabel="清空搜索" hitSlop={8} onPress={() => setQuery('')}><Icon name="close" size={15} color={colors.subtle} strokeWidth={2} /></Pressable> : null}
+            </View>
+            <MotionPressable scaleTo={0.88} accessibilityRole="button" accessibilityLabel="新对话" disabled={busy} onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={[styles.compose, busy && { opacity: 0.4 }]}>
+              <Icon name="compose" size={21} color={colors.text} />
+            </MotionPressable>
+          </View>
+          <Pressable accessibilityRole="button" accessibilityLabel="开始新对话" disabled={busy} onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={({ pressed }) => [styles.brandRow, pressed && { backgroundColor: colors.surface }]}>
+            <BrandMark size={30} />
+            <Text style={styles.brand}>Salcara</Text>
+          </Pressable>
+
+          <ScrollView style={styles.list} contentContainerStyle={{ paddingBottom: 16 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
+            {!groups.length && <View style={styles.empty}>
+              <Icon name={query ? 'search' : 'chat'} size={26} color={colors.faint} />
+              <Text style={styles.emptyText}>{query ? '没有找到相关对话' : '对话会出现在这里'}</Text>
+            </View>}
+            {groups.map((group) => <View key={group.title}>
+              <Text style={styles.groupLabel}>{group.title}</Text>
+              {group.items.map((conversation) => {
+                const active = conversation.id === activeConversationId;
+                const delay = Math.min(rowIndex++, 12) * 22;
+                return <DrawerRow key={conversation.id} delay={visible ? delay : 0} active={active} title={conversation.title}
+                  onPress={() => open(conversation)} onMore={() => setMenuFor(conversation)} />;
+              })}
+            </View>)}
           </ScrollView>
-          <Pressable accessibilityRole="button" style={({ pressed }) => [styles.settings, pressed && styles.pressed]} onPress={onOpenSettings}><View style={styles.settingsIcon}><Ionicons name="settings-outline" size={21} color={colors.text} /></View><View style={styles.settingsCopy}><Text style={styles.settingsTitle}>设置</Text><Text style={styles.settingsHint}>服务商、偏好与更新</Text></View><Ionicons name="chevron-forward" size={17} color={colors.textMuted} /></Pressable>
+
+          <Pressable accessibilityRole="button" accessibilityLabel="设置" onPress={() => { onClose(); onOpenSettings(); }} style={({ pressed }) => [styles.settings, pressed && { backgroundColor: colors.surface }]}>
+            <View style={styles.avatar}><Icon name="settings" size={18} color={colors.textSecondary} /></View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingsTitle}>设置</Text>
+              <Text style={styles.settingsHint} numberOfLines={1}>{engineSummary}</Text>
+            </View>
+            <Icon name="chevronRight" size={18} color={colors.faint} />
+          </Pressable>
         </SafeAreaView>
       </Animated.View>
     </View>
-    <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} actions={dialog?.actions} onClose={() => setDialog(null)} />
+
+    <AppDialog visible={Boolean(menuFor)} title={menuFor?.title ?? ''} icon="chat" onClose={() => setMenuFor(null)} actions={[
+      { label: '重命名', tone: 'secondary', onPress: () => { const c = menuFor; setMenuFor(null); if (c) { setRenameText(c.title); setRenaming(c); } } },
+      { label: '删除', tone: 'danger', onPress: () => { const c = menuFor; setMenuFor(null); if (c) confirmDelete(c); } },
+    ]} />
+    <AppDialog visible={Boolean(renaming)} title="重命名对话" icon="edit" onClose={() => setRenaming(null)} actions={[
+      { label: '取消', tone: 'secondary', onPress: () => setRenaming(null) },
+      { label: '保存', tone: 'primary', disabled: !renameText.trim(), onPress: () => { const c = renaming; setRenaming(null); if (c) void renameConversation(c.id, renameText).catch((error) => report('无法重命名', error)); } },
+    ]}>
+      <TextInput value={renameText} onChangeText={setRenameText} autoFocus selectTextOnFocus maxLength={60} style={styles.renameInput} placeholder="对话名称" placeholderTextColor={colors.subtle} />
+    </AppDialog>
+    <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} icon={dialog?.icon} actions={dialog?.actions} onClose={() => setDialog(null)} />
   </Modal>;
 }
 
+function DrawerRow({ title, active, delay, onPress, onMore }: { title: string; active: boolean; delay: number; onPress: () => void; onMore: () => void }) {
+  const appear = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(appear, { toValue: 1, duration: 260, delay, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, [appear, delay]);
+  return <Animated.View style={{ opacity: appear, transform: [{ translateX: appear.interpolate({ inputRange: [0, 1], outputRange: [-12, 0] }) }] }}>
+    <Pressable accessibilityRole="button" accessibilityState={{ selected: active }} onPress={onPress} onLongPress={onMore} delayLongPress={320}
+      style={({ pressed }) => [styles.row, active && styles.rowActive, pressed && !active && { backgroundColor: colors.surface }]}>
+            <Text style={[styles.rowTitle, active && styles.rowTitleActive]} numberOfLines={1}>{title}</Text>
+      <Pressable accessibilityLabel={`更多操作：${title}`} hitSlop={6} onPress={onMore} style={styles.more}><Icon name="more" size={18} color={active ? colors.text : colors.faint} /></Pressable>
+    </Pressable>
+  </Animated.View>;
+}
+
 const styles = StyleSheet.create({
-  overlay: { flex: 1 }, shade: { backgroundColor: 'rgba(15,23,42,0.25)' },
-  panel: { flex: 1, backgroundColor: colors.background },
-  drawer: { flex: 1, paddingHorizontal: 16 },
-  header: { height: 64, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 7 },
-  brand: { color: colors.text, fontSize: 19, fontWeight: '700', letterSpacing: -0.4 },
-  icon: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  search: { flexDirection: 'row', alignItems: 'center', gap: 9, minHeight: 44, paddingLeft: 12, borderRadius: radius.md, backgroundColor: colors.surface },
-  searchInput: { flex: 1, minHeight: 44, color: colors.text, fontSize: 14 },
-  clear: { width: 42, height: 44, alignItems: 'center', justifyContent: 'center' },
-  newButton: { marginTop: 12, minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 13, borderRadius: radius.md, backgroundColor: colors.blueSurface },
-  newText: { flex: 1, color: colors.primaryStrong, fontWeight: '600', fontSize: 14 },
-  list: { flex: 1, marginTop: 14 }, listContent: { paddingBottom: 18 },
-  sectionLabel: { color: colors.textMuted, fontSize: 12, fontWeight: '500', paddingTop: 15, paddingBottom: 9, paddingHorizontal: 10 },
-  empty: { paddingVertical: 48, alignItems: 'center', gap: 14 }, emptyText: { color: colors.textMuted, fontSize: 13 },
-  row: { minHeight: 48, flexDirection: 'row', alignItems: 'center', borderRadius: radius.sm, paddingLeft: 12, marginBottom: 2 },
-  activeRow: { backgroundColor: colors.surface },
-  title: { flex: 1, color: colors.text, fontSize: 14 }, activeTitle: { fontWeight: '600' },
-  more: { width: 44, height: 48, alignItems: 'center', justifyContent: 'center' },
-  settings: { minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 12, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border, paddingHorizontal: 7 },
-  settingsIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center' },
-  settingsCopy: { flex: 1, gap: 4 }, settingsTitle: { color: colors.text, fontSize: 14, fontWeight: '600' }, settingsHint: { color: colors.textMuted, fontSize: 12 },
-  pressed: { opacity: 0.65 },
+  overlay: { flex: 1 },
+  shade: { backgroundColor: colors.scrim },
+  panel: { flex: 1, backgroundColor: colors.card, ...shadow.float },
+  drawer: { flex: 1, paddingHorizontal: 12 },
+  topRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 8 },
+  search: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, height: 42, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.surfaceStrong },
+  searchInput: { flex: 1, height: 42, color: colors.text, fontSize: 15, padding: 0 },
+  compose: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 12, height: 48, paddingHorizontal: 8, marginTop: 14, borderRadius: 14 },
+  brandIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
+  brand: { color: colors.text, fontSize: 15.5, fontWeight: '600' },
+  list: { flex: 1, marginTop: 4 },
+  groupLabel: { color: colors.subtle, fontSize: 12.5, fontWeight: '500', paddingTop: 18, paddingBottom: 6, paddingHorizontal: 10 },
+  empty: { paddingVertical: 64, alignItems: 'center', gap: 12 },
+  emptyText: { color: colors.subtle, fontSize: 13.5 },
+  row: { height: 44, flexDirection: 'row', alignItems: 'center', borderRadius: 12, paddingLeft: 10, marginBottom: 1 },
+  rowActive: { backgroundColor: colors.surfaceStrong },
+  rowTitle: { flex: 1, color: colors.textSecondary, fontSize: 15 },
+  rowTitleActive: { color: colors.text, fontWeight: '500' },
+  more: { width: 40, height: 44, alignItems: 'center', justifyContent: 'center' },
+  settings: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 64, paddingHorizontal: 8, borderRadius: 16, marginBottom: 6, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  avatar: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
+  settingsTitle: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  settingsHint: { color: colors.subtle, fontSize: 12, marginTop: 2 },
+  renameInput: { minHeight: 48, borderRadius: 14, backgroundColor: colors.surfaceStrong, paddingHorizontal: 14, color: colors.text, fontSize: 15.5, marginTop: 8 },
 });
