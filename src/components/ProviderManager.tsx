@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { fetchChatModels } from '../api/chat-api';
+import { CHAT_PRESETS, presetFor } from '../api/presets';
 import type { ChatApi, ProviderProfile } from '../domain';
 import { createId, normalizeBaseUrl, qualitiesForModel } from '../domain-utils';
 import { useApp } from '../state/AppContext';
@@ -18,7 +19,7 @@ const emptyForm = (): Form => ({ id: null, name: '', baseUrl: '', apiKey: '', ch
 const PROTOCOLS: { value: ChatApi; title: string }[] = [
   { value: 'chat-completions', title: 'OpenAI 兼容' }, { value: 'responses', title: 'Responses' }, { value: 'anthropic', title: 'Claude' },
 ];
-const IMAGE_MODEL = /image|dall-e|flux|imagen|seedream|midjourney|sd-|stable/i;
+const IMAGE_MODEL = /image|dall-e|flux|imagen|seedream|midjourney|sd-|stable|cogview|kolors|wanx/i;
 
 export function ProviderManager({ visible, onClose, focusProviderId }: { visible: boolean; onClose: () => void; focusProviderId?: string | null }) {
   const { providers, chatProvider, imageProvider, reloadProviders, selectChatProvider, selectImageProvider, removeProvider } = useApp();
@@ -52,8 +53,11 @@ export function ProviderManager({ visible, onClose, focusProviderId }: { visible
   const connection = async () => {
     if (!form.baseUrl.trim()) throw new Error('请填写 API 地址');
     const baseUrl = normalizeBaseUrl(form.baseUrl);
-    const key = form.apiKey.trim() || (form.id ? await getProviderKey(form.id) : null);
-    if (!key) throw new Error('请填写 API 密钥');
+    // A saved key only goes back to the host it was saved for; a new address needs its own key.
+    const saved = form.id ? providers.find((item) => item.id === form.id) : null;
+    const sameHost = saved ? hostOf(saved.baseUrl) === hostOf(baseUrl) : false;
+    const key = form.apiKey.trim() || (form.id && sameHost ? await getProviderKey(form.id) : null);
+    if (!key) throw new Error(form.id && !sameHost ? '地址换成了另一个服务，请重新填写这个服务的 API 密钥' : '请填写 API 密钥');
     return { baseUrl, key };
   };
   const loadModels = async () => {
@@ -63,6 +67,7 @@ export function ProviderManager({ visible, onClose, focusProviderId }: { visible
       const { baseUrl, key } = await connection();
       setStatus({ state: 'loading' });
       const list = await fetchChatModels(baseUrl, key, form.chatApi);
+      const preset = presetFor(baseUrl);
       if (requestId !== loadId.current) return;
       setModels(list);
       setStatus(list.length ? { state: 'ok', message: `连接成功 · ${list.length} 个模型` } : { state: 'error', message: '已连接，但服务商没有返回模型列表，可手动填写模型 ID' });
@@ -70,8 +75,8 @@ export function ProviderManager({ visible, onClose, focusProviderId }: { visible
       setForm((current) => ({
         ...current,
         name: current.name || hostLabel(baseUrl),
-        chatModel: current.chatModel || list.find((item) => !IMAGE_MODEL.test(item)) || '',
-        model: current.model || list.find((item) => /gpt-image/i.test(item)) || list.find((item) => IMAGE_MODEL.test(item)) || '',
+        chatModel: current.chatModel || list.find((item) => !IMAGE_MODEL.test(item) && Boolean(preset?.prefer?.test(item))) || list.find((item) => !IMAGE_MODEL.test(item)) || '',
+        model: current.model || list.find((item) => Boolean(preset?.preferImage?.test(item))) || list.find((item) => /gpt-image/i.test(item)) || list.find((item) => IMAGE_MODEL.test(item)) || '',
         // Only pre-enable a capability the service appears to offer.
         useImage: current.id || !list.length ? current.useImage : list.some((item) => IMAGE_MODEL.test(item)),
         useChat: current.id || !list.length ? current.useChat : list.some((item) => !IMAGE_MODEL.test(item)),
@@ -172,13 +177,30 @@ export function ProviderManager({ visible, onClose, focusProviderId }: { visible
         <Text style={styles.heroTitle}>连接你的 AI 服务</Text>
         <Text style={styles.heroText}>填入服务地址和密钥，Salcara 会自动识别可用的模型。</Text>
       </View>}
+      {!form.id ? <>
+        <SectionLabel>选择服务商</SectionLabel>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.presets}>
+          {CHAT_PRESETS.map((preset) => {
+            const selected = normalizeBaseUrlSafe(form.baseUrl) === preset.baseUrl;
+            return <Pressable key={preset.id} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={preset.name}
+              onPress={() => patch({ baseUrl: preset.baseUrl, chatApi: preset.chatApi, name: preset.name })}
+              style={({ pressed }) => [styles.preset, selected && styles.presetOn, pressed && { opacity: 0.8 }]}>
+              <Text style={[styles.presetText, selected && styles.presetTextOn]}>{preset.name}</Text>
+            </Pressable>;
+          })}
+        </ScrollView>
+        {presetFor(form.baseUrl) ? <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(presetFor(form.baseUrl)!.keyUrl)} style={styles.keyLink}>
+          <Icon name="key" size={15} color={colors.primary} />
+          <Text style={styles.keyLinkText}>去 {presetFor(form.baseUrl)!.name} 获取 API Key</Text>
+        </Pressable> : <Text style={styles.presetHint}>也可以直接填写任何 OpenAI 兼容地址（中转站、自建服务）。</Text>}
+      </> : null}
       <SectionLabel>连接</SectionLabel>
       <Group>
         <Field first label="地址" value={form.baseUrl} placeholder="https://api.example.com" onChangeText={(baseUrl) => patch({ baseUrl })} keyboardType="url" autoCapitalize="none" autoCorrect={false} />
         <View style={styles.field}>
           <Text style={styles.fieldLabel}>密钥</Text>
           <View style={[styles.fieldBody, styles.divider]}>
-            <TextInput accessibilityLabel="API 密钥" value={form.apiKey} onChangeText={(apiKey) => patch({ apiKey })} placeholder={form.id ? '留空则保留原密钥' : 'sk-…'} placeholderTextColor={colors.faint} secureTextEntry={!showKey} autoCapitalize="none" autoCorrect={false} style={styles.fieldInput} />
+            <TextInput accessibilityLabel="API 密钥" value={form.apiKey} onChangeText={(apiKey) => patch({ apiKey })} placeholder={form.id ? '留空则保留原密钥' : 'sk-…'} placeholderTextColor={colors.subtle} secureTextEntry={!showKey} autoCapitalize="none" autoCorrect={false} style={styles.fieldInput} />
             <Pressable accessibilityLabel={showKey ? '隐藏密钥' : '显示密钥'} hitSlop={10} onPress={() => setShowKey((value) => !value)}><Icon name={showKey ? 'eyeOff' : 'eye'} size={19} color={colors.subtle} /></Pressable>
           </View>
         </View>
@@ -211,6 +233,14 @@ export function ProviderManager({ visible, onClose, focusProviderId }: { visible
   </Sheet>;
 }
 
+function hostOf(url: string): string {
+  try { return new URL(url).host.toLowerCase(); } catch { return url; }
+}
+
+function normalizeBaseUrlSafe(value: string): string {
+  try { return normalizeBaseUrl(value); } catch { return value.trim(); }
+}
+
 function Capability({ icon, title, hint, enabled, onToggle, model, onPick, first }: {
   icon: IconName; title: string; hint: string; enabled: boolean; onToggle: (value: boolean) => void; model: string; onPick: () => void; first?: boolean;
 }) {
@@ -235,13 +265,21 @@ function Tag({ icon, text, active }: { icon: IconName; text: string; active: boo
 function Field({ label, first, ...props }: React.ComponentProps<typeof TextInput> & { label: string; first?: boolean }) {
   return <View style={styles.field}>
     <Text style={styles.fieldLabel}>{label}</Text>
-    <View style={[styles.fieldBody, !first && styles.divider]}><TextInput {...props} accessibilityLabel={label} style={styles.fieldInput} placeholderTextColor={colors.faint} /></View>
+    <View style={[styles.fieldBody, !first && styles.divider]}><TextInput {...props} accessibilityLabel={label} style={styles.fieldInput} placeholderTextColor={colors.subtle} /></View>
   </View>;
 }
 
 function hostLabel(url: string) { try { return new URL(url).host; } catch { return url; } }
 
 const styles = StyleSheet.create({
+  presets: { gap: 8, paddingRight: 8 },
+  preset: { height: 36, paddingHorizontal: 14, borderRadius: 18, justifyContent: 'center', backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
+  presetOn: { backgroundColor: colors.primarySoft, borderColor: 'rgba(61,123,250,0.45)' },
+  presetText: { color: colors.textSecondary, fontSize: 13.5, fontWeight: '500' },
+  presetTextOn: { color: colors.primaryDeep, fontWeight: '700' },
+  presetHint: { color: colors.textMuted, fontSize: 12.5, marginTop: 8, marginLeft: 4 },
+  keyLink: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10, marginLeft: 4, alignSelf: 'flex-start' },
+  keyLinkText: { color: colors.primary, fontSize: 13.5, fontWeight: '600' },
   page: { paddingHorizontal: 16, paddingBottom: 20 },
   lead: { color: colors.textMuted, fontSize: 14, lineHeight: 21, marginVertical: 12, marginHorizontal: 8 },
   providerRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingLeft: 14 },
@@ -277,5 +315,5 @@ const styles = StyleSheet.create({
   capHint: { color: colors.subtle, fontSize: 12.5, marginTop: 2 },
   modelButton: { flexDirection: 'row', alignItems: 'center', gap: 8, height: 46, paddingHorizontal: 14, borderRadius: 14, backgroundColor: colors.card, marginLeft: 35 },
   modelValue: { color: colors.text, fontSize: 15, fontWeight: '500' },
-  modelId: { flex: 1, color: colors.faint, fontSize: 12 },
+  modelId: { flex: 1, color: colors.subtle, fontSize: 12 },
 });

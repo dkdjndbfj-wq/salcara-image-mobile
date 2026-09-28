@@ -186,7 +186,7 @@ export function MaskEditor({
       <SafeAreaView style={styles.screen}>
         <View style={styles.header}>
           <Pressable onPress={onCancel} style={styles.headerButton}><Text style={styles.cancel}>取消</Text></Pressable>
-          <View style={styles.headerCenter}><Text style={styles.title}>编辑蒙版</Text><Text style={styles.subtitle}>红色区域将被重新生成</Text></View>
+          <View style={styles.headerCenter}><Text style={styles.title}>编辑蒙版</Text><Text style={styles.subtitle}>蓝色区域将被重新生成</Text></View>
           <Pressable disabled={saving} onPress={() => void confirm()} style={styles.headerButton}>
             {saving ? <ActivityIndicator color={colors.primaryStrong} /> : <Text style={styles.done}>完成</Text>}
           </Pressable>
@@ -206,12 +206,12 @@ export function MaskEditor({
             <Image source={{ uri: image.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} />
             <Svg width={canvasWidth} height={canvasHeight} style={StyleSheet.absoluteFill} pointerEvents="none">
               <Defs>
-                <Mask id="red-mask">
+                <Mask id="paint-mask">
                   <Rect width={canvasWidth} height={canvasHeight} fill="black" />
                   {allStrokes.map((stroke) => <Path key={stroke.id} d={pathFor(stroke.points)} fill="none" stroke={stroke.mode === 'draw' ? 'white' : 'black'} strokeWidth={stroke.size} strokeLinecap="round" strokeLinejoin="round" />)}
                 </Mask>
               </Defs>
-              <Rect width={canvasWidth} height={canvasHeight} fill={colors.mask} mask="url(#red-mask)" />
+              <Rect width={canvasWidth} height={canvasHeight} fill={colors.mask} mask="url(#paint-mask)" />
             </Svg>
             <View style={StyleSheet.absoluteFill} {...responder.panHandlers} />
           </View>
@@ -279,5 +279,5 @@ const styles = StyleSheet.create({
   sliderRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   sliderLabel: { color: colors.text, fontWeight: '700', fontSize: 13 },
   slider: { flex: 1, height: 36 },
-  brushPreview: { backgroundColor: colors.mask, borderWidth: 1, borderColor: colors.danger },
+  brushPreview: { backgroundColor: colors.mask, borderWidth: 1, borderColor: colors.primary },
 });

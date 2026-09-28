@@ -1,7 +1,8 @@
 import * as Clipboard from 'expo-clipboard';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { memo, useEffect, useRef, useState } from 'react';
 import { Animated, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import type { Source } from '../agent/types';
 import { colors, radius } from '../theme';
 import { Icon } from './Icon';
 
@@ -9,7 +10,7 @@ import { Icon } from './Icon';
  * A small native Markdown renderer: headings, lists, quotes, tables, code
  * blocks, bold/italic/inline code and links. No HTML or remote content.
  */
-export function MessageContent({ text, streaming = false }: { text: string; streaming?: boolean }) {
+export const MessageContent = memo(function MessageContent({ text, streaming = false, sources }: { text: string; streaming?: boolean; sources?: Source[] }) {
   const blocks = text.split(/(```[\s\S]*?(?:```|$))/g).filter(Boolean);
   return <View style={styles.content}>
     {blocks.map((part, index) => {
@@ -18,13 +19,15 @@ export function MessageContent({ text, streaming = false }: { text: string; stre
         const match = part.match(/^```([^\n]*)\n?([\s\S]*?)(?:```)?$/);
         return <CodeBlock key={index} language={match?.[1]?.trim() || 'code'} code={(match?.[2] ?? part).replace(/\n$/, '')} />;
       }
-      return <Blocks key={index} text={part} caret={streaming && last} />;
+      return <Blocks key={index} text={part} caret={streaming && last} sources={sources} />;
     })}
     {streaming && blocks[blocks.length - 1]?.startsWith('```') && <Caret />}
   </View>;
-}
+});
 
-function Blocks({ text, caret }: { text: string; caret: boolean }) {
+// Memoized per fenced segment so a streaming reply only re-parses the segment still growing.
+const Blocks = memo(function Blocks({ text, caret, sources }: { text: string; caret: boolean; sources?: Source[] }) {
+  const inline = (value: string) => inlineNodes(value, sources);
   const lines = text.replace(/^\n+|\n+$/g, '').split('\n');
   const out: React.ReactNode[] = [];
   let i = 0;
@@ -38,7 +41,7 @@ function Blocks({ text, caret }: { text: string; caret: boolean }) {
       const cells = (row: string) => row.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim());
       rows.push(cells(line)); i += 2;
       while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(cells(lines[i])); i += 1; }
-      out.push(<Table key={out.length} rows={rows} />);
+      out.push(<Table key={out.length} rows={rows} sources={sources} />);
       continue;
     }
     const heading = line.match(/^(#{1,6})\s+(.+)/);
@@ -71,10 +74,21 @@ function Blocks({ text, caret }: { text: string; caret: boolean }) {
   }
   if (caret && !out.length) out.push(<Caret key="caret" />);
   return <View style={styles.blocks}>{out}</View>;
-}
+});
 
-function inline(text: string): React.ReactNode[] {
-  return text.split(/(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\s][^*]*\*|\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>()（）「」"'，。；！？]+)/g).filter((part) => part !== '').map((part, i) => {
+/** “[1]”, “[2, 3]” citation markers that point at a known source. */
+const CITATION = /^\[(\d{1,2}(?:\s*[,，、]\s*\d{1,2})*)\]$/;
+
+function inlineNodes(text: string, sources?: Source[]): React.ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\s][^*]*\*|\[[^\]]+\]\(https?:\/\/[^\s)]+\)|\[\d{1,2}(?:\s*[,，、]\s*\d{1,2})*\](?!\()|https?:\/\/[^\s<>()（）「」"'，。；！？]+)/g).filter((part) => part !== '').map((part, i) => {
+    const citation = sources?.length ? part.match(CITATION) : null;
+    if (citation) {
+      const numbers = citation[1].split(/[,，、]/).map((item) => Number(item.trim())).filter((number) => number >= 1 && number <= sources!.length);
+      if (numbers.length) {
+        return <React.Fragment key={i}>{numbers.map((number, index) => <Text key={`${index}-${number}`} accessibilityRole="link" accessibilityLabel={`来源 ${number}：${sources![number - 1].title}`}
+          style={styles.citation} onPress={() => void Linking.openURL(sources![number - 1].url).catch(() => {})}>{`\u00A0${number}\u00A0`}</Text>)}</React.Fragment>;
+      }
+    }
     if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) return <Text key={i} style={styles.bold}>{part.slice(2, -2)}</Text>;
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) return <Text key={i} style={styles.inlineCode}>{` ${part.slice(1, -1)} `}</Text>;
     if (part.startsWith('*') && part.endsWith('*') && part.length > 2) return <Text key={i} style={{ fontStyle: 'italic' }}>{part.slice(1, -1)}</Text>;
@@ -92,7 +106,8 @@ function inline(text: string): React.ReactNode[] {
   });
 }
 
-function Table({ rows }: { rows: string[][] }) {
+function Table({ rows, sources }: { rows: string[][]; sources?: Source[] }) {
+  const inline = (value: string) => inlineNodes(value, sources);
   const columns = Math.max(...rows.map((row) => row.length));
   return <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tableScroll}>
     <View style={styles.table}>
@@ -105,7 +120,7 @@ function Table({ rows }: { rows: string[][] }) {
   </ScrollView>;
 }
 
-function CodeBlock({ language, code }: { language: string; code: string }) {
+const CodeBlock = memo(function CodeBlock({ language, code }: { language: string; code: string }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
@@ -124,29 +139,27 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
     </View>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.codeScroll}><Text selectable style={styles.code}>{code}</Text></ScrollView>
   </View>;
-}
+});
 
-/** Nested Text can't use the native driver; a standalone View can. */
-function useBlink(native = false) {
+function useBlink() {
   const opacity = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     const loop = Animated.loop(Animated.sequence([
-      Animated.timing(opacity, { toValue: 0.15, duration: 420, useNativeDriver: native }),
-      Animated.timing(opacity, { toValue: 1, duration: 420, useNativeDriver: native }),
+      Animated.timing(opacity, { toValue: 0.15, duration: 420, useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 1, duration: 420, useNativeDriver: true }),
     ]));
     loop.start();
     return () => loop.stop();
-  }, [opacity, native]);
+  }, [opacity]);
   return opacity;
 }
 
-/** Inline caret appended to the streaming paragraph. */
+/** Inline caret appended to the streaming paragraph. Nested Text can't take a native-driven animation, so it stays steady; the growing text already reads as live. */
 function CaretText() {
-  const opacity = useBlink();
-  return <Animated.Text style={[styles.caretText, { opacity }]}> ●</Animated.Text>;
+  return <Text style={styles.caretText}> ●</Text>;
 }
 function Caret() {
-  const opacity = useBlink(true);
+  const opacity = useBlink();
   return <Animated.View style={[styles.caret, { opacity }]} />;
 }
 
@@ -167,6 +180,7 @@ const styles = StyleSheet.create({
   divider: { height: 1, backgroundColor: colors.border, marginVertical: 8 },
   inlineCode: { fontFamily: 'monospace', fontSize: 14, color: colors.text, backgroundColor: colors.surfaceStrong },
   link: { color: colors.primaryStrong, textDecorationLine: 'underline' },
+  citation: { fontSize: 11.5, lineHeight: 27, fontWeight: '600', color: colors.primaryDeep, backgroundColor: colors.primarySoft },
   tableScroll: { flexGrow: 0 },
   table: { borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, overflow: 'hidden', backgroundColor: colors.card },
   tableRow: { flexDirection: 'row' },

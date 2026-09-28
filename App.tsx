@@ -4,6 +4,8 @@ import React, { useCallback, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { CompanionScreen } from './src/companion/CompanionScreen';
+import { SpaceTransition } from './src/companion/SpaceTransition';
 import { LaunchIntro } from './src/components/LaunchIntro';
 import { ChatScreen } from './src/screens/ChatScreen';
 import { AppProvider, useApp } from './src/state/AppContext';
@@ -13,7 +15,7 @@ void SplashScreen.preventAutoHideAsync();
 SplashScreen.setOptions({ duration: 120, fade: true });
 
 function AppContent() {
-  const { ready } = useApp();
+  const { ready, space } = useApp();
   const [intro, setIntro] = useState(true);
   const hideSplash = useCallback(() => { void SplashScreen.hideAsync().catch(() => undefined); }, []);
   const finishIntro = useCallback(() => setIntro(false), []);
@@ -21,7 +23,7 @@ function AppContent() {
   return (
     <>
       <StatusBar style="dark" />
-      <ChatScreen />
+      <SpaceTransition space={space}>{(shown) => (shown === 'companion' ? <CompanionScreen /> : <ChatScreen />)}</SpaceTransition>
       {intro && <LaunchIntro ready={ready} onFirstFrame={hideSplash} onDone={finishIntro} />}
     </>
   );

@@ -6,10 +6,12 @@ import { colors, radius } from '../theme';
 import { ASR_MODELS, formatBytes, MIRRORS, modelSize, type AsrModel } from '../voice/catalog';
 import { cancelInstall, deleteModel, installModel, refreshModels, useModelStatuses, type ModelStatus } from '../voice/models';
 import { localEngineAvailable, voiceNative } from '../voice/native';
-import { supportsSpeechApi } from '../voice/providers';
-import { updateVoiceSettings, useVoiceSettings, VOICES, type VoiceSettings } from '../voice/settings';
+import type { SpeechService } from '../voice/services';
+import { DEFAULT_VOICE_SETTINGS, updateVoiceSettings, useVoiceSettings, type VoiceSettings } from '../voice/settings';
+import { capabilityOf, vendorById, type SpeechKind } from '../voice/vendors';
 import { Icon } from './Icon';
 import { MotionPressable } from './MotionPressable';
+import { ModelVoiceFields, ServicePicker, SpeechServiceList, SpeechServiceSheet } from './SpeechServices';
 import { AppDialog, Chip, Group, SectionLabel, Sheet } from './ui';
 
 const TIER_COLORS: Record<AsrModel['tier'], string> = { 极速: '#12A150', 均衡: colors.primary, 精准: '#8B5CF6' };
@@ -56,36 +58,28 @@ function ModelCard({ model, status, selected, onUse, onDownload, onCancel, onDel
   </MotionPressable>;
 }
 
-function Field({ label, value, onChange, suggestions }: { label: string; value: string; onChange: (value: string) => void; suggestions: string[] }) {
-  return <View style={styles.field}>
-    <Text style={styles.fieldLabel}>{label}</Text>
-    <TextInput value={value} onChangeText={onChange} autoCapitalize="none" autoCorrect={false} style={styles.input} placeholderTextColor={colors.subtle} />
-    <View style={styles.chips}>{suggestions.map((item) => <Chip key={item} label={item} selected={item === value} onPress={() => onChange(item)} />)}</View>
-  </View>;
-}
-
-function ProviderChips({ label, value, onChange, allowNone }: { label: string; value: string | null; onChange: (id: string | null) => void; allowNone?: string }) {
-  const { providers, chatProvider } = useApp();
-  const usable = providers.filter((item) => supportsSpeechApi(item));
-  const fallback = supportsSpeechApi(chatProvider) ? chatProvider.id : usable[0]?.id ?? null;
-  const current = value ?? (allowNone ? null : fallback);
-  return <View style={styles.field}>
-    <Text style={styles.fieldLabel}>{label}</Text>
-    {usable.length ? <View style={styles.chips}>
-      {allowNone ? <Chip label={allowNone} selected={current === null} onPress={() => onChange(null)} /> : null}
-      {usable.map((item) => <Chip key={item.id} label={item.name} selected={current === item.id} onPress={() => onChange(item.id)} />)}
-    </View> : <Text style={styles.note}>没有 OpenAI 兼容的服务商（Claude 原生接口不提供语音接口）。</Text>}
-  </View>;
-}
-
 export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const settings = useVoiceSettings();
   const statuses = useModelStatuses();
   const [confirm, setConfirm] = React.useState<AsrModel | null>(null);
   const engineReady = localEngineAvailable();
   const hasNative = Boolean(voiceNative());
+  const localUsable = Boolean(hasNative && engineReady && settings.localModel && statuses[settings.localModel]?.state === 'installed');
   useEffect(() => { if (visible) void refreshModels().catch(() => undefined); }, [visible]);
   const set = (patch: Partial<VoiceSettings>) => void updateVoiceSettings(patch);
+  const [editor, setEditor] = React.useState<{ service: SpeechService | null; kind: SpeechKind | null } | null>(null);
+  /** Picking a service also switches model and voice to that vendor's defaults. */
+  const pick = (kind: SpeechKind, ref: string | null, service: SpeechService | null) => {
+    const capability = service ? capabilityOf(vendorById(service.vendor)!, kind) : null;
+    // A vendor's own defaults, or the OpenAI-style defaults for a chat provider: never keep another vendor's model name.
+    const d = DEFAULT_VOICE_SETTINGS;
+    const model = capability?.models[0];
+    const voice = capability?.voices?.[0]?.id;
+    if (kind === 'stt') set({ transcribeProviderId: ref, transcribeModel: model ?? d.transcribeModel });
+    if (kind === 'tts') set({ ttsProviderId: ref, ttsModel: model ?? d.ttsModel, ttsVoice: voice ?? d.ttsVoice });
+    if (kind === 'realtime') set({ realtimeProviderId: ref, realtimeModel: model ?? d.realtimeModel, realtimeVoice: voice ?? d.realtimeVoice });
+  };
+  const add = (kind: SpeechKind | null) => setEditor({ service: null, kind });
 
   const download = (model: AsrModel) => {
     void installModel(model.id, settings.mirror).then(() => {
@@ -95,6 +89,10 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
 
   return <Sheet visible={visible} title="语音" onClose={onClose} presentation="page">
     <View style={styles.body}>
+      <SectionLabel>语音服务</SectionLabel>
+      <Text style={styles.lead}>云端语音都调用你自己的 API，每个功能可以用不同的服务商。</Text>
+      <SpeechServiceList onEdit={(service) => setEditor({ service, kind: null })} onAdd={() => add(null)} />
+
       <SectionLabel>语音输入</SectionLabel>
       <Group style={styles.group}>
         <View style={styles.chips}>
@@ -103,7 +101,7 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
         </View>
         <Text style={styles.note}>{settings.inputEngine === 'local'
           ? '声音只在手机上识别，不联网、不产生费用。下载一次即可离线使用。'
-          : '录音发送给服务商转成文字，无需下载模型；按服务商的语音识别计费。'}</Text>
+          : '录音发送给你选择的识别服务转成文字，按该服务商的价格计费。'}</Text>
       </Group>
 
       {settings.inputEngine === 'local' ? <>
@@ -121,10 +119,18 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
           </View>
           <Text style={styles.note}>国内网络建议用“国内镜像”；下载中断后重试会从已完成的文件继续。</Text>
         </Group>
-      </> : <Group style={styles.group}>
-        <ProviderChips label="识别服务商" value={settings.transcribeProviderId} onChange={(id) => set({ transcribeProviderId: id })} />
-        <Field label="识别模型" value={settings.transcribeModel} onChange={(value) => set({ transcribeModel: value })} suggestions={['gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'whisper-1']} />
-      </Group>}
+      </> : null}
+      {settings.inputEngine === 'cloud' || !localUsable ? <Group style={[styles.group, { marginTop: settings.inputEngine === 'local' ? 10 : 0 }]}>
+        {settings.inputEngine === 'local' ? <Text style={styles.note}>本地模型暂不可用，会用这里选择的云端识别。</Text> : null}
+        <ServicePicker kind="stt" value={settings.transcribeProviderId} onChange={(ref, service) => pick('stt', ref, service)} onAdd={() => add('stt')} />
+        <ModelVoiceFields kind="stt" reference={settings.transcribeProviderId} model={settings.transcribeModel} onModel={(value) => set({ transcribeModel: value })} />
+        <View style={styles.field}>
+          <Text style={styles.fieldLabel}>识别语言</Text>
+          <View style={styles.chips}>
+            {[['', '自动'], ['zh', '中文'], ['en', '英语'], ['ja', '日语'], ['yue', '粤语']].map(([id, label]) => <Chip key={id || 'auto'} label={label} selected={settings.transcribeLanguage === id} onPress={() => set({ transcribeLanguage: id })} />)}
+          </View>
+        </View>
+      </Group> : null}
 
       <SectionLabel>语音对话</SectionLabel>
       <Group style={styles.group}>
@@ -134,46 +140,41 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
           <Chip label="实时语音模型" selected={settings.conversationEngine === 'realtime'} onPress={() => set({ conversationEngine: 'realtime' })} />
         </View>
         <Text style={styles.note}>{settings.conversationEngine === 'cascade'
-          ? '语音识别 → 你当前的对话模型 → 语音合成。任何服务商都能用，还能在对话里继续画图，内容会保存在对话中。'
+          ? '语音识别 API → 你当前的对话模型 → 语音合成 API，三段可以分别用不同服务商；还能在对话里继续画图，内容会保存在对话中。'
           : settings.conversationEngine === 'realtime'
-            ? '端到端语音模型（如 GPT Realtime）直接听和说，延迟最低、可随时插话。需要服务商支持 Realtime 接口。'
+            ? '端到端实时语音模型直接听和说，延迟最低、可随时插话。支持 OpenAI、Azure OpenAI、阿里云 Qwen-Omni、Gemini Live、阶跃星辰等。'
             : '选了实时语音服务商时优先用实时语音模型，连不上会自动改用分段语音；否则直接使用分段语音。'}</Text>
       </Group>
 
       {settings.conversationEngine !== 'cascade' ? <Group style={styles.group}>
-        <ProviderChips label="实时语音服务商" value={settings.realtimeProviderId} onChange={(id) => set({ realtimeProviderId: id })}
-          allowNone={settings.conversationEngine === 'auto' ? '不使用' : undefined} />
-        {settings.conversationEngine === 'realtime' || settings.realtimeProviderId ? <>
-          <Field label="实时语音模型" value={settings.realtimeModel} onChange={(value) => set({ realtimeModel: value })} suggestions={['gpt-realtime-2.1', 'gpt-realtime', 'gpt-realtime-mini']} />
-          <View style={styles.field}>
-            <Text style={styles.fieldLabel}>声音</Text>
-            <View style={styles.chips}>{VOICES.map((voice) => <Chip key={voice.id} label={voice.label} selected={settings.realtimeVoice === voice.id} onPress={() => set({ realtimeVoice: voice.id })} />)}</View>
-          </View>
-        </> : null}
+        {/* In auto mode nothing picked means realtime is off, not “the chat provider”. */}
+        <ServicePicker kind="realtime" value={settings.realtimeProviderId} onChange={(ref, service) => pick('realtime', ref, service)} onAdd={() => add('realtime')}
+          offLabel={settings.conversationEngine === 'auto' ? '未启用' : undefined} />
+        {settings.conversationEngine === 'realtime' || settings.realtimeProviderId ? <ModelVoiceFields kind="realtime" reference={settings.realtimeProviderId} model={settings.realtimeModel} voice={settings.realtimeVoice}
+          onModel={(value) => set({ realtimeModel: value })} onVoice={(value) => set({ realtimeVoice: value })} /> : null}
       </Group> : null}
 
       {settings.conversationEngine !== 'realtime' ? <Group style={styles.group}>
         <Text style={styles.fieldLabel}>分段语音 · 朗读回答</Text>
         <View style={styles.chips}>
-          <Chip label="云端语音合成" selected={settings.speechOutput === 'cloud'} onPress={() => set({ speechOutput: 'cloud' })} />
-          <Chip label="手机系统语音" selected={settings.speechOutput === 'system'} onPress={() => set({ speechOutput: 'system' })} />
+          <Chip label="语音合成 API" selected={settings.speechOutput === 'cloud'} onPress={() => set({ speechOutput: 'cloud' })} />
+          <Chip label="手机系统语音（本地）" selected={settings.speechOutput === 'system'} onPress={() => set({ speechOutput: 'system' })} />
         </View>
         {settings.speechOutput === 'cloud' ? <>
-          <ProviderChips label="合成服务商" value={settings.ttsProviderId} onChange={(id) => set({ ttsProviderId: id })} />
-          <Field label="合成模型" value={settings.ttsModel} onChange={(value) => set({ ttsModel: value })} suggestions={['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd']} />
-          <View style={styles.field}>
-            <Text style={styles.fieldLabel}>声音</Text>
-            <View style={styles.chips}>{VOICES.map((voice) => <Chip key={voice.id} label={voice.label} selected={settings.ttsVoice === voice.id} onPress={() => set({ ttsVoice: voice.id })} />)}</View>
-          </View>
-        </> : <Text style={styles.note}>免费、离线，音色取决于手机自带的语音引擎。</Text>}
-        <Text style={styles.note}>听你说话使用上面“语音输入”的设置；云端合成失败时会自动改用手机系统语音。</Text>
+          <ServicePicker kind="tts" value={settings.ttsProviderId} onChange={(ref, service) => pick('tts', ref, service)} onAdd={() => add('tts')} />
+          <ModelVoiceFields kind="tts" reference={settings.ttsProviderId} model={settings.ttsModel} voice={settings.ttsVoice}
+            onModel={(value) => set({ ttsModel: value })} onVoice={(value) => set({ ttsVoice: value })} />
+        </> : <Text style={styles.note}>用手机自带的语音引擎在本机朗读，不调用任何 API；音色取决于手机。</Text>}
+        <Text style={styles.note}>听你说话使用上面“语音输入”的设置；回答由你当前选择的对话模型生成。</Text>
       </Group> : null}
 
       <View style={styles.privacy}>
         <Icon name="lock" size={14} color={colors.subtle} />
-        <Text style={styles.privacyText}>本地模型在手机上处理声音；使用云端时，录音只发送给你选择的服务商。</Text>
+        <Text style={styles.privacyText}>本地模型在手机上处理声音；使用云端时，录音和文字只发送给你为该功能选择的服务商。</Text>
       </View>
     </View>
+    <SpeechServiceSheet visible={Boolean(editor)} service={editor?.service ?? null} kind={editor?.kind ?? null} onClose={() => setEditor(null)}
+      onSaved={(service) => { if (editor?.kind && !editor.service) pick(editor.kind, `svc:${service.id}`, service); }} />
     <AppDialog visible={Boolean(confirm)} title="删除语音模型？" message={confirm ? `将释放 ${formatBytes(modelSize(confirm))} 空间，之后可以随时重新下载。` : ''} icon="trash"
       onClose={() => setConfirm(null)} actions={[
         { label: '取消', tone: 'secondary', onPress: () => setConfirm(null) },
@@ -189,6 +190,7 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
 
 const styles = StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 28 },
+  lead: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginBottom: 10, marginHorizontal: 4 },
   group: { padding: 14, gap: 10 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   note: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18 },

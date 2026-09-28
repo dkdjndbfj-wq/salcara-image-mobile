@@ -2,18 +2,34 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { useAgents } from '../agent/agents';
+import type { CustomAgent, HistoryHit } from '../agent/types';
 import type { Conversation } from '../domain';
+import { searchMessages } from '../storage/database';
 import { useApp } from '../state/AppContext';
 import { colors, prettyModel, radius, shadow } from '../theme';
+import { AgentAvatar } from './AgentsSheet';
 import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { AppDialog, dismissKeyboardAndBlur, MotionPressable, useReducedMotion, type DialogAction } from './ui';
 
-export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings }: {
-  visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void;
+export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings, onOpenAgents, onStartAgent }: {
+  visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void; onOpenAgents: () => void; onStartAgent: (agent: CustomAgent) => void;
 }) {
   const { conversations, activeConversationId, chatProvider, imageProvider, openConversation, deleteConversation, renameConversation, runningConversationIds } = useApp();
+  const agents = useAgents();
   const [query, setQuery] = useState('');
+  const [hits, setHits] = useState<HistoryHit[]>([]);
+  // Full-text search over messages, a moment after typing stops.
+  useEffect(() => {
+    const search = query.trim();
+    if (!search) { setHits([]); return undefined; }
+    let alive = true;
+    const timer = setTimeout(() => {
+      searchMessages(search, { limit: 30 }).then((result) => { if (alive) setHits(result); }).catch(() => { if (alive) setHits([]); });
+    }, 220);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [query]);
   const [mounted, setMounted] = useState(visible);
   const [menuFor, setMenuFor] = useState<Conversation | null>(null);
   const [renaming, setRenaming] = useState<Conversation | null>(null);
@@ -45,7 +61,7 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
 
   const groups = useMemo(() => {
     const search = query.trim().toLowerCase();
-    const matches = conversations.filter((item) => !search || item.title.toLowerCase().includes(search));
+    const matches = conversations.filter((item) => item.kind !== 'companion' && (!search || item.title.toLowerCase().includes(search)));
     const start = new Date(); start.setHours(0, 0, 0, 0);
     const day = 86_400_000;
     const buckets: { title: string; items: Conversation[] }[] = ['今天', '昨天', '7 天内', '30 天内', '更早'].map((title) => ({ title, items: [] }));
@@ -89,15 +105,35 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
               <Icon name="compose" size={21} color={colors.text} />
             </MotionPressable>
           </View>
-          <Pressable accessibilityRole="button" accessibilityLabel="开始新对话" onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={({ pressed }) => [styles.brandRow, pressed && { backgroundColor: colors.surface }]}>
-            <BrandMark size={30} />
-            <Text style={styles.brand}>Salcara</Text>
-          </Pressable>
+          {!query ? <>
+            <Pressable accessibilityRole="button" accessibilityLabel="开始新对话" onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={({ pressed }) => [styles.brandRow, pressed && { backgroundColor: colors.surface }]}>
+              <BrandMark size={30} />
+              <Text style={styles.brand}>Salcara</Text>
+            </Pressable>
+            {agents.slice(0, 3).map((agent) => <Pressable key={agent.id} accessibilityRole="button" accessibilityLabel={`和 ${agent.name} 对话`}
+              onPress={() => { dismissKeyboardAndBlur(); onClose(); onStartAgent(agent); }} style={({ pressed }) => [styles.agentRow, pressed && { backgroundColor: colors.surface }]}>
+              <AgentAvatar agent={agent} size={30} />
+              <Text style={styles.agentName} numberOfLines={1}>{agent.name}</Text>
+            </Pressable>)}
+            <Pressable accessibilityRole="button" accessibilityLabel="智能体" onPress={() => { dismissKeyboardAndBlur(); onClose(); onOpenAgents(); }} style={({ pressed }) => [styles.agentRow, pressed && { backgroundColor: colors.surface }]}>
+              <View style={styles.agentIcon}><Icon name="bot" size={17} color={colors.textSecondary} /></View>
+              <Text style={styles.agentName}>{agents.length ? '全部智能体' : '智能体'}</Text>
+            </Pressable>
+          </> : null}
 
           <ScrollView style={styles.list} contentContainerStyle={{ paddingBottom: 16 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
-            {!groups.length && <View style={styles.empty}>
+            {!groups.length && !hits.length && <View style={styles.empty}>
               <Icon name={query ? 'search' : 'chat'} size={26} color={colors.faint} />
               <Text style={styles.emptyText}>{query ? '没有找到相关对话' : '对话会出现在这里'}</Text>
+            </View>}
+            {hits.length > 0 && <View>
+              <Text style={styles.groupLabel}>消息</Text>
+              {hits.map((hit) => <Pressable key={hit.messageId} accessibilityRole="button" accessibilityLabel={`打开对话：${hit.title}`}
+                onPress={() => { const target = conversations.find((item) => item.id === hit.conversationId); if (target) open(target); }}
+                style={({ pressed }) => [styles.hit, pressed && { backgroundColor: colors.surface }]}>
+                <Text style={styles.hitTitle} numberOfLines={1}>{hit.title}</Text>
+                <Text style={styles.hitSnippet} numberOfLines={2}>{hit.role === 'user' ? '你：' : ''}{hit.snippet}</Text>
+              </Pressable>)}
             </View>}
             {groups.map((group) => <View key={group.title}>
               <Text style={styles.groupLabel}>{group.title}</Text>
@@ -179,6 +215,12 @@ const styles = StyleSheet.create({
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 12, height: 48, paddingHorizontal: 8, marginTop: 14, borderRadius: 14 },
   brandIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
   brand: { color: colors.text, fontSize: 15.5, fontWeight: '600' },
+  agentRow: { flexDirection: 'row', alignItems: 'center', gap: 12, height: 44, paddingHorizontal: 8, borderRadius: 14 },
+  agentIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
+  agentName: { flex: 1, color: colors.textSecondary, fontSize: 15 },
+  hit: { paddingHorizontal: 10, paddingVertical: 9, borderRadius: 12, gap: 3 },
+  hitTitle: { color: colors.text, fontSize: 14.5, fontWeight: '500' },
+  hitSnippet: { color: colors.subtle, fontSize: 13, lineHeight: 18 },
   list: { flex: 1, marginTop: 4 },
   groupLabel: { color: colors.subtle, fontSize: 12.5, fontWeight: '500', paddingTop: 18, paddingBottom: 6, paddingHorizontal: 10 },
   empty: { paddingVertical: 64, alignItems: 'center', gap: 12 },

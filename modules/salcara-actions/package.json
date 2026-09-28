@@ -1,0 +1,6 @@
+{
+  "name": "salcara-actions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Typed Android intents (alarm, timer, calendar) for Salcara's confirmed phone actions"
+}

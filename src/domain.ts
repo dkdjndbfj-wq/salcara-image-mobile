@@ -1,5 +1,8 @@
+import type { AgentTrace } from './agent/types';
+
 export type Quality = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-export type AspectRatio = '1:1' | '16:9' | '9:16';
+/** 'auto' or any width:height between 1:3 and 3:1 (see image-sizes.ts). */
+export type AspectRatio = 'auto' | `${number}:${number}`;
 export type ResolutionTier = '1K' | '2K' | '4K';
 export type MessageStatus = 'pending' | 'complete' | 'error' | 'cancelled' | 'interrupted';
 export type MessageMode = 'generate' | 'edit' | 'chat';
@@ -32,6 +35,11 @@ export interface Conversation {
   transparent: boolean;
   /** New conversations default to auto. Old installs may still contain chat/image. */
   mode?: ComposerMode;
+  /** Custom agent (智能体) this conversation talks to. */
+  agentId?: string | null;
+  /** assistant: the tool-using assistant space; companion: a chat character's endless conversation. */
+  kind?: 'assistant' | 'companion';
+  characterId?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -84,6 +92,8 @@ export interface ChatMessage {
   error: string | null;
   elapsedMs: number | null;
   createdAt: number;
+  /** Tool steps, sources, suggestions, files and actions of an agent reply. */
+  agent?: AgentTrace | null;
 }
 
 export interface GenerationSettings {

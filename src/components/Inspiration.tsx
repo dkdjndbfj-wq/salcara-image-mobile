@@ -70,7 +70,7 @@ export function InspirationGrid({ canDraw, onPick }: { canDraw: boolean; onPick:
   return <View style={styles.wrap}>
     <View style={styles.header}>
       <Text style={styles.title}>来点灵感</Text>
-      <MotionPressable accessibilityRole="button" accessibilityLabel="换一批灵感" scaleTo={0.9} onPress={() => setRound((value) => value + 1)} style={styles.shuffle}>
+      <MotionPressable accessibilityRole="button" accessibilityLabel="换一批灵感" scaleTo={0.9} hitSlop={8} onPress={() => setRound((value) => value + 1)} style={styles.shuffle}>
         <Icon name="regenerate" size={15} color={colors.textMuted} />
         <Text style={styles.shuffleText}>换一批</Text>
       </MotionPressable>

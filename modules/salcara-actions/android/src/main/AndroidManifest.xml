@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Normal (install-time) permission required by AlarmClock.ACTION_SET_ALARM / ACTION_SET_TIMER. -->
+  <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+</manifest>

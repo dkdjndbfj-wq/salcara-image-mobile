@@ -11,7 +11,7 @@ export const palette = {
   ink: '#0E1325',
   ink2: '#2C3350',
   slate: '#5E6583',
-  steel: '#6F7691',
+  steel: '#666D89',
   silver: '#BEC3D6',
   sky: '#7CC6FF',
   blue: '#3D7BFA',

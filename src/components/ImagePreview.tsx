@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useEffect } from 'react';
+import React, { useLayoutEffect, useRef } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
@@ -21,6 +21,10 @@ export function ImagePreview({ uri, onClose, onSave, onShare }: { uri: string | 
   const savedY = useSharedValue(0);
   const stageWidth = useSharedValue(1);
   const stageHeight = useSharedValue(1);
+  // Keep showing the last image while the modal fades out, instead of blanking it mid-fade.
+  const lastUri = useRef(uri);
+  if (uri) lastUri.current = uri;
+  const shown = uri ?? lastUri.current;
   const zoom = (delta: number) => {
     const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, savedScale.value + delta));
     savedScale.value = next;
@@ -28,7 +32,8 @@ export function ImagePreview({ uri, onClose, onSave, onShare }: { uri: string | 
     translateX.value = withSpring(0); translateY.value = withSpring(0); savedX.value = 0; savedY.value = 0;
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!uri) return;
     scale.value = 1;
     savedScale.value = 1;
     translateX.value = 0;
@@ -98,12 +103,12 @@ export function ImagePreview({ uri, onClose, onSave, onShare }: { uri: string | 
         </View>
         <GestureDetector gesture={gesture}>
           <Animated.View style={styles.imageStage} onLayout={(event) => { stageWidth.value = event.nativeEvent.layout.width; stageHeight.value = event.nativeEvent.layout.height; }}>
-            {uri && <Animated.Image source={{ uri }} style={[styles.previewImage, imageStyle]} resizeMode="contain" />}
+            {shown && <Animated.Image source={{ uri: shown }} style={[styles.previewImage, imageStyle]} resizeMode="contain" />}
           </Animated.View>
         </GestureDetector>
-        {uri && <View style={styles.bottomBar}>
-          {onSave && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.action, styles.actionPrimary, pressed && { opacity: 0.85 }]} onPress={() => onSave(uri)}><Icon name="download" size={19} color={colors.text} strokeWidth={1.9} /><Text style={styles.actionTextDark}>保存</Text></Pressable>}
-          {onShare && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.action, pressed && { opacity: 0.85 }]} onPress={() => onShare(uri)}><Icon name="share" size={19} color="#fff" strokeWidth={1.9} /><Text style={styles.actionText}>分享</Text></Pressable>}
+        {shown && <View style={styles.bottomBar}>
+          {onSave && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.action, styles.actionPrimary, pressed && { opacity: 0.85 }]} onPress={() => onSave(shown)}><Icon name="download" size={19} color={colors.text} strokeWidth={1.9} /><Text style={styles.actionTextDark}>保存</Text></Pressable>}
+          {onShare && <Pressable accessibilityRole="button" style={({ pressed }) => [styles.action, pressed && { opacity: 0.85 }]} onPress={() => onShare(shown)}><Icon name="share" size={19} color="#fff" strokeWidth={1.9} /><Text style={styles.actionText}>分享</Text></Pressable>}
         </View>}
       </SafeAreaView>
       <ToastHost />

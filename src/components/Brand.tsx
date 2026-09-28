@@ -1,5 +1,5 @@
-import React, { useEffect, useRef } from 'react';
-import { Animated, Easing, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Animated, AppState, Easing, View } from 'react-native';
 import Svg, { Defs, LinearGradient, Stop, Text as SvgText } from 'react-native-svg';
 
 import { brandStops } from '../theme';
@@ -23,12 +23,17 @@ export function BrandMark({ size = 28 }: { size?: number }) {
 export function LivingMark({ size = 22, active = true }: { size?: number; active?: boolean }) {
   const spin = useRef(new Animated.Value(0)).current;
   const reduced = useReducedMotion();
+  const [foreground, setForeground] = useState(AppState.currentState === 'active');
   useEffect(() => {
-    if (!active || reduced) return;
+    const sub = AppState.addEventListener('change', (state) => setForeground(state === 'active'));
+    return () => sub.remove();
+  }, []);
+  useEffect(() => {
+    if (!active || reduced || !foreground) return;
     const loop = Animated.loop(Animated.timing(spin, { toValue: 1, duration: 2600, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }));
     loop.start();
     return () => loop.stop();
-  }, [active, reduced, spin]);
+  }, [active, reduced, foreground, spin]);
   return <Animated.View style={{ width: size, height: size, transform: [
     { rotate: spin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] }) },
     { scale: spin.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.94, 1.06, 0.94] }) },

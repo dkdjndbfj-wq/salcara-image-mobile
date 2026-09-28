@@ -1,10 +1,11 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Modal, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg';
 
 import { useVoiceConversation, type LivePhase } from '../voice/useVoiceConversation';
+import { LiveBackdrop, type IntroMode } from './LiveIntro';
 import { LogoArt } from './Logo';
 import { Icon } from './Icon';
 import { MotionPressable, useReducedMotion } from './MotionPressable';
@@ -16,7 +17,7 @@ import { MotionPressable, useReducedMotion } from './MotionPressable';
  */
 
 const STAGE = '#060917';
-const PHASE_TEXT: Record<LivePhase, string> = {
+export const PHASE_TEXT: Record<LivePhase, string> = {
   connecting: '正在连接',
   listening: '我在听，直接说吧',
   hearing: '正在听你说',
@@ -41,7 +42,7 @@ function Glow({ color, size, intensity = 0.9 }: { color: string; size: number; i
 }
 
 /** Loops a value 0→1→0 forever (native driver). */
-function useLoop(duration: number, enabled: boolean, delay = 0) {
+export function useLoop(duration: number, enabled: boolean, delay = 0) {
   const value = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     if (!enabled) { value.setValue(0.5); return undefined; }
@@ -57,7 +58,7 @@ function useLoop(duration: number, enabled: boolean, delay = 0) {
 }
 
 /** The aurora: cool light while you talk, warm light while Salcara talks, a swirl while it thinks. */
-function Aurora({ phase, energy, warmth, muted }: { phase: LivePhase; energy: Animated.Value; warmth: Animated.Value; muted: boolean }) {
+const Aurora = React.memo(function Aurora({ phase, energy, warmth, muted }: { phase: LivePhase; energy: Animated.Value; warmth: Animated.Value; muted: boolean }) {
   const { width, height } = useWindowDimensions();
   const reduced = useReducedMotion();
   const driftA = useLoop(3800, !reduced);
@@ -97,46 +98,48 @@ function Aurora({ phase, energy, warmth, muted }: { phase: LivePhase; energy: An
       {/* Warm layer: speaking */}
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: warmth }]}>
         {orb('#A68BF7', 0.25, driftB, width * 0.14, 0.95, 'w1')}
-        {orb('#F4A6CE', 0.7, driftA, width * 0.12, 0.9, 'w2')}
+        {orb('#8E9BFF', 0.7, driftA, width * 0.12, 0.9, 'w2')}
         {orb('#7CC6FF', 0.48, driftC, width * 0.08, 0.7, 'w3')}
       </Animated.View>
     </Animated.View>
   </Animated.View>;
-}
+});
 
-function Dots() {
+export function Dots({ color = 'rgba(255,255,255,0.62)' }: { color?: string } = {}) {
   const [count, setCount] = useState(0);
   useEffect(() => { const timer = setInterval(() => setCount((value) => (value + 1) % 4), 380); return () => clearInterval(timer); }, []);
-  return <Text style={styles.status}>{'.'.repeat(count)}<Text style={{ opacity: 0 }}>{'.'.repeat(3 - count)}</Text></Text>;
+  return <Text style={[styles.status, { color }]}>{'.'.repeat(count)}<Text style={{ opacity: 0 }}>{'.'.repeat(3 - count)}</Text></Text>;
 }
 
 /** Ripple where the user tapped to interrupt. */
-function Ripple({ x, y, onDone }: { x: number; y: number; onDone: () => void }) {
+export function Ripple({ x, y, onDone, color = '#FFFFFF' }: { x: number; y: number; onDone: () => void; color?: string }) {
   const value = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(value, { toValue: 1, duration: 650, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(onDone);
   }, [value, onDone]);
   return <Animated.View pointerEvents="none" style={[styles.ripple, {
-    left: x - 60, top: y - 60,
+    left: x - 60, top: y - 60, backgroundColor: color,
     opacity: value.interpolate({ inputRange: [0, 1], outputRange: [0.45, 0] }),
     transform: [{ scale: value.interpolate({ inputRange: [0, 1], outputRange: [0.2, 3.2] }) }],
   }]} />;
 }
 
-function RoundButton({ label, icon, onPress, tone = 'glass', ring }: {
+export function RoundButton({ label, icon, onPress, tone = 'glass', ring, theme = 'dark', accent = '#7CC6FF' }: {
   label: string; icon: React.ComponentProps<typeof Icon>['name']; onPress: () => void; tone?: 'glass' | 'light' | 'danger'; ring?: Animated.Value;
+  theme?: 'dark' | 'light'; accent?: string;
 }) {
-  const background = tone === 'danger' ? '#FF4D5E' : tone === 'light' ? '#FFFFFF' : 'rgba(255,255,255,0.1)';
-  const color = tone === 'light' ? STAGE : '#FFFFFF';
+  const light = theme === 'light';
+  const background = tone === 'danger' ? '#FF4D5E' : tone === 'light' ? (light ? '#1B2150' : '#FFFFFF') : light ? 'rgba(255,255,255,0.78)' : 'rgba(255,255,255,0.1)';
+  const color = tone === 'light' ? (light ? '#FFFFFF' : STAGE) : tone === 'danger' ? '#FFFFFF' : light ? '#1B2150' : '#FFFFFF';
   return <View style={styles.buttonSlot}>
-    {ring ? <Animated.View pointerEvents="none" style={[styles.buttonRing, {
-      opacity: ring.interpolate({ inputRange: [0, 1], outputRange: [0, 0.55] }),
-      transform: [{ scale: ring.interpolate({ inputRange: [0, 1], outputRange: [1, 1.45] }) }],
-    }]} /> : null}
-    <MotionPressable accessibilityRole="button" accessibilityLabel={label} scaleTo={0.88} onPress={onPress} style={[styles.button, { backgroundColor: background }]}>
+    {ring ? <Animated.View pointerEvents="none" style={[styles.buttonRing, { borderColor: accent },
+      { opacity: ring.interpolate({ inputRange: [0, 1], outputRange: [0, 0.55] }),
+      transform: [{ scale: ring.interpolate({ inputRange: [0, 1], outputRange: [1, 1.45] }) }] },
+    ]} /> : null}
+    <MotionPressable accessibilityRole="button" accessibilityLabel={label} scaleTo={0.88} onPress={onPress} style={[styles.button, { backgroundColor: background }, light && tone === 'glass' && styles.buttonLight]}>
       <Icon name={icon} size={26} color={color} strokeWidth={1.9} />
     </MotionPressable>
-    <Text style={styles.buttonLabel}>{label}</Text>
+    <Text style={[styles.buttonLabel, light && { color: 'rgba(27,33,80,0.7)' }]}>{label}</Text>
   </View>;
 }
 
@@ -163,18 +166,15 @@ export function LiveMode({ visible, paused = false, onClose, onOpenSettings }: {
   </Modal>;
 }
 
-function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean; enter: Animated.Value; onClose: () => void; onOpenSettings: () => void }) {
-  const live = useVoiceConversation(active);
-  const { height } = useWindowDimensions();
-  const reduced = useReducedMotion();
+/** Drives the stage: `energy` follows the voice (yours while you talk, the reply's while it speaks), `warmth` the phase. */
+export function useLiveEnergy(live: ReturnType<typeof useVoiceConversation>, reduced: boolean) {
   const energy = useRef(new Animated.Value(0.15)).current;
   const warmth = useRef(new Animated.Value(0)).current;
-  const breathe = useLoop(1800, !reduced);
-  const [ripples, setRipples] = useState<Array<{ id: number; x: number; y: number }>>([]);
   const phaseRef = useRef(live.phase);
   phaseRef.current = live.phase;
   const mutedRef = useRef(live.muted);
   mutedRef.current = live.muted;
+  const lastTarget = useRef(-1);
 
   // Energy follows your voice while you talk and Salcara's voice while it talks.
   useEffect(() => {
@@ -185,9 +185,13 @@ function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean
       if (source !== wanted || mutedRef.current) return;
       const now = Date.now();
       if (now - last < 40) return;
-      last = now;
       const floor = phase === 'hearing' ? 0.3 : phase === 'speaking' ? 0.35 : 0.12;
-      Animated.timing(energy, { toValue: Math.min(1, floor + value * 0.85), duration: 110, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
+      const target = Math.min(1, floor + value * 0.85);
+      // Tiny changes are invisible but each one starts a new animation.
+      if (Math.abs(target - lastTarget.current) < 0.03) return;
+      last = now;
+      lastTarget.current = target;
+      Animated.timing(energy, { toValue: target, duration: 110, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
     };
     const micId = live.micLevel.addListener(drive('mic'));
     const outId = live.outLevel.addListener(drive('out'));
@@ -197,6 +201,7 @@ function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean
   // Phase changes glide the colour temperature; thinking pulses, system voice gets a synthetic pulse.
   useEffect(() => {
     const target = live.phase === 'speaking' ? 1 : live.phase === 'thinking' ? 0.55 : 0;
+    lastTarget.current = -1;
     Animated.timing(warmth, { toValue: target, duration: 650, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }).start();
     if (reduced) return undefined;
     if (live.phase === 'thinking' || (live.phase === 'speaking' && live.syntheticVoice)) {
@@ -213,6 +218,32 @@ function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean
     return undefined;
   }, [live.phase, live.syntheticVoice, energy, warmth, reduced]);
 
+  return { energy, warmth };
+}
+
+/** The full key-visual entrance plays on the first Live of each app launch; later ones get a shorter cut. */
+let introPlayed = false;
+
+function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean; enter: Animated.Value; onClose: () => void; onOpenSettings: () => void }) {
+  const live = useVoiceConversation(active);
+  const { height } = useWindowDimensions();
+  const reduced = useReducedMotion();
+  const [introMode] = useState<IntroMode>(() => {
+    const mode: IntroMode = reduced ? 'none' : introPlayed ? 'short' : 'full';
+    introPlayed = true;
+    return mode;
+  });
+  // The Live controls fade in as the entrance hands over; until then taps skip the entrance.
+  const ui = useRef(new Animated.Value(introMode === 'none' ? 1 : 0)).current;
+  const [revealed, setRevealed] = useState(introMode === 'none');
+  const reveal = useCallback(() => {
+    setRevealed(true);
+    Animated.timing(ui, { toValue: 1, duration: 700, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, [ui]);
+  const { energy, warmth } = useLiveEnergy(live, reduced);
+  const breathe = useLoop(1800, !reduced);
+  const [ripples, setRipples] = useState<Array<{ id: number; x: number; y: number }>>([]);
+
   useEffect(() => {
     if (!live.notice) return undefined;
     const timer = setTimeout(live.dismissNotice, 5000);
@@ -228,7 +259,7 @@ function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean
 
   const rise = enter.interpolate({ inputRange: [0, 1], outputRange: [height * 0.35, 0] });
   const captionOpacity = enter.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0, 0, 1] });
-  const assistant = live.assistantText.length > 220 ? `…${live.assistantText.slice(-220)}` : live.assistantText;
+  const assistant = live.assistantText.length > 150 ? `…${live.assistantText.slice(-150)}` : live.assistantText;
   const canInterrupt = live.phase === 'speaking' || live.phase === 'thinking';
   const interruptPop = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -237,12 +268,16 @@ function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean
   const micRing = useMemo(() => live.micLevel, [live.micLevel]);
 
   return <Animated.View style={[styles.stage, { opacity: enter }]}>
-    <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ translateY: rise }] }]}>
+    {/* The entrance (tap to skip) sits at the back: the Live layers stay invisible and untouchable until it hands over,
+        after which only its starfield and particles remain as the stage. */}
+    <LiveBackdrop mode={introMode} onReveal={reveal} phase={live.phase} energy={energy} />
+    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: ui.interpolate({ inputRange: [0, 1], outputRange: [0, 0.4] }), transform: [{ translateY: rise }] }]}>
       <Aurora phase={live.phase} energy={energy} warmth={warmth} muted={live.muted || live.phase === 'error'} />
     </Animated.View>
-    <Pressable accessibilityLabel="打断" style={StyleSheet.absoluteFill} onPress={tap} />
+    {revealed ? <Pressable accessibilityLabel="打断" style={StyleSheet.absoluteFill} onPress={tap} /> : null}
     {ripples.map((ripple) => <Ripple key={ripple.id} x={ripple.x} y={ripple.y} onDone={() => setRipples((items) => items.filter((item) => item.id !== ripple.id))} />)}
 
+    <Animated.View style={[StyleSheet.absoluteFill, { opacity: ui }]} pointerEvents={revealed ? 'box-none' : 'none'}>
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']} pointerEvents="box-none">
       <View style={styles.top} pointerEvents="box-none">
         <MotionPressable accessibilityRole="button" accessibilityLabel="收起" scaleTo={0.88} onPress={onClose} style={styles.topButton}>
@@ -286,6 +321,7 @@ function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean
         </>}
       </Animated.View>
     </SafeAreaView>
+    </Animated.View>
   </Animated.View>;
 }
 
@@ -299,18 +335,19 @@ const styles = StyleSheet.create({
   pillText: { color: 'rgba(255,255,255,0.9)', fontSize: 13.5, fontWeight: '600', flexShrink: 1 },
   notice: { alignSelf: 'center', marginTop: 12, maxWidth: '88%', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.1)' },
   noticeText: { color: 'rgba(255,255,255,0.85)', fontSize: 12.5, textAlign: 'center' },
-  captions: { flex: 1, justifyContent: 'center', paddingHorizontal: 28, paddingBottom: 40, gap: 14 },
+  captions: { flex: 1, justifyContent: 'flex-end', paddingLeft: 26, paddingRight: 96, paddingBottom: 30, gap: 12 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   mark: { width: 22, height: 22 },
   status: { color: 'rgba(255,255,255,0.62)', fontSize: 14, fontWeight: '500' },
   user: { color: 'rgba(255,255,255,0.58)', fontSize: 17, lineHeight: 25 },
-  assistant: { color: '#FFFFFF', fontSize: 25, lineHeight: 36, fontWeight: '500', letterSpacing: -0.3 },
+  assistant: { color: '#FFFFFF', fontSize: 22, lineHeight: 32, fontWeight: '500', letterSpacing: -0.3, textShadowColor: 'rgba(6,9,23,0.6)', textShadowRadius: 12 },
   assistantDone: { color: 'rgba(255,255,255,0.78)' },
   hint: { color: 'rgba(255,255,255,0.45)', fontSize: 17, lineHeight: 27 },
   controls: { flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'flex-start', paddingBottom: 18, paddingHorizontal: 16 },
   buttonSlot: { alignItems: 'center', gap: 8, width: 84 },
   button: { width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center' },
   buttonRing: { position: 'absolute', top: 0, left: 10, width: 64, height: 64, borderRadius: 32, borderWidth: 2, borderColor: '#7CC6FF' },
+  buttonLight: { borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(27,33,80,0.12)', shadowColor: '#1B2150', shadowOpacity: 0.1, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 },
   buttonLabel: { color: 'rgba(255,255,255,0.72)', fontSize: 12.5 },
   ripple: { position: 'absolute', width: 120, height: 120, borderRadius: 60, backgroundColor: '#FFFFFF' },
 });

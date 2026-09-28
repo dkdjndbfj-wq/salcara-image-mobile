@@ -2,6 +2,7 @@ jest.mock('expo/fetch', () => ({ fetch: jest.fn() }));
 jest.mock('../storage/database', () => ({ getSetting: async () => null, setSetting: async () => undefined }));
 
 import { ASR_MODELS, fileUrl, modelSize, recognizerOptions } from '../voice/catalog';
+import { VoiceExchanges } from '../voice/exchanges';
 import { handleRealtimeEvent, realtimeUrl, RealtimeSession, sessionUpdate } from '../voice/realtime';
 import { DEFAULT_VOICE_SETTINGS, parseVoiceSettings } from '../voice/settings';
 import { encodeBase64, streamSpeech, transcribeAudio } from '../voice/speech-api';
@@ -82,8 +83,8 @@ test('realtime: URL, GA session shape and event mapping (GA + beta names)', () =
   // Keys are never sent over plain HTTP / WS.
   expect(() => realtimeUrl('http://10.0.0.2:8080/v1', 'm')).toThrow('HTTPS');
   const update = sessionUpdate({ baseUrl: '', apiKey: '', model: 'gpt-realtime-2.1', voice: 'cedar', instructions: '简短' });
-  expect(update.session.audio.output).toEqual({ format: { type: 'audio/pcm', rate: 24000 }, voice: 'cedar' });
-  expect(update.session.audio.input.turn_detection).toMatchObject({ interrupt_response: true });
+  expect(update.session.audio?.output).toEqual({ format: { type: 'audio/pcm', rate: 24000 }, voice: 'cedar' });
+  expect(update.session.audio?.input?.turn_detection).toMatchObject({ interrupt_response: true });
   const seen: string[] = [];
   const handlers = {
     onAudio: (b: string) => seen.push(`audio:${b}`), onAssistantText: (t: string) => seen.push(`say:${t}`),
@@ -117,4 +118,47 @@ test('realtime session connects with a bearer header and resolves on session.upd
   session.sendAudio('QUJD');
   expect(JSON.parse(sent[1])).toEqual({ type: 'input_audio_buffer.append', audio: 'QUJD' });
   session.close();
+});
+
+test('realtime: user transcripts of beta / DashScope dialects pair with the right answer', async () => {
+  const saved: string[] = [];
+  const log = new VoiceExchanges((user, assistant) => saved.push(`${user}|${assistant}`), 0);
+  const handlers = {
+    onUserTurn: (id: string) => log.userTurn(id),
+    onUserText: (text: string, meta?: { itemId?: string; final?: boolean }) => { log.userText(text, meta); },
+    onAssistantText: (delta: string) => log.assistantText(delta),
+    onResponseDone: () => log.responseDone(),
+  };
+  handleRealtimeEvent({ type: 'input_audio_buffer.committed', item_id: 'u1' }, handlers);
+  handleRealtimeEvent({ type: 'conversation.item.input_audio_transcription.text', item_id: 'u1', text: '今天', stash: '天气' }, handlers);
+  handleRealtimeEvent({ type: 'response.audio_transcript.delta', delta: '晴天' }, handlers);
+  handleRealtimeEvent({ type: 'response.done' }, handlers);
+  // The answer is done but the question's final transcript has not arrived yet.
+  expect(saved).toEqual([]);
+  handleRealtimeEvent({ type: 'input_audio_buffer.committed', item_id: 'u2' }, handlers);
+  handleRealtimeEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'u1', transcript: '今天天气怎么样' }, handlers);
+  expect(saved).toEqual(['今天天气怎么样|晴天']);
+  handleRealtimeEvent({ type: 'response.output_audio_transcript.delta', delta: '好的' }, handlers);
+  handleRealtimeEvent({ type: 'response.done' }, handlers);
+  // No transcript for u2 (service doesn't transcribe): saved after the grace period.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(saved).toEqual(['今天天气怎么样|晴天', '|好的']);
+  // A duplicate final for a saved turn is ignored; beta servers may report it on the item itself.
+  handleRealtimeEvent({ type: 'conversation.item.done', item: { id: 'u1', role: 'user', content: [{ transcript: '重复' }] } }, handlers);
+  expect(saved.length).toBe(2);
+  const qwen = sessionUpdate({ baseUrl: '', apiKey: '', model: 'qwen3-omni-flash-realtime', voice: 'Cherry', instructions: '', protocol: 'qwen' }).session as Record<string, unknown>;
+  expect(qwen.input_audio_transcription).toEqual({ model: 'gummy-realtime-v1' });
+});
+
+test('realtime: id-less transcripts (Gemini) pair with the answer that follows', () => {
+  const saved: string[] = [];
+  const log = new VoiceExchanges((user, assistant) => saved.push(`${user}|${assistant}`), 0);
+  log.userText('你好');
+  log.userText('你好呀');
+  log.assistantText('嗨');
+  log.interrupted();
+  log.userText('再见');
+  log.assistantText('拜拜');
+  log.responseDone();
+  expect(saved).toEqual(['你好呀|嗨……', '再见|拜拜']);
 });

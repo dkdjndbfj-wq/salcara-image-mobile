@@ -43,7 +43,7 @@ export function ModelSelect({ visible, title, value, models, loading = false, er
         ListEmptyComponent={!loading ? <Text style={styles.empty}>{query ? '没有找到匹配的模型' : '没有读取到模型，可以手动填写'}</Text> : <Text style={styles.empty}>正在读取模型…</Text>} />
       <View style={styles.manual}>
         {manual ? <View style={styles.manualBody}>
-          <TextInput accessibilityLabel="自定义模型 ID" value={customModel} onChangeText={setCustomModel} autoFocus placeholder="输入模型 ID" placeholderTextColor={colors.faint} autoCapitalize="none" autoCorrect={false} style={styles.manualInput} />
+          <TextInput accessibilityLabel="自定义模型 ID" value={customModel} onChangeText={setCustomModel} autoFocus placeholder="输入模型 ID" placeholderTextColor={colors.subtle} autoCapitalize="none" autoCorrect={false} style={styles.manualInput} />
           <PrimaryButton label="使用这个模型" disabled={!customModel.trim()} onPress={() => choose(customModel)} />
         </View> : <Pressable accessibilityRole="button" onPress={() => setManual(true)} style={styles.manualToggle}>
           <Icon name="edit" size={17} color={colors.textMuted} />
@@ -60,7 +60,7 @@ const styles = StyleSheet.create({
   search: { flexDirection: 'row', alignItems: 'center', gap: 8, height: 44, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.surfaceStrong },
   searchInput: { flex: 1, height: 44, color: colors.text, fontSize: 15.5, padding: 0 },
   error: { color: colors.warningText, fontSize: 12.5, lineHeight: 18, paddingHorizontal: 6 },
-  list: { flexGrow: 0, maxHeight: 380, marginTop: 4 },
+  list: { flexGrow: 0, flexShrink: 1, maxHeight: 380, marginTop: 4 },
   option: { minHeight: 58, paddingVertical: 10, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 16 },
   selected: { backgroundColor: colors.blueSurface },
   optionTitle: { color: colors.text, fontSize: 15.5, fontWeight: '500' },

@@ -1,0 +1,21 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'top.salcara'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.salcaraactions"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+  sourceSets {
+    main {
+      // Kotlin sources live in a short path (android/kotlin) on purpose.
+      java.srcDirs += ['kotlin']
+    }
+  }
+}

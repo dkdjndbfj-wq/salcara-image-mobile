@@ -15,7 +15,16 @@ export interface GenerateRequest {
   size: string;
   transparent: boolean;
   signal?: AbortSignal;
+  /** An async task submitted earlier for this same job: poll it instead of submitting (and paying) again. */
+  resumeTask?: ImageTaskRef | null;
+  /** Called as soon as the provider answers with an async task, so a later retry can resume it. */
+  onTask?: (task: ImageTaskRef) => void;
 }
+
+export interface ImageTaskRef { id: string; url: string }
+
+/** Error code of a task the provider reported as failed: resuming it is pointless. */
+export const IMAGE_TASK_FAILED = 'image_task_failed';
 
 export interface EditRequest extends GenerateRequest {
   references: ReferenceImage[];
@@ -33,15 +42,20 @@ export class ImageApiError extends Error {
   }
 }
 
+const isGptImage = (model: string) => /gpt-image|chatgpt-image/i.test(model);
+
 export function buildGenerationBody(request: Omit<GenerateRequest, 'baseUrl' | 'apiKey' | 'signal'>) {
   return {
     model: request.model,
     prompt: request.prompt,
-    quality: request.quality,
     size: request.size,
     n: 1,
-    output_format: 'png' as const,
-    ...(request.transparent ? { background: 'transparent' as const } : {}),
+    // quality / output_format / background are GPT Image parameters; other models (DALL·E, Seedream,
+    // Qwen-Image, Flux behind compatible relays) reject or misread them.
+    ...(isGptImage(request.model) ? {
+      quality: request.quality, output_format: 'png' as const,
+      ...(request.transparent ? { background: 'transparent' as const } : {}),
+    } : {}),
   };
 }
 
@@ -49,11 +63,14 @@ export function buildEditFields(request: Omit<EditRequest, 'baseUrl' | 'apiKey' 
   return {
     model: request.model,
     prompt: request.prompt,
-    quality: request.quality,
     size: request.size,
     n: '1',
-    output_format: 'png' as const,
-    ...(request.transparent ? { background: 'transparent' as const } : {}),
+    // quality / output_format / background are GPT Image parameters; other models (DALL·E, Seedream,
+    // Qwen-Image, Flux behind compatible relays) reject or misread them.
+    ...(isGptImage(request.model) ? {
+      quality: request.quality, output_format: 'png' as const,
+      ...(request.transparent ? { background: 'transparent' as const } : {}),
+    } : {}),
   };
 }
 
@@ -97,7 +114,17 @@ export function editImage(request: EditRequest): Promise<string> {
   return withoutKey(request.apiKey, () => editImageUnsafe(request));
 }
 
+/** Resumes a saved task when it still points at this provider. */
+async function resumeImageTask(request: GenerateRequest): Promise<string | null> {
+  const saved = request.resumeTask;
+  const url = saved?.id && saved.url ? resolveSameHostUrl(saved.url, request.baseUrl) : null;
+  if (!saved || !url) return null;
+  return persistApiResult(await pollImageTask({ id: saved.id, url }, request), request.signal);
+}
+
 async function generateImageUnsafe(request: GenerateRequest): Promise<string> {
+  const resumed = await resumeImageTask(request);
+  if (resumed) return resumed;
   const payload = await requestImageApi(imageEndpoint(request.baseUrl, 'images/generations'), {
     method: 'POST',
     headers: {
@@ -113,6 +140,8 @@ async function generateImageUnsafe(request: GenerateRequest): Promise<string> {
 async function editImageUnsafe(request: EditRequest): Promise<string> {
   if (request.references.length === 0) throw new ImageApiError('图片编辑至少需要一张参考图');
   if (request.references.length > 4) throw new ImageApiError('一次最多上传 4 张参考图');
+  const resumed = await resumeImageTask(request);
+  if (resumed) return resumed;
 
   const form = new FormData();
   const fields = buildEditFields(request);
@@ -138,6 +167,7 @@ async function editImageUnsafe(request: EditRequest): Promise<string> {
 async function persistImageResponse(payload: ImageApiResponse | Record<string, unknown>, request: GenerateRequest): Promise<string> {
   const task = asyncTaskFromPayload(payload, request.baseUrl);
   if (!task) return persistApiResult(payload, request.signal);
+  try { request.onTask?.(task); } catch { /* saving the id is best effort */ }
   const completed = await pollImageTask(task, request);
   return persistApiResult(completed, request.signal);
 }
@@ -173,19 +203,36 @@ function resolveSameHostUrl(value: string, baseUrl: string): string | null {
 async function pollImageTask(task: AsyncImageTask, request: GenerateRequest): Promise<ImageApiResponse | Record<string, unknown>> {
   const deadline = Date.now() + 10 * 60_000;
   let waitMs = 2_000;
+  let failures = 0;
   while (Date.now() < deadline) {
     if (request.signal?.aborted) throw new ImageApiError('请求已取消或超时');
     await waitForPoll(waitMs, request.signal);
-    const response = await requestImageApi(task.url, {
-      method: 'GET',
-      headers: authorizationHeaders(request.apiKey),
-      signal: request.signal,
-    });
+    let response: Awaited<ReturnType<typeof requestImageApi>>;
+    try {
+      response = await requestImageApi(task.url, {
+        method: 'GET',
+        headers: authorizationHeaders(request.apiKey),
+        signal: request.signal,
+      });
+      failures = 0;
+    } catch (error) {
+      // Polling is free and the task keeps running: ride out a dropped connection or a busy relay.
+      const status = error instanceof ImageApiError ? error.status : undefined;
+      const transient = !isAbortError(error) && !request.signal?.aborted && (status === undefined || status === 408 || status === 429 || status >= 500);
+      failures += 1;
+      if (!transient || failures > MAX_POLL_FAILURES) {
+        if (isAbortError(error) || request.signal?.aborted) throw error;
+        const detail = error instanceof Error ? error.message : '网络错误';
+        throw new ImageApiError(`查询图片任务 ${task.id} 的进度失败：${detail}。任务可能仍在生成，重试会继续查询这个任务，不会重复提交`, status);
+      }
+      waitMs = Math.min(8_000, waitMs * 2);
+      continue;
+    }
     const record = response && typeof response === 'object' ? response as Record<string, unknown> : {};
     const status = typeof record.status === 'string' ? record.status.toLowerCase() : '';
     if (['failed', 'error', 'cancelled', 'canceled'].includes(status)) {
       const error = record.error && typeof record.error === 'object' ? record.error as Record<string, unknown> : null;
-      throw new ImageApiError(typeof error?.message === 'string' ? error.message : `图片任务 ${task.id} 未完成`);
+      throw new ImageApiError(typeof error?.message === 'string' ? error.message : `图片任务 ${task.id} 未完成`, undefined, IMAGE_TASK_FAILED);
     }
     if (findImagePayload(response) || ['completed', 'succeeded', 'success', 'done'].includes(status)) return response;
     const retryAfter = Number(record.retry_after ?? record.retryAfter);
@@ -193,6 +240,8 @@ async function pollImageTask(task: AsyncImageTask, request: GenerateRequest): Pr
   }
   throw new ImageApiError('图片任务等待超过 10 分钟，已停止轮询。请查看服务商记录后再手动重试');
 }
+
+const MAX_POLL_FAILURES = 4;
 
 function waitForPoll(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {

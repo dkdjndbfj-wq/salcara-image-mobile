@@ -14,7 +14,7 @@ export function useReducedMotion() {
 
 /** Pressable with a springy scale-down, used for every tappable control. */
 export function MotionPressable({ style, children, onPressIn, onPressOut, scaleTo = 0.94, wrapperStyle, ...props }: Omit<PressableProps, 'style' | 'children'> & {
-  style?: StyleProp<ViewStyle>; children?: React.ReactNode; scaleTo?: number; wrapperStyle?: StyleProp<ViewStyle>;
+  style?: StyleProp<ViewStyle> | ((state: { pressed: boolean }) => StyleProp<ViewStyle>); children?: React.ReactNode; scaleTo?: number; wrapperStyle?: StyleProp<ViewStyle>;
 }) {
   const scale = useRef(new Animated.Value(1)).current;
   const reduced = useReducedMotion();

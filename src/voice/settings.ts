@@ -11,9 +11,14 @@ export interface VoiceSettings {
   /** Voice typing in the composer. */
   inputEngine: InputEngine;
   localModel: AsrModelId | null;
-  /** OpenAI-compatible provider used for cloud transcription (null = the chat provider). */
+  /**
+   * Service per function: a chat provider id (OpenAI-compatible), or `svc:<id>` for a speech service.
+   * null = the chat provider when it has an OpenAI-style API.
+   */
   transcribeProviderId: string | null;
   transcribeModel: string;
+  /** Language hint for cloud recognition ('' = let the service detect). */
+  transcribeLanguage: string;
   mirror: DownloadMirror;
   /** Conversation mode. */
   conversationEngine: ConversationEngine;
@@ -31,6 +36,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   localModel: null,
   transcribeProviderId: null,
   transcribeModel: 'gpt-4o-mini-transcribe',
+  transcribeLanguage: '',
   mirror: 'hf-mirror',
   conversationEngine: 'auto',
   realtimeProviderId: null,
@@ -73,6 +79,7 @@ export function parseVoiceSettings(raw: string | null): VoiceSettings {
       localModel: pick('localModel', ['zipformer-bilingual', 'paraformer-bilingual', 'sensevoice', null]),
       transcribeProviderId: pick('transcribeProviderId'),
       transcribeModel: pick('transcribeModel'),
+      transcribeLanguage: typeof value.transcribeLanguage === 'string' ? value.transcribeLanguage.trim().slice(0, 16) : '',
       mirror: pick('mirror', ['huggingface', 'hf-mirror']),
       conversationEngine: pick('conversationEngine', ['auto', 'cascade', 'realtime']),
       realtimeProviderId: pick('realtimeProviderId'),

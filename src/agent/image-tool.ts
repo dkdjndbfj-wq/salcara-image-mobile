@@ -1,4 +1,5 @@
 import type { AspectRatio, ChatApi } from '../domain';
+import { normalizeRatio } from '../image-sizes';
 
 /** What the conversation model decided to draw. */
 export interface ImageToolCall {
@@ -10,11 +11,10 @@ export interface ImageToolCall {
 }
 
 export const IMAGE_TOOL_NAME = 'generate_image';
-const RATIOS: AspectRatio[] = ['1:1', '16:9', '9:16'];
 
-const DESCRIPTION = '生成或编辑一张图片。用户想得到一张图片时调用：画、生成、设计海报/头像/壁纸/插画/封面，或修改、编辑、换背景、换风格、扩图、上色、抠图、"把刚才那张改成……"。只是讨论、分析图片或文件、询问怎么作图、让你写提示词时不要调用。';
+export const IMAGE_TOOL_DESCRIPTION = '生成或编辑一张图片。用户想得到一张图片时调用：画、生成、设计海报/头像/壁纸/插画/封面，或修改、编辑、换背景、换风格、扩图、上色、抠图、"把刚才那张改成……"。只是讨论、分析图片或文件、询问怎么作图、让你写提示词时不要调用。';
 
-const PARAMETERS = {
+export const IMAGE_TOOL_PARAMETERS = {
   type: 'object',
   properties: {
     prompt: {
@@ -28,8 +28,7 @@ const PARAMETERS = {
     },
     aspect_ratio: {
       type: 'string',
-      enum: RATIOS,
-      description: '仅在用户明确要求横版(16:9)、竖版(9:16)或方形(1:1)时填写，否则省略以使用用户默认设置。',
+      description: '画幅，格式“宽:高”，范围 1:3 到 3:1，例如 1:1、3:4、4:3、2:3、9:16、16:9、21:9、3:1。仅在用户明确要求比例或用途（竖版/横版/手机壁纸/电脑壁纸/海报/横幅/长图等）时按用途选最合适的比例；否则省略，使用用户的默认设置。',
     },
     transparent_background: {
       type: 'boolean',
@@ -40,9 +39,9 @@ const PARAMETERS = {
 } as const;
 
 export function imageToolDefinition(api: ChatApi): Record<string, unknown> {
-  if (api === 'anthropic') return { name: IMAGE_TOOL_NAME, description: DESCRIPTION, input_schema: PARAMETERS };
-  if (api === 'responses') return { type: 'function', name: IMAGE_TOOL_NAME, description: DESCRIPTION, parameters: PARAMETERS };
-  return { type: 'function', function: { name: IMAGE_TOOL_NAME, description: DESCRIPTION, parameters: PARAMETERS } };
+  if (api === 'anthropic') return { name: IMAGE_TOOL_NAME, description: IMAGE_TOOL_DESCRIPTION, input_schema: IMAGE_TOOL_PARAMETERS };
+  if (api === 'responses') return { type: 'function', name: IMAGE_TOOL_NAME, description: IMAGE_TOOL_DESCRIPTION, parameters: IMAGE_TOOL_PARAMETERS };
+  return { type: 'function', function: { name: IMAGE_TOOL_NAME, description: IMAGE_TOOL_DESCRIPTION, parameters: IMAGE_TOOL_PARAMETERS } };
 }
 
 /** Accepts either a JSON string (OpenAI) or an object (Claude). */
@@ -65,7 +64,7 @@ export function parseImageToolArguments(raw: unknown): ImageToolCall | null {
   return {
     prompt: prompt.slice(0, 16_000),
     referenceImages: [...new Set(referenceImages)].slice(0, 4),
-    aspectRatio: (RATIOS as string[]).includes(ratio) ? ratio as AspectRatio : null,
+    aspectRatio: ratio && ratio !== 'auto' ? normalizeRatio(ratio) : null,
     transparent: record.transparent_background === true || record.transparent === true,
   };
 }
@@ -95,10 +94,4 @@ export function extractTextToolCall(text: string): { text: string; call: ImageTo
   const last = json.lastIndexOf('}');
   const call = first >= 0 && last > first ? parseImageToolArguments(json.slice(first, last + 1)) : null;
   return { text: text.slice(0, start).trimEnd(), call };
-}
-
-/** While streaming, hide a partially written marker. */
-export function visibleStreamingText(text: string): string {
-  const start = text.indexOf('<<<');
-  return start >= 0 ? text.slice(0, start).trimEnd() : text;
 }

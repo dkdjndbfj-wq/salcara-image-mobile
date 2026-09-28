@@ -22,13 +22,14 @@ jest.mock('expo-crypto', () => {
   return { randomUUID: () => `test-id-${++next}` };
 });
 jest.mock('../api/chat-api', () => ({ runAgentTurn: (...args: unknown[]) => mockAgent(...args) }));
+jest.mock('../agent/web', () => ({ hostOf: (url: string) => url, webSearch: async () => ({ engine: 'test', results: [] }), readWebpage: async () => { throw new Error('offline'); } }));
 jest.mock('../api/image-api', () => ({
   generateImage: (...args: unknown[]) => mockGenerate(...args),
   editImage: (...args: unknown[]) => mockEdit(...args),
   normalizeError: (error: unknown) => error instanceof Error ? error : new Error('请求失败'),
 }));
 jest.mock('../document-inputs', () => ({ validateAttachments: () => undefined }));
-jest.mock('../image-inputs', () => ({ createReferenceFromGenerated: (...args: unknown[]) => mockCopyGenerated(...args) }));
+jest.mock('../image-inputs', () => ({ createReferenceFromGenerated: (...args: unknown[]) => mockCopyGenerated(...args), previewDataUrl: async () => 'data:image/jpeg;base64,AAAA' }));
 jest.mock('expo-keep-awake', () => ({ activateKeepAwakeAsync: async () => undefined, deactivateKeepAwake: async () => undefined }));
 jest.mock('../storage/secure-keys', () => ({ getProviderKey: async () => 'key', deleteProviderKey: async () => undefined }));
 jest.mock('../storage/files', () => ({
@@ -60,6 +61,9 @@ jest.mock('../storage/database', () => ({
   },
   listMessages: async (id: string) => mockMessages.filter((item) => item.conversationId === id),
   insertMessage: async (message: ChatMessage) => { mockMessages.push(message); },
+  listMemories: async () => [],
+  listAgents: async () => [],
+  searchMessages: async () => [],
   updateMessage: async (message: ChatMessage) => {
     if (message.preparedPrompt && message.status === 'pending' && !message.imageUri) mockOrder.push('saved-image-job');
     mockMessages = mockMessages.map((item) => item.id === message.id ? message : item);
@@ -124,7 +128,7 @@ test('the chat model decides to draw; the tool call is saved before the paid ima
   await act(async () => { await app.send({ text: '画一只橘猫，竖版，透明背景' }); });
   const request = mockAgent.mock.calls[0][0];
   expect(request).toMatchObject({ model: 'vision-model', toolMode: 'native', imageAvailable: true, prompt: '画一只橘猫，竖版，透明背景' });
-  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'gpt-image-2', prompt: '竖版橘猫', size: '1152x2048', quality: 'high', transparent: true }));
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'gpt-image-2', prompt: '竖版橘猫', size: '1536x2736', quality: 'high', transparent: true }));
   expect(mockOrder).toEqual(['saved-image-job', 'generate']);
   expect(app.messages[1]).toMatchObject({ status: 'complete', mode: 'generate', text: '好的，我来画。', imageUri: 'file:///cat.png', preparedPrompt: '竖版橘猫', analysisModel: 'vision-model', providerId: 'image' });
 });
@@ -161,7 +165,7 @@ test('retrying a failed drawing repeats only the image call; a failed download o
   mockGenerate.mockRejectedValueOnce(new Error('上游超时'));
   await mount();
   await act(async () => { await app.send({ text: '画灯塔' }); });
-  expect(app.messages[1]).toMatchObject({ status: 'error', error: '上游超时', preparedPrompt: '灯塔' });
+  expect(app.messages[1]).toMatchObject({ status: 'error', error: '绘图服务出错：上游超时', preparedPrompt: '灯塔' });
 
   mockGenerate.mockRejectedValueOnce(new RemoteImageDownloadError('https://cdn.example/lighthouse.png'));
   await act(async () => { await app.retry(app.messages[1]); });
@@ -294,4 +298,82 @@ test('deleting a conversation mid-drawing waits for the run and removes the file
   expect(mockMessages).toHaveLength(0);
   expect(mockDeleteFile).toHaveBeenCalledWith('file:///late.png');
   expect(app.conversations).toHaveLength(0);
+});
+
+test('multi-step turn: the image tool draws inside the loop and the trace is saved with the message', async () => {
+  mockAgent.mockImplementation(async (request: { toolkit: { specs: Array<{ name: string }>; execute: (call: unknown, context: unknown) => Promise<{ content: string }> } }, onText?: (text: string) => void) => {
+    expect(request.toolkit.specs.map((spec) => spec.name)).toContain('generate_image');
+    onText?.('好的，画一只猫。');
+    const result = await request.toolkit.execute({ id: 'c1', name: 'generate_image', input: { prompt: '橘猫', aspect_ratio: '16:9' }, raw: '' }, { step: 0, mode: 'native' });
+    expect(result.content).toContain('图1');
+    return { text: '好的，画一只猫。', imageCall: null, images: new Map(), toolMode: 'native', suggestions: ['换成黑猫'], sources: [], steps: 1 };
+  });
+  mockGenerate.mockImplementation(async () => { mockOrder.push('generate'); return 'file:///cat.png'; });
+  await mount();
+  await act(async () => { await app.send({ text: '画只猫' }); });
+  expect(mockOrder).toEqual(['saved-image-job', 'generate']);
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ prompt: '橘猫', size: '2736x1536' }));
+  const reply = app.messages[1];
+  expect(reply).toMatchObject({ status: 'complete', text: '好的，画一只猫。', imageUri: 'file:///cat.png', preparedPrompt: '橘猫' });
+  expect(reply.agent?.steps.map((step) => [step.kind, step.status])).toEqual([['image', 'done']]);
+  expect(reply.agent?.suggestions).toEqual(['换成黑猫']);
+  expect(mockMessages.find((item) => item.id === reply.id)?.agent?.steps).toHaveLength(1);
+});
+
+test('a failed drawing inside a turn is retried alone and its step then shows as done', async () => {
+  mockAgent.mockImplementation(async (request: { toolkit: { execute: (call: unknown, context: unknown) => Promise<unknown> } }) => {
+    await request.toolkit.execute({ id: 'c1', name: 'generate_image', input: { prompt: '灯塔' }, raw: '' }, { step: 0, mode: 'native' });
+    return { text: '', imageCall: null, images: new Map(), toolMode: 'native', suggestions: [], sources: [], steps: 1 };
+  });
+  mockGenerate.mockRejectedValueOnce(new Error('上游超时')).mockResolvedValueOnce('file:///lighthouse.png');
+  await mount();
+  await act(async () => { await app.send({ text: '画灯塔' }); });
+  expect(app.messages[1]).toMatchObject({ status: 'error', error: '绘图服务出错：上游超时', preparedPrompt: '灯塔' });
+  expect(app.messages[1].agent?.steps[0]).toMatchObject({ kind: 'image', status: 'error' });
+  await act(async () => { await app.retry(app.messages[1]); });
+  expect(mockAgent).toHaveBeenCalledTimes(1);
+  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///lighthouse.png' });
+  expect(app.messages[1].agent?.steps[0]).toMatchObject({ status: 'done' });
+});
+
+test('a redraw that fails keeps the picture the turn already had', async () => {
+  mockAgent.mockImplementation(async (request: { toolkit: { execute: (call: unknown, context: unknown) => Promise<unknown> } }) => {
+    await request.toolkit.execute({ id: 'c1', name: 'generate_image', input: { prompt: '灯塔' }, raw: '' }, { step: 0, mode: 'native' });
+    await request.toolkit.execute({ id: 'c2', name: 'generate_image', input: { prompt: '灯塔，夜景' }, raw: '' }, { step: 1, mode: 'native' });
+    return { text: '', imageCall: null, images: new Map(), toolMode: 'native', suggestions: [], sources: [], steps: 2 };
+  });
+  mockGenerate.mockResolvedValueOnce('file:///first.png').mockRejectedValueOnce(new Error('上游超时'));
+  await mount();
+  await act(async () => { await app.send({ text: '画灯塔' }); });
+  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///first.png', error: null });
+  expect(app.messages[1].agent?.drafts ?? []).toEqual([]);
+});
+
+test('an async image task is saved and resumed on retry instead of submitted again', async () => {
+  mockAgent.mockResolvedValue({ text: '画一下', imageCall: { prompt: '灯塔', referenceImages: [], aspectRatio: null, transparent: false }, images: new Map(), toolMode: 'native' });
+  const task = { id: 'task-1', url: 'https://img.example/v1/images/tasks/task-1' };
+  mockGenerate.mockImplementationOnce(async (request: { onTask?: (value: typeof task) => void }) => { request.onTask?.(task); throw new Error('网络中断'); })
+    .mockResolvedValueOnce('file:///resumed.png');
+  await mount();
+  await act(async () => { await app.send({ text: '画灯塔' }); });
+  expect(app.messages[1]).toMatchObject({ status: 'error' });
+  await act(async () => { await app.retry(app.messages[1]); });
+  expect(mockGenerate).toHaveBeenLastCalledWith(expect.objectContaining({ resumeTask: task }));
+  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///resumed.png' });
+});
+
+test('stopping mid-step marks running steps as stopped; research and agent flags reach the turn', async () => {
+  mockAgent.mockImplementationOnce((request: { signal: AbortSignal; extraInstructions: string[]; toolkit: { maxSteps: number; execute: (call: unknown, context: unknown) => Promise<unknown> } }) => new Promise((_resolve, reject) => {
+    expect(request.extraInstructions.join('\n')).toContain('深度研究');
+    expect(request.toolkit.maxSteps).toBeGreaterThan(8);
+    void request.toolkit.execute({ id: 'p', name: 'update_plan', input: { steps: [{ title: '找资料' }] }, raw: '' }, { step: 0, mode: 'native' });
+    request.signal.addEventListener('abort', () => { const error = new Error('stop'); error.name = 'AbortError'; reject(error); });
+  }));
+  await mount();
+  let pending: Promise<void> = Promise.resolve();
+  await act(async () => { pending = app.send({ text: '研究一下电池技术', research: true }); });
+  await waitFor(() => expect(app.messages[1]?.agent?.plan).toEqual([{ title: '找资料', done: false }]));
+  await act(async () => { app.stop(); await pending; });
+  expect(app.messages[1]).toMatchObject({ status: 'cancelled' });
+  expect(app.messages[1].agent?.research).toBe(true);
 });

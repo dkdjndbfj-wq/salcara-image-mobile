@@ -168,10 +168,15 @@ const SWEEP_MIN_AGE_MS = 24 * 60 * 60 * 1000;
  */
 export function sweepUnreferencedFiles(referencedNames: Set<string>, now = Date.now()): number {
   let removed = 0;
-  for (const directory of [imageDirectory, referenceDirectory, new Directory(Paths.document, 'reference-documents')]) {
+  for (const directory of [imageDirectory, referenceDirectory, new Directory(Paths.document, 'reference-documents'), new Directory(Paths.document, 'generated-files')]) {
     try {
       if (!directory.exists) continue;
       for (const entry of directory.list()) {
+        if (entry instanceof Directory) {
+          // Generated files live in one private folder each (so they keep their readable name).
+          removed += sweepFolder(entry, referencedNames, now);
+          continue;
+        }
         if (!(entry instanceof File)) continue;
         if (referencedNames.has(fileNameOf(entry.uri))) continue;
         const modified = entry.modificationTime;
@@ -185,6 +190,23 @@ export function sweepUnreferencedFiles(referencedNames: Set<string>, now = Date.
     }
   }
   return removed;
+}
+
+function sweepFolder(folder: InstanceType<typeof Directory>, referencedNames: Set<string>, now: number): number {
+  try {
+    const files = folder.list().filter((item): item is File => item instanceof File);
+    const keep = files.some((file) => {
+      if (referencedNames.has(fileNameOf(file.uri))) return true;
+      const modified = file.modificationTime;
+      const modifiedMs = typeof modified === 'number' ? (modified < 1e12 ? modified * 1000 : modified) : null;
+      return modifiedMs === null || now - modifiedMs < SWEEP_MIN_AGE_MS;
+    });
+    if (keep) return 0;
+    folder.delete();
+    return files.length;
+  } catch {
+    return 0;
+  }
 }
 
 export async function saveToGallery(uri: string): Promise<void> {

@@ -23,19 +23,28 @@ export function dismissKeyboardAndBlur() {
 
 export function IconButton({ icon, onPress, label, disabled = false, variant = 'ghost', size = 40, iconSize = 22, color }: {
   icon: IconName; onPress: () => void; label: string; disabled?: boolean;
-  variant?: 'ghost' | 'soft' | 'solid'; size?: number; iconSize?: number; color?: string;
+  variant?: 'ghost' | 'soft' | 'solid' | 'glass'; size?: number; iconSize?: number; color?: string;
 }) {
   const tint = color ?? (variant === 'solid' ? colors.onPrimary : colors.text);
-  return <MotionPressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} scaleTo={0.9}
+  return <MotionPressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} scaleTo={0.88} hitSlop={slopFor(size)}
     onPress={() => { dismissKeyboardAndBlur(); onPress(); }}
-    style={[styles.iconButton, { width: size, height: size, borderRadius: size / 2 }, variant === 'soft' && styles.iconSoft, variant === 'solid' && styles.iconSolid, disabled && styles.disabled]}>
+    style={({ pressed }: { pressed: boolean }) => [styles.iconButton, { width: size, height: size, borderRadius: size / 2 },
+      variant === 'ghost' && pressed && styles.iconPressed, variant === 'soft' && styles.iconSoft, variant === 'glass' && styles.iconGlass,
+      variant === 'solid' && styles.iconSolid, disabled && styles.disabled]}>
+    {variant === 'solid' && <View pointerEvents="none" style={[StyleSheet.absoluteFill, { borderRadius: size / 2, overflow: 'hidden' }]}><BrandFill /><Sheen /></View>}
     <Icon name={icon} size={iconSize} color={tint} />
   </MotionPressable>;
 }
 
-export function Chip({ label, selected = false, onPress, disabled = false }: { label: string; selected?: boolean; onPress: () => void; disabled?: boolean }) {
-  return <MotionPressable accessibilityRole="button" accessibilityState={{ selected, disabled }} disabled={disabled} scaleTo={0.95} onPress={() => { dismissKeyboardAndBlur(); onPress(); }}
+/** Pads small controls out to a 48dp touch target without changing their look. */
+export function slopFor(size: number, target = 48) {
+  return Math.max(0, Math.ceil((target - size) / 2));
+}
+
+export function Chip({ label, selected = false, onPress, disabled = false, icon }: { label: string; selected?: boolean; onPress: () => void; disabled?: boolean; icon?: IconName }) {
+  return <MotionPressable accessibilityRole="button" accessibilityState={{ selected, disabled }} disabled={disabled} scaleTo={0.94} onPress={() => { dismissKeyboardAndBlur(); onPress(); }}
     style={[styles.chip, selected && styles.chipSelected, disabled && styles.disabled]}>
+    {selected ? <View style={styles.chipDot} /> : icon ? <Icon name={icon} size={15} color={colors.textMuted} /> : null}
     <Text style={[styles.chipText, selected && styles.chipTextSelected]} numberOfLines={1}>{label}</Text>
   </MotionPressable>;
 }
@@ -44,17 +53,30 @@ export function PrimaryButton({ label, onPress, loading = false, disabled = fals
   label: string; onPress: () => void; loading?: boolean; disabled?: boolean; icon?: IconName; tone?: 'primary' | 'secondary' | 'danger'; style?: StyleProp<ViewStyle>;
 }) {
   const fg = tone === 'primary' ? colors.onPrimary : tone === 'danger' ? colors.danger : colors.text;
-  return <MotionPressable scaleTo={0.97} accessibilityRole="button" accessibilityState={{ disabled: disabled || loading }} disabled={disabled || loading}
+  return <MotionPressable scaleTo={0.965} accessibilityRole="button" accessibilityState={{ disabled: disabled || loading }} disabled={disabled || loading}
     onPress={() => { dismissKeyboardAndBlur(); onPress(); }}
     style={[styles.button, tone === 'primary' && styles.buttonPrimary, tone === 'secondary' && styles.buttonSecondary, tone === 'danger' && styles.buttonDanger, (disabled || loading) && styles.disabled, style]}>
-    {tone === 'primary' && <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.buttonFill]}><BrandFill /></View>}
+    {tone === 'primary' && <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.buttonFill]}><BrandFill /><Sheen /></View>}
     {loading ? <ActivityIndicator color={fg} /> : icon ? <Icon name={icon} size={19} color={fg} strokeWidth={1.9} /> : null}
     <Text style={[styles.buttonText, { color: fg }]}>{label}</Text>
   </MotionPressable>;
 }
 
+/** A soft highlight on the upper half of filled controls, so they read as lit glass rather than flat paint. */
+export function Sheen({ strength = 0.28 }: { strength?: number }) {
+  return <Svg style={StyleSheet.absoluteFill} width="100%" height="100%" preserveAspectRatio="none" viewBox="0 0 100 100">
+    <Defs>
+      <LinearGradient id="uiSheen" x1="0" y1="0" x2="0" y2="100" gradientUnits="userSpaceOnUse">
+        <Stop offset="0" stopColor="#FFFFFF" stopOpacity={strength} />
+        <Stop offset="0.55" stopColor="#FFFFFF" stopOpacity={0} />
+      </LinearGradient>
+    </Defs>
+    <Rect x="0" y="0" width="100" height="100" fill="url(#uiSheen)" />
+  </Svg>;
+}
+
 /** Brand gradient fill (sky → blue → violet) that stretches to its parent. */
-function BrandFill() {
+export function BrandFill() {
   return <Svg width="100%" height="100%" preserveAspectRatio="none" viewBox="0 0 100 100">
     <Defs>
       <LinearGradient id="brandFill" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
@@ -137,7 +159,7 @@ export function Sheet({ visible, title, subtitle, onClose, children, scroll = tr
           </View>}
           {scroll
             ? <ScrollView style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>{children}</ScrollView>
-            : <View style={styles.body}>{children}</View>}
+            : <View style={[styles.body, page && { flex: 1 }]}>{children}</View>}
           {footer && <View style={[styles.footer, { backgroundColor: bg, paddingBottom: Math.max(insets.bottom, 14) }]}>{footer}</View>}
         </Animated.View>
       </KeyboardAvoidingView>
@@ -155,12 +177,12 @@ export function AppDialog({ visible, title, message, icon, actions, children, di
   const danger = resolved.some((action) => action.tone === 'danger');
   const glyph = normalizeIcon(icon);
   return <Modal visible={mounted} transparent animationType="none" statusBarTranslucent onRequestClose={close}>
-    <View style={styles.dialogBackdrop}>
+    <KeyboardAvoidingView style={styles.dialogBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.scrim, { opacity: progress }]} />
       {dismissible && <Pressable accessible={false} importantForAccessibility="no" style={StyleSheet.absoluteFill} onPress={close} />}
       <Animated.View accessibilityViewIsModal style={[styles.dialog, { opacity: progress, transform: [{ scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] }) }] }]}>
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.dialogContent}>
-          {glyph && <View style={[styles.dialogIcon, danger && { backgroundColor: colors.dangerSurface }]}><Icon name={glyph} size={22} color={danger ? colors.danger : colors.primary} /></View>}
+          {glyph && <View style={[styles.dialogIcon, danger && styles.dialogIconDanger]}><Icon name={glyph} size={24} color={danger ? colors.danger : colors.primary} /></View>}
           <Text style={styles.dialogTitle}>{title}</Text>
           {message ? <Text selectable style={styles.dialogMessage}>{message}</Text> : null}
           {children}
@@ -169,12 +191,13 @@ export function AppDialog({ visible, title, message, icon, actions, children, di
           const tone = action.tone ?? (index === resolved.length - 1 ? 'primary' : 'secondary');
           return <Pressable key={`${action.label}-${index}`} accessibilityRole="button" disabled={action.disabled}
             onPress={() => { dismissKeyboardAndBlur(); action.onPress?.(); }}
-            style={({ pressed }) => [styles.dialogAction, tone === 'primary' && styles.actionPrimary, tone === 'danger' && styles.actionDanger, pressed && { opacity: 0.8 }, action.disabled && styles.disabled]}>
+            style={({ pressed }) => [styles.dialogAction, tone === 'primary' && styles.actionPrimary, tone === 'danger' && styles.actionDanger, pressed && { opacity: 0.82, transform: [{ scale: 0.97 }] }, action.disabled && styles.disabled]}>
+            {tone === 'primary' && <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.buttonFill]}><BrandFill /><Sheen /></View>}
             <Text style={[styles.actionText, (tone === 'primary' || tone === 'danger') && { color: colors.onPrimary }]}>{action.label}</Text>
           </Pressable>;
         })}</View>
       </Animated.View>
-    </View>
+    </KeyboardAvoidingView>
   </Modal>;
 }
 
@@ -199,7 +222,7 @@ export function ListRow({ icon, title, detail, value, onPress, right, danger = f
 }) {
   return <Pressable accessibilityRole={onPress ? 'button' : undefined} disabled={!onPress} onPress={onPress}
     style={({ pressed }) => [styles.row, pressed && { backgroundColor: colors.surfaceStrong }]}>
-    {icon && <Icon name={icon} size={21} color={danger ? colors.danger : colors.textSecondary} />}
+    {icon && <View style={[styles.rowIcon, danger && { backgroundColor: colors.dangerSurface }]}><Icon name={icon} size={18} color={danger ? colors.danger : colors.primary} /></View>}
     <View style={[styles.rowBody, !first && styles.rowDivider]}>
       <View style={{ flex: 1, gap: 2 }}>
         <Text style={[styles.rowTitle, danger && { color: colors.danger }]} numberOfLines={1}>{title}</Text>
@@ -250,24 +273,27 @@ export function ToastHost() {
   }, [toast, progress]);
   if (!toast) return null;
   return <Animated.View pointerEvents="none" style={[styles.toast, { top: insets.top + 10, opacity: progress, transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [-20, 0] }) }, { scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) }] }]}>
-    <Icon name={toast.icon} size={17} color="#FFFFFF" strokeWidth={1.9} />
-    <Text style={styles.toastText}>{toast.text}</Text>
+    <View style={styles.toastIcon}><Icon name={toast.icon} size={15} color="#FFFFFF" strokeWidth={1.9} /></View>
+    <Text style={styles.toastText} numberOfLines={3}>{toast.text}</Text>
   </Animated.View>;
 }
 
 const styles = StyleSheet.create({
   iconButton: { alignItems: 'center', justifyContent: 'center' },
+  iconPressed: { backgroundColor: colors.surfaceStrong },
   iconSoft: { backgroundColor: colors.surfaceStrong },
-  iconSolid: { backgroundColor: colors.primary },
+  iconGlass: { backgroundColor: 'rgba(255,255,255,0.92)', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.soft },
+  iconSolid: { backgroundColor: colors.primary, ...shadow.glow },
   disabled: { opacity: 0.35 },
-  chip: { height: 36, paddingHorizontal: 15, alignItems: 'center', justifyContent: 'center', borderRadius: radius.pill, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
-  chipSelected: { backgroundColor: colors.primarySoft, borderColor: colors.glow },
+  chip: { height: 36, paddingHorizontal: 14, flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', borderRadius: radius.pill, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
+  chipSelected: { backgroundColor: colors.primarySoft, borderColor: 'rgba(61,123,250,0.45)' },
+  chipDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.primary },
   chipText: { color: colors.textSecondary, fontSize: 13.5, fontWeight: '500' },
   chipTextSelected: { color: colors.primaryDeep, fontWeight: '600' },
   button: { minHeight: 52, borderRadius: radius.pill, paddingHorizontal: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  buttonPrimary: { backgroundColor: colors.primary, ...shadow.glow },
+  buttonPrimary: { backgroundColor: colors.primary, ...shadow.glow, shadowOpacity: 0.36, shadowRadius: 18 },
   buttonFill: { borderRadius: radius.pill, overflow: 'hidden' },
-  buttonSecondary: { backgroundColor: colors.surfaceStrong },
+  buttonSecondary: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, ...shadow.soft },
   buttonDanger: { backgroundColor: colors.dangerSurface },
   buttonText: { fontSize: 16, fontWeight: '600', letterSpacing: -0.2 },
   overlay: { flex: 1 },
@@ -276,35 +302,38 @@ const styles = StyleSheet.create({
   sheet: { maxHeight: '92%', flexShrink: 1, minHeight: 180, borderTopLeftRadius: 30, borderTopRightRadius: 30, overflow: 'hidden', ...shadow.float },
   page: { flex: 1, maxHeight: '100%', borderTopLeftRadius: 0, borderTopRightRadius: 0 },
   handleZone: { height: 18, alignItems: 'center', justifyContent: 'flex-end' },
-  handle: { width: 36, height: 5, borderRadius: 3, backgroundColor: colors.tint },
+  handle: { width: 40, height: 5, borderRadius: 3, backgroundColor: '#D9DDEC' },
   header: { minHeight: 54, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 6 },
   pageHeader: { paddingHorizontal: 6, minHeight: 52 },
   headerCenter: { flex: 1, alignItems: 'center' },
-  title: { color: colors.text, fontSize: 17, fontWeight: '600', letterSpacing: -0.2 },
+  title: { color: colors.text, fontSize: 17.5, fontWeight: '700', letterSpacing: -0.3 },
   subtitle: { color: colors.subtle, fontSize: 12, marginTop: 2 },
   scroll: { flexShrink: 1 },
   content: { paddingBottom: 18 },
   body: { flexShrink: 1, paddingBottom: 8 },
   footer: { paddingHorizontal: 20, paddingTop: 10 },
   dialogBackdrop: { flex: 1, padding: 32, justifyContent: 'center', alignItems: 'center' },
-  dialog: { maxHeight: '80%', width: '100%', maxWidth: 360, padding: 24, borderRadius: 28, backgroundColor: colors.card, ...shadow.float },
+  dialog: { maxHeight: '80%', width: '100%', maxWidth: 360, padding: 24, borderRadius: 30, backgroundColor: colors.card, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.float },
   dialogContent: { gap: 8 },
-  dialogIcon: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft, marginBottom: 8 },
+  dialogIcon: { width: 52, height: 52, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft, borderWidth: 1, borderColor: 'rgba(61,123,250,0.18)', marginBottom: 8 },
+  dialogIconDanger: { backgroundColor: colors.dangerSurface, borderColor: 'rgba(229,72,77,0.2)' },
   dialogTitle: { color: colors.text, fontSize: 18, lineHeight: 26, fontWeight: '600', letterSpacing: -0.2 },
   dialogMessage: { color: colors.textMuted, fontSize: 14.5, lineHeight: 22 },
   dialogActions: { marginTop: 22, flexDirection: 'row', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8 },
-  dialogAction: { minHeight: 42, paddingHorizontal: 20, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
+  dialogAction: { minHeight: 44, paddingHorizontal: 22, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', backgroundColor: colors.surfaceStrong },
   actionPrimary: { backgroundColor: colors.primary },
   actionDanger: { backgroundColor: colors.danger },
   actionText: { color: colors.text, fontSize: 14.5, fontWeight: '600' },
-  group: { backgroundColor: colors.surface, borderRadius: 20, overflow: 'hidden' },
-  row: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 14, paddingLeft: 16 },
+  group: { backgroundColor: colors.surface, borderRadius: 22, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  row: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 12, paddingLeft: 14 },
+  rowIcon: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
   rowBody: { flex: 1, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 10, paddingRight: 14, paddingVertical: 10 },
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   rowTitle: { color: colors.text, fontSize: 15.5, fontWeight: '400' },
   rowDetail: { color: colors.subtle, fontSize: 12.5, lineHeight: 17 },
   rowValue: { color: colors.subtle, fontSize: 14, maxWidth: '50%' },
   sectionLabel: { color: colors.subtle, fontSize: 12.5, fontWeight: '500', marginTop: 26, marginBottom: 8, marginLeft: 16 },
-  toast: { position: 'absolute', alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 18, height: 42, borderRadius: radius.pill, backgroundColor: 'rgba(11,18,32,0.92)', ...shadow.float, zIndex: 100 },
-  toastText: { color: '#FFFFFF', fontSize: 14, fontWeight: '500' },
+  toast: { position: 'absolute', alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 9, paddingLeft: 8, paddingRight: 18, paddingVertical: 8, minHeight: 44, maxWidth: '90%', borderRadius: 22, backgroundColor: 'rgba(14,19,37,0.9)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.14)', ...shadow.float, zIndex: 100 },
+  toastIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(124,198,255,0.28)' },
+  toastText: { color: '#FFFFFF', fontSize: 14, fontWeight: '500', flexShrink: 1, lineHeight: 19 },
 });

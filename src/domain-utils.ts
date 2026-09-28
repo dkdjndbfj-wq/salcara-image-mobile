@@ -1,12 +1,6 @@
 import { randomUUID } from 'expo-crypto';
 
-import type { AspectRatio, ChatMessage, Quality, ResolutionTier } from './domain';
-
-export const RESOLUTION_MAP: Record<AspectRatio, Record<ResolutionTier, string>> = {
-  '1:1': { '1K': '1024x1024', '2K': '2048x2048', '4K': '2880x2880' },
-  '16:9': { '1K': '1536x1024', '2K': '2048x1152', '4K': '3840x2160' },
-  '9:16': { '1K': '1024x1536', '2K': '1152x2048', '4K': '2160x3840' },
-};
+import type { ChatMessage, Quality } from './domain';
 
 export const ALL_QUALITIES: Quality[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -39,12 +33,29 @@ export function normalizeBaseUrl(input: string): string {
 
   parsed.hash = '';
   parsed.search = '';
-  let path = parsed.pathname.replace(/\/+$/, '');
-  if (!path.toLowerCase().endsWith('/v1')) {
+  let path = repairVersionPath(parsed.pathname.replace(/\/+$/, ''));
+  // Keep any versioned path as given (/v1, /api/v3, /api/paas/v4, /v1beta/openai, /compatible-mode/v1 …);
+  // only a bare host or an unversioned prefix gets the conventional /v1.
+  if (!path.split('/').some((segment) => /^v\d+[a-z0-9.]*$/i.test(segment))) {
     path = `${path}/v1`.replace(/\/{2,}/g, '/');
   }
   parsed.pathname = path;
   return parsed.toString().replace(/\/$/, '');
+}
+
+/**
+ * Older versions appended /v1 to every address, which broke vendors whose API lives under another
+ * version (火山方舟 /api/v3, 智谱 /api/paas/v4, 千帆 /v2, Gemini /v1beta/openai). Undo that.
+ */
+function repairVersionPath(path: string): string {
+  return /\/v\d+[a-z0-9.]*(\/openai)?\/v1$/i.test(path) && !/\/v1\/v1$/i.test(path) ? path.replace(/\/v1$/i, '') : path;
+}
+
+/** Joins a vendor's own API root and a path without adding anything (HTTPS only). */
+export function joinUrl(base: string, path: string): string {
+  const root = base.trim().replace(/\/+$/, '');
+  if (!/^https:\/\//i.test(root)) throw new Error('API 地址必须使用 HTTPS');
+  return `${root}/${path.replace(/^\/+/, '')}`;
 }
 
 function isLocalHost(hostname: string): boolean {
@@ -61,9 +72,7 @@ export function qualitiesForModel(model: string): Quality[] {
     : ALL_QUALITIES;
 }
 
-export function sizeFor(aspectRatio: AspectRatio, tier: ResolutionTier): string {
-  return RESOLUTION_MAP[aspectRatio][tier];
-}
+export { sizeFor } from './image-sizes';
 
 export function parseImageModels(payload: unknown): string[] {
   if (!payload || typeof payload !== 'object') return [];

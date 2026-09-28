@@ -175,3 +175,11 @@ function normalizeMimeType(mimeType?: string | null, name?: string | null, uri?:
   if (value.includes('.webp')) return 'image/webp';
   return 'image/jpeg';
 }
+
+/** A small JPEG copy (as a data URL) for the model to look at, e.g. to check a generated image. */
+export async function previewDataUrl(uri: string, width = 1024): Promise<string> {
+  const result = await manipulateAsync(uri, [{ resize: { width } }], { compress: 0.8, format: SaveFormat.JPEG, base64: true });
+  try { new File(result.uri).delete(); } catch { /* cache file, best effort */ }
+  if (!result.base64) throw new Error('无法读取生成的图片');
+  return `data:image/jpeg;base64,${result.base64}`;
+}

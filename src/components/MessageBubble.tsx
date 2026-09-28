@@ -3,10 +3,12 @@ import React, { memo, useEffect, useRef, useState } from 'react';
 import { Animated, Easing, Image, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
 
+import type { GeneratedFile, PhoneAction } from '../agent/types';
 import type { ChatMessage } from '../domain';
 import { attachmentKind } from '../document-inputs';
 import type { RequestPhase } from '../state/AppContext';
 import { colors } from '../theme';
+import { ActionCards, AgentActivity, DraftStrip, FileCards, PlanCard, SourcesRow, SuggestionList } from './AgentTrace';
 import { LivingMark } from './Brand';
 import { Icon, type IconName } from './Icon';
 import { MessageContent } from './MessageContent';
@@ -27,6 +29,9 @@ type Props = {
   onFollowUp?: (text: string) => void;
   /** Long-press on the user's own message (copy / edit and resend). */
   onUserMessageAction?: (message: ChatMessage) => void;
+  onRunAction?: (message: ChatMessage, action: PhoneAction) => void;
+  onDismissAction?: (message: ChatMessage, action: PhoneAction) => void;
+  onOpenFile?: (file: GeneratedFile) => void;
 };
 
 /** One-tap ways to keep going after an image, like the big assistants offer. */
@@ -73,19 +78,30 @@ export function FileCard({ name, mimeType, size, onRemove }: { name: string; mim
   </View>;
 }
 
-function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare, onFollowUp }: Props) {
+function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare, onFollowUp, onRunAction, onDismissAction, onOpenFile }: Props) {
   const onRetry = () => retryMessage(message);
   const pending = message.status === 'pending';
   const imageJob = Boolean(message.preparedPrompt) && (message.mode === 'generate' || message.mode === 'edit');
+  const drawing = imageJob && pending && !message.imageUri;
   const text = message.text?.trim() ?? '';
-  const streaming = pending && !imageJob && Boolean(text);
+  const streaming = pending && !drawing && Boolean(text);
   const failed = message.status === 'error' || message.status === 'interrupted';
   const stopped = message.status === 'cancelled';
+  const trace = message.agent;
+  const running = trace?.steps.some((step) => step.status === 'running');
+  const suggestions = trace?.suggestions ?? [];
   return <View style={styles.assistantWrap}>
-    {pending && !text && !imageJob && <Thinking label={phase === 'downloading' ? '正在取回图片' : '正在思考'} />}
-    {text ? <MessageContent text={text} streaming={streaming} /> : null}
-    {imageJob && pending && <DrawingCanvas message={message} seconds={elapsedSeconds} onStop={onStop} downloading={phase === 'downloading'} />}
+    {trace?.plan?.length ? <PlanCard plan={trace.plan} pending={pending} /> : null}
+    {trace?.steps.length ? <AgentActivity trace={trace} pending={pending} /> : null}
+    {pending && !text && !drawing && !running && <Thinking label={phase === 'downloading' ? '正在取回图片' : trace?.research ? '正在研究' : '正在思考'} />}
+    {text ? <MessageContent text={text} streaming={streaming} sources={trace?.sources} /> : null}
+    {drawing && <DrawingCanvas message={message} seconds={elapsedSeconds} onStop={onStop} downloading={phase === 'downloading'} />}
     {message.imageUri ? <ImageResult message={message} fresh={isLast} onPreview={onPreview} /> : null}
+    {trace?.drafts?.length ? <DraftStrip drafts={trace.drafts} onPreview={onPreview} /> : null}
+    {trace?.files?.length && onOpenFile ? <FileCards files={trace.files} onOpen={onOpenFile} /> : null}
+    {trace?.actions?.length ? <ActionCards actions={trace.actions} disabled={pending}
+      onRun={(action) => onRunAction?.(message, action)} onDismiss={(action) => onDismissAction?.(message, action)} /> : null}
+    {trace?.sources?.length && !pending ? <SourcesRow sources={trace.sources} /> : null}
     {failed && <View style={styles.errorCard}>
       <Icon name="alert" size={18} color={colors.danger} />
       <Text selectable style={styles.errorText}>{message.error || '这次没有完成'}</Text>
@@ -93,7 +109,9 @@ function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRe
     </View>}
     {stopped && <View style={styles.stoppedRow}><Text style={styles.stoppedText}>已停止</Text><Pressable accessibilityRole="button" onPress={onRetry} hitSlop={8}><Text style={styles.retryText}>重新生成</Text></Pressable></View>}
     {!pending && !failed && !stopped && <Actions message={message} text={text} emphasized={isLast} onRetry={onRetry} onSave={onSave} onShare={onShare} />}
-    {isLast && message.imageUri && !pending && onFollowUp ? <FollowUps onPick={onFollowUp} /> : null}
+    {isLast && !pending && !failed && !stopped && onFollowUp
+      ? suggestions.length ? <SuggestionList items={suggestions} onPick={onFollowUp} /> : message.imageUri ? <FollowUps onPick={onFollowUp} /> : null
+      : null}
   </View>;
 }
 
@@ -119,13 +137,13 @@ function Actions({ message, text, emphasized, onRetry, onSave, onShare }: { mess
 }
 
 function ActionIcon({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} hitSlop={4} style={({ pressed }) => [styles.actionIcon, pressed && { backgroundColor: colors.surfaceStrong }]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} hitSlop={6} style={({ pressed }) => [styles.actionIcon, pressed && { backgroundColor: colors.surfaceStrong }]}>
     <Icon name={icon} size={18} color={colors.textMuted} />
   </Pressable>;
 }
 
 /** Living brand mark plus a softly pulsing label. */
-function Thinking({ label }: { label: string }) {
+export function Thinking({ label }: { label: string }) {
   const reduced = useReducedMotion();
   const pulse = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -144,7 +162,7 @@ function Thinking({ label }: { label: string }) {
 }
 
 /** Aurora placeholder: soft colour fields drifting while the image is drawn. */
-function DrawingCanvas({ message, seconds, onStop, downloading }: { message: ChatMessage; seconds: number; onStop: () => void; downloading: boolean }) {
+export function DrawingCanvas({ message, seconds, onStop, downloading }: { message: ChatMessage; seconds: number; onStop: () => void; downloading: boolean }) {
   const { width } = useWindowDimensions();
   const reduced = useReducedMotion();
   const drift = useRef(new Animated.Value(0)).current;
@@ -201,7 +219,7 @@ function SoftOrb({ color, size }: { color: string; size: number }) {
  * A finished image "develops" out of the same aurora the drawing canvas showed,
  * with one soft light sweep. Older images just fade in quickly.
  */
-function ImageResult({ message, fresh, onPreview }: { message: ChatMessage; fresh: boolean; onPreview: (uri: string) => void }) {
+export function ImageResult({ message, fresh, onPreview }: { message: ChatMessage; fresh: boolean; onPreview: (uri: string) => void }) {
   const { width } = useWindowDimensions();
   const reduced = useReducedMotion();
   const [ratio, setRatio] = useState(() => ratioFromSize(message.size));

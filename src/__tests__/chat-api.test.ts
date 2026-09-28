@@ -95,14 +95,14 @@ test('includes generated images as legal user input and excludes failed history 
   expect(mockReadBase64).toHaveBeenCalledWith('file:///result.png');
 });
 
-test('caps history at complete pairs and avoids resending duplicate attachment bytes', async () => {
+test('sends every complete pair (no round cap) and avoids resending duplicate attachment bytes', async () => {
   const history: ChatMessage[] = [];
   for (let index = 0; index < 13; index += 1) history.push(
     { ...baseMessage, id: `u${index}`, prompt: `轮次-${index}`, references: [image] },
     { ...baseMessage, id: `a${index}`, role: 'assistant', text: `回复-${index}` },
   );
   const body = await buildChatBody({ ...request, history, references: [image] });
-  expect(JSON.stringify(body)).not.toContain('轮次-0"');
+  expect(JSON.stringify(body)).toContain('轮次-0"');
   expect(JSON.stringify(body)).toContain('轮次-12');
   expect(mockReadBase64.mock.calls.filter(([uri]) => uri === image.uri)).toHaveLength(1);
 });
@@ -115,7 +115,7 @@ test('rejects excessive accumulated history attachments and oversized text befor
     { ...baseMessage, documents: [{ ...pdf, size: 18 * 1024 * 1024 }] },
     { ...baseMessage, role: 'assistant', text: '已读' },
   ], references: [{ ...image, size: 18 * 1024 * 1024 }] })).rejects.toThrow('30MB');
-  await expect(sendChat({ ...request, prompt: '字'.repeat(120_001) })).rejects.toThrow('12 万字符');
+  await expect(sendChat({ ...request, prompt: '字'.repeat(120_001) })).rejects.toThrow('拆成几次发送');
   expect(mockFetch).not.toHaveBeenCalled();
 });
 
@@ -335,7 +335,8 @@ test('a relay that rejects tool definitions is retried once in text-tool mode', 
   expect(result.imageCall?.prompt).toBe('雪山日出');
   const retry = JSON.parse(mockFetch.mock.calls[1][1].body);
   expect(retry.tools).toBeUndefined();
-  expect(retry.messages[0].content).toContain('<<<IMAGE');
+  expect(retry.messages[0].content).toContain('<<<TOOL 工具名');
+  expect(retry.messages[0].content).toContain('- generate_image');
   // Remembered for the session: the next turn goes straight to text mode.
   mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '你好' } }] }]));
   await runAgentTurn({ ...request, prompt: '你好', ...imageTool });
@@ -425,4 +426,55 @@ test('a history PDF that can no longer be rendered does not block the current qu
 test('a failed Responses stream reports the provider error instead of an empty reply', async () => {
   mockFetch.mockResolvedValue(sse([{ type: 'response.failed', response: { error: { message: '内容审核未通过' } } }]));
   await expect(runAgentTurn({ ...request, api: 'responses', toolMode: 'native', imageAvailable: true }, () => undefined)).rejects.toThrow('内容审核未通过');
+});
+
+test('switching to a text-only model mid-conversation drops pictures and retries once, then remembers', async () => {
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'u0', prompt: '看看这张', references: [image] },
+    { ...baseMessage, id: 'a0', role: 'assistant', text: '这是一张参考图' },
+  ];
+  const textOnly = { ...request, model: 'deepseek-chat-textonly' };
+  mockFetch.mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ error: { message: 'unknown variant `image_url`, expected `text`' } }) });
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '好的' } }] }]));
+  const result = await runAgentTurn({ ...textOnly, prompt: '继续', history });
+  expect(result.text).toBe('好的');
+  const retried = mockFetch.mock.calls[1][1].body as string;
+  expect(retried).not.toContain('image_url');
+  expect(retried).toContain('当前模型不支持看图');
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '再次' } }] }]));
+  await runAgentTurn({ ...textOnly, prompt: '再问', history });
+  expect(mockFetch).toHaveBeenCalledTimes(3);
+  expect(mockFetch.mock.calls[2][1].body as string).not.toContain('image_url');
+});
+
+test('reasoning and thought signatures travel back with tool calls', async () => {
+  const toolkit = {
+    specs: [{ name: 'web_search', description: 'search', parameters: { type: 'object', properties: {} } }], maxSteps: 3,
+    execute: async () => ({ content: '结果' }),
+  };
+  mockFetch.mockResolvedValueOnce(sse([
+    { choices: [{ delta: { reasoning_content: '先想一想' } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'web_search', arguments: '{}' }, extra_content: { google: { thought_signature: 'sig' } } }] } }] },
+  ]));
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '完成' } }] }]));
+  await runAgentTurn({ ...request, model: 'deepseek-reasoner', prompt: '查一下', toolMode: 'native', toolkit: toolkit as never });
+  const second = JSON.parse(mockFetch.mock.calls[1][1].body);
+  const assistantTurn = second.messages.find((item: { role: string; tool_calls?: unknown }) => item.role === 'assistant' && item.tool_calls);
+  expect(assistantTurn.reasoning_content).toBe('先想一想');
+  expect(assistantTurn.tool_calls[0].extra_content).toEqual({ google: { thought_signature: 'sig' } });
+});
+
+test('a step cut off mid tool call runs nothing and says why', async () => {
+  const execute = jest.fn(async () => ({ content: '结果' }));
+  const toolkit = { specs: [{ name: 'web_search', description: 'search', parameters: { type: 'object', properties: {} } }], maxSteps: 4, execute };
+  mockFetch.mockReset();
+  mockFetch.mockResolvedValueOnce(sse([
+    { choices: [{ delta: { content: '我查一下' } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'web_search', arguments: '{"query":"很长' } }] }, finish_reason: 'length' }] },
+  ]));
+  const result = await runAgentTurn({ ...request, prompt: '查一下', toolMode: 'native', toolkit: toolkit as never });
+  expect(execute).not.toHaveBeenCalled();
+  expect(mockFetch).toHaveBeenCalledTimes(1);
+  expect(result.text).toContain('我查一下');
+  expect(result.text).toContain('参数不完整');
 });

@@ -1,8 +1,11 @@
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated } from 'react-native';
 
 import { VOICE_INSTRUCTIONS } from '../api/chat-api';
+import { personaPrompt } from '../memorybox/context';
+import { loadMemoryBoxSettings } from '../memorybox/settings';
+import { characterById } from '../memorybox/store';
 import type { ChatMessage } from '../domain';
 import { useApp } from '../state/AppContext';
 import { prettyModel } from '../theme';
@@ -10,16 +13,30 @@ import { modelById, recognizerOptions } from './catalog';
 import { ensureMicPermission, joinText } from './useDictation';
 import { isInstalled, modelDirectory, refreshModels } from './models';
 import { localEngineAvailable, onVoiceEvent, requireVoiceNative, type VoiceNativeModule } from './native';
-import { resolveSpeechProvider, speechCredentials } from './providers';
-import { RealtimeSession } from './realtime';
+import { missingTargetMessage, openRealtime, resolveTarget, synthesize, transcribe, type SpeechTarget } from './engines';
+import { VoiceExchanges } from './exchanges';
+import { levelSetter } from './levels';
+import type { LiveSession } from './realtime';
+import { isServiceRef } from './services';
 import { loadVoiceSettings, type VoiceSettings } from './settings';
-import { streamSpeech, transcribeAudio } from './speech-api';
 import { takeSentences, toSpeakable } from './speech-text';
 
 export type LivePhase = 'connecting' | 'listening' | 'hearing' | 'thinking' | 'speaking' | 'error';
 export type LiveEngine = 'cascade' | 'realtime';
 
 const KEEP_AWAKE_TAG = 'salcara-live';
+/** A cloud recognition or one synthesized sentence that takes longer than this is given up. */
+const TRANSCRIBE_TIMEOUT_MS = 20_000;
+const SYNTHESIZE_TIMEOUT_MS = 30_000;
+
+/** Server / socket failures in words a user can act on. */
+export function realtimeErrorText(message: string): string {
+  if (/\b401\b|unauthori[sz]ed|invalid.{0,12}(api.?key|token)|authentication/i.test(message)) return 'API 密钥无效或没有实时语音权限';
+  if (/\b403\b|forbidden|permission/i.test(message)) return '这个密钥没有使用该实时模型的权限';
+  if (/\b404\b|not.?found|does not exist|model_not_found/i.test(message)) return '找不到这个实时语音模型，请检查模型名称';
+  if (/\b429\b|rate.?limit|quota|insufficient/i.test(message)) return '请求太频繁或额度不足，请稍后再试';
+  return message || '连接出错';
+}
 
 interface Turn {
   since: number;
@@ -35,12 +52,25 @@ interface Turn {
   /** Cloud audio written to the player and not yet reported as drained. */
   awaitingPlayer: boolean;
   playerEnded: boolean;
+  /** Cloud synthesis failed once: the rest of this answer is text only, with a single notice. */
+  ttsFailed: boolean;
 }
 
 /** Thrown when a session was closed while it was still starting. */
 class Superseded extends Error {}
 
 /** Recent text of the open conversation, so a realtime session continues where the chat is. */
+/** Chat space: the realtime model speaks as the character and keeps its core memory in mind. */
+async function realtimePersona(characterId: string | null): Promise<string> {
+  const character = characterById(characterId);
+  if (!character) return '你是 Salcara，用户手机上的 AI 助手。';
+  // Core memory only when the memory box is on for this character.
+  const box = await loadMemoryBoxSettings().catch(() => null);
+  const memoryOn = Boolean(box?.enabled) && character.memoryMode !== 'off';
+  const core = memoryOn ? character.coreMemory.trim() : '';
+  return `${personaPrompt(character)}\n${core ? `你一直记得：${core.slice(0, 1200)}\n` : ''}`;
+}
+
 function conversationContext(messages: ChatMessage[]): string {
   const lines: string[] = [];
   for (const message of messages.slice(-8)) {
@@ -50,6 +80,8 @@ function conversationContext(messages: ChatMessage[]): string {
   const joined = lines.join('\n');
   return joined ? `\n\n此前的对话（供参考）：\n${joined.slice(-1800)}` : '';
 }
+
+const CAPTION_INTERVAL_MS = 100;
 
 export function useVoiceConversation(active: boolean) {
   const app = useApp();
@@ -67,6 +99,29 @@ export function useVoiceConversation(active: boolean) {
   const [syntheticVoice, setSyntheticVoice] = useState(false);
   const micLevel = useRef(new Animated.Value(0)).current;
   const outLevel = useRef(new Animated.Value(0)).current;
+  const setMic = useMemo(() => levelSetter(micLevel), [micLevel]);
+  const setOut = useMemo(() => levelSetter(outLevel), [outLevel]);
+  const captionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingCaption = useRef<string | null>(null);
+  /** Streamed captions render at most ~10 times a second; `now` (clears, new turns) applies at once. */
+  const showAssistant = useCallback((text: string, now = false) => {
+    if (now) {
+      pendingCaption.current = null;
+      if (captionTimer.current) clearTimeout(captionTimer.current);
+      captionTimer.current = null;
+      setAssistantText(text);
+      return;
+    }
+    if (captionTimer.current) { pendingCaption.current = text; return; }
+    setAssistantText(text);
+    const tick = () => {
+      if (pendingCaption.current === null) { captionTimer.current = null; return; }
+      setAssistantText(pendingCaption.current);
+      pendingCaption.current = null;
+      captionTimer.current = setTimeout(tick, CAPTION_INTERVAL_MS);
+    };
+    captionTimer.current = setTimeout(tick, CAPTION_INTERVAL_MS);
+  }, []);
 
   const phaseRef = useRef<LivePhase>('connecting');
   const setPhaseBoth = useCallback((next: LivePhase) => { phaseRef.current = next; setPhase(next); }, []);
@@ -77,12 +132,13 @@ export function useVoiceConversation(active: boolean) {
   const queue = useRef<string[]>([]);
   const pumping = useRef(false);
   const outputRef = useRef<'cloud' | 'system'>('cloud');
-  const ttsCreds = useRef<{ baseUrl: string; apiKey: string } | null>(null);
-  const sttCreds = useRef<{ baseUrl: string; apiKey: string } | null>(null);
+  const ttsTarget = useRef<SpeechTarget | null>(null);
+  const sttTarget = useRef<SpeechTarget | null>(null);
   const utterance = useRef('');
   const submitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const realtime = useRef<RealtimeSession | null>(null);
+  const realtime = useRef<LiveSession | null>(null);
   const realtimeTurn = useRef({ user: '', assistant: '', acceptAudio: true });
+  const exchanges = useRef<VoiceExchanges | null>(null);
   /** Session generation: bumped on teardown so late async steps of an old start stop themselves. */
   const generation = useRef(0);
   const speakSeq = useRef(0);
@@ -123,12 +179,16 @@ export function useVoiceConversation(active: boolean) {
       while (queue.current.length) {
         const turn = turnRef.current;
         if (!turn || turn.aborted) { queue.current = []; break; }
+        if (turn.ttsFailed) { queue.current = []; break; }
         const sentence = queue.current.shift()!;
-        if (outputRef.current === 'system' || !ttsCreds.current) { speakSystem(sentence); continue; }
-        const settings = settingsRef.current!;
+        if (outputRef.current === 'system' || !ttsTarget.current) { speakSystem(sentence); continue; }
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        turn.abort.signal.addEventListener('abort', cancel);
+        const timer = setTimeout(cancel, SYNTHESIZE_TIMEOUT_MS);
         try {
-          await streamSpeech({
-            ...ttsCreds.current, model: settings.ttsModel, voice: settings.ttsVoice, input: sentence, signal: turn.abort.signal,
+          await synthesize(ttsTarget.current, {
+            text: sentence, signal: controller.signal,
             instructions: '用自然、亲切、口语化的语气说话，语速适中。',
             onAudio: (base64) => {
               if (turn.aborted) return;
@@ -139,11 +199,14 @@ export function useVoiceConversation(active: boolean) {
           });
         } catch (caught) {
           if (turn.aborted) break;
-          // Keep talking with the phone's own voice instead of going silent.
-          outputRef.current = 'system';
-          setSyntheticVoice(true);
-          setNotice(`云端语音合成不可用（${caught instanceof Error ? caught.message.slice(0, 40) : '未知错误'}），已改用手机系统语音`);
-          speakSystem(sentence);
+          // The chosen synthesis API failed: say why once and keep the rest of the answer as text on screen.
+          turn.ttsFailed = true;
+          setNotice(controller.signal.aborted ? '语音合成超时，这次回答只显示文字' : `语音合成失败：${caught instanceof Error ? caught.message.slice(0, 80) : '未知错误'}`);
+          queue.current = [];
+          break;
+        } finally {
+          clearTimeout(timer);
+          turn.abort.signal.removeEventListener('abort', cancel);
         }
       }
     } finally {
@@ -161,11 +224,13 @@ export function useVoiceConversation(active: boolean) {
     try { nativeRef.current?.playerStop(); } catch { /* not started */ }
     try { nativeRef.current?.stopSpeaking(); } catch { /* not started */ }
     if (realtime.current) {
+      // Audio of the cancelled answer can still be in flight; drop it until the next answer starts.
+      realtimeTurn.current.acceptAudio = false;
       realtime.current.cancelResponse();
     } else if (appRef.current.busy && !turn?.imageJob) {
       appRef.current.stop();
     }
-    outLevel.setValue(0);
+    setOut(0);
     if (phaseRef.current === 'speaking' || phaseRef.current === 'thinking') setPhaseBoth('listening');
   }, [outLevel, setPhaseBoth]);
 
@@ -186,11 +251,11 @@ export function useVoiceConversation(active: boolean) {
     const previous = turnRef.current;
     if (previous) { previous.aborted = true; previous.abort.abort(); }
     setUserText(clean);
-    setAssistantText('');
+    showAssistant('', true);
     setPhaseBoth('thinking');
     const turn: Turn = {
       since: Date.now(), consumed: 0, final: false, aborted: false, abort: new AbortController(), spoke: false,
-      imageJob: false, speaking: new Set(), awaitingPlayer: false, playerEnded: false,
+      imageJob: false, speaking: new Set(), awaitingPlayer: false, playerEnded: false, ttsFailed: false,
     };
     turnRef.current = turn;
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -226,12 +291,12 @@ export function useVoiceConversation(active: boolean) {
     const imageJob = Boolean(reply.preparedPrompt);
     turn.imageJob = imageJob;
     const final = reply.status !== 'pending' || imageJob;
-    setAssistantText(toSpeakable(raw) || (imageJob ? '正在为你画图…' : ''));
+    showAssistant(toSpeakable(raw) || (imageJob ? '正在为你画图…' : ''));
     if ((reply.status === 'error' || reply.status === 'interrupted') && !raw) setNotice(reply.error ?? '这次没有完成');
     const { sentences, next } = takeSentences(raw, turn.consumed, final, turn.consumed === 0);
     turn.consumed = next;
     if (final && imageJob && !turn.final) sentences.push('图片正在生成，完成后会出现在对话里。');
-    if (sentences.length) { queue.current.push(...sentences); void pump(); }
+    if (sentences.length && !turn.ttsFailed) { queue.current.push(...sentences); void pump(); }
     if (final && !turn.final) { turn.final = true; finishIfDone(); }
   }, [app.messages, engine, finishIfDone, pump]);
 
@@ -247,6 +312,11 @@ export function useVoiceConversation(active: boolean) {
     transcripts.current = [];
     realtime.current?.close();
     realtime.current = null;
+    exchanges.current?.close();
+    exchanges.current = null;
+    if (captionTimer.current) clearTimeout(captionTimer.current);
+    captionTimer.current = null;
+    pendingCaption.current = null;
     const native = nativeRef.current;
     if (native) {
       try { native.cancelCapture(); } catch { /* idle */ }
@@ -256,8 +326,8 @@ export function useVoiceConversation(active: boolean) {
     }
     if (appRef.current.busy && phaseRef.current === 'thinking' && !turn?.imageJob) appRef.current.stop();
     try { void Promise.resolve(deactivateKeepAwake(KEEP_AWAKE_TAG)).catch(() => undefined); } catch { /* not active */ }
-    micLevel.setValue(0);
-    outLevel.setValue(0);
+    setMic(0);
+    setOut(0);
   }, [micLevel, outLevel]);
 
   const startCascade = useCallback(async (native: VoiceNativeModule, settings: VoiceSettings, check: () => void, listen: (off: () => void) => void) => {
@@ -266,19 +336,26 @@ export function useVoiceConversation(active: boolean) {
     await refreshModels();
     check();
     const model = modelById(settings.localModel) ?? null;
-    const local = Boolean(model && isInstalled(model.id) && localEngineAvailable());
-    const sttProvider = resolveSpeechProvider(current.providers, settings.transcribeProviderId, current.chatProvider);
-    if (!local && !sttProvider) throw new Error('需要语音识别：请在“设置 → 语音”下载本地模型，或添加 OpenAI 兼容的服务商');
-    sttCreds.current = !local && sttProvider ? await speechCredentials(sttProvider) : null;
-    const ttsProvider = settings.speechOutput === 'cloud' ? resolveSpeechProvider(current.providers, settings.ttsProviderId, current.chatProvider) : null;
-    ttsCreds.current = ttsProvider ? await speechCredentials(ttsProvider) : null;
+    // Same choice as voice typing: the on-device model only when “本地模型” is picked and ready.
+    const wantsLocal = settings.inputEngine === 'local';
+    const local = Boolean(wantsLocal && model && isInstalled(model.id) && localEngineAvailable());
+    sttTarget.current = local ? null : await resolveTarget('stt', settings.transcribeProviderId, settings.transcribeModel, '', current.providers, current.chatProvider);
+    if (!local && !sttTarget.current) {
+      throw new Error(wantsLocal
+        ? `${localEngineAvailable() ? '本地识别模型还没有下载' : '这台手机不支持本地识别模型'}：请在“设置 → 语音”中${localEngineAvailable() ? '下载模型，或' : ''}为「语音识别」选择一个云端服务`
+        : missingTargetMessage('stt'));
+    }
+    if (wantsLocal && !local) setNotice(`本地识别不可用，已改用 ${sttTarget.current!.label} 云端识别`);
+    ttsTarget.current = settings.speechOutput === 'cloud' ? await resolveTarget('tts', settings.ttsProviderId, settings.ttsModel, settings.ttsVoice, current.providers, current.chatProvider) : null;
+    if (settings.speechOutput === 'cloud' && !ttsTarget.current) throw new Error(`${missingTargetMessage('tts')}，或改用手机系统语音`);
     check();
-    outputRef.current = ttsCreds.current ? 'cloud' : 'system';
+    outputRef.current = ttsTarget.current ? 'cloud' : 'system';
     setSyntheticVoice(outputRef.current === 'system');
     setEngine('cascade');
-    setEngineLabel(`${prettyModel(current.chatProvider.chatModel)} · ${local ? '本地识别' : '云端识别'}`);
+    setEngineLabel([prettyModel(current.chatProvider.chatModel), local ? '本地识别' : sttTarget.current?.label, ttsTarget.current ? ttsTarget.current.label : '系统语音']
+      .filter((item, index, list) => item && list.indexOf(item) === index).join(' · '));
 
-    listen(onVoiceEvent('onPlaybackLevel', ({ level }) => outLevel.setValue(level)));
+    listen(onVoiceEvent('onPlaybackLevel', ({ level }) => setOut(level)));
     listen(onVoiceEvent('onPlaybackDone', ({ interrupted }) => {
       const turn = turnRef.current;
       if (interrupted || !turn) return;
@@ -321,14 +398,26 @@ export function useVoiceConversation(active: boolean) {
     } else {
       listen(onVoiceEvent('onUtterance', ({ uri }) => {
         if (phaseRef.current === 'speaking') { native.deleteFile(uri); return; }
-        const creds = sttCreds.current!;
+        const target = sttTarget.current!;
         const slot = transcripts.current.length;
         transcripts.current.push(null);
         setPhaseBoth('thinking');
-        void transcribeAudio({ ...creds, model: settings.transcribeModel, uri })
-          .then((text) => { transcripts.current[slot] = text; })
-          .catch((caught) => { transcripts.current[slot] = ''; setNotice(caught instanceof Error ? caught.message : '语音识别失败'); })
-          .finally(() => { native.deleteFile(uri); flushTranscripts(); });
+        const mine = generation.current;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TRANSCRIBE_TIMEOUT_MS);
+        void transcribe(target, { uri, language: settings.transcribeLanguage, signal: controller.signal })
+          .then((text) => { if (generation.current === mine) transcripts.current[slot] = text; })
+          .catch((caught) => {
+            if (generation.current !== mine) return;
+            transcripts.current[slot] = '';
+            setNotice(controller.signal.aborted ? '语音识别超时，请再说一次' : caught instanceof Error ? caught.message : '语音识别失败');
+          })
+          .finally(() => {
+            clearTimeout(timer);
+            native.deleteFile(uri);
+            // A closed session's late result must not submit into a new one.
+            if (generation.current === mine) flushTranscripts();
+          });
       }));
     }
     if (outputRef.current === 'cloud') native.playerStart(24000, true);
@@ -339,21 +428,17 @@ export function useVoiceConversation(active: boolean) {
 
   const startRealtime = useCallback(async (native: VoiceNativeModule, settings: VoiceSettings, check: () => void, listen: (off: () => void) => void) => {
     const current = appRef.current;
-    const provider = resolveSpeechProvider(current.providers, settings.realtimeProviderId, current.chatProvider);
-    if (!provider) throw new Error('实时语音需要 OpenAI 兼容且支持 Realtime 的服务商');
-    const creds = await speechCredentials(provider);
+    const target = await resolveTarget('realtime', settings.realtimeProviderId, settings.realtimeModel, settings.realtimeVoice, current.providers, current.chatProvider);
+    if (!target) throw new Error(missingTargetMessage('realtime'));
     check();
     realtimeTurn.current = { user: '', assistant: '', acceptAudio: true };
-    const saveTurn = (suffix = '') => {
-      const { user, assistant } = realtimeTurn.current;
-      realtimeTurn.current.user = '';
-      realtimeTurn.current.assistant = '';
-      if (user || assistant) void appRef.current.recordVoiceExchange(user, assistant ? `${assistant}${suffix}` : '').catch(() => undefined);
-    };
-    const session = new RealtimeSession({
-      ...creds, model: settings.realtimeModel, voice: settings.realtimeVoice, transcribeModel: settings.transcribeModel,
-      instructions: `你是 Salcara，用户手机上的 AI 助手。${VOICE_INSTRUCTIONS}${conversationContext(current.messages)}`,
-    }, {
+    const log = new VoiceExchanges((user, assistant) => { void appRef.current.recordVoiceExchange(user, assistant).catch(() => undefined); });
+    exchanges.current = log;
+    const instructions = `${await realtimePersona(current.activeCharacterId)}${VOICE_INSTRUCTIONS}${conversationContext(current.messages)}`;
+    // The realtime API can only use its own transcription models: pass one only when recognition is set to the same service.
+    const sameService = settings.transcribeProviderId === settings.realtimeProviderId || (!settings.transcribeProviderId && !isServiceRef(settings.realtimeProviderId));
+    const transcribeModel = sameService && /transcribe|whisper|asr/i.test(settings.transcribeModel) ? settings.transcribeModel : undefined;
+    const { session, inputRate } = openRealtime(target, instructions, transcribeModel, {
       onResponseStarted: () => { realtimeTurn.current.acceptAudio = true; },
       onAudio: (base64) => {
         // Audio still in flight from an answer the user talked over is dropped.
@@ -364,26 +449,42 @@ export function useVoiceConversation(active: boolean) {
       onSpeechStarted: () => {
         realtimeTurn.current.acceptAudio = false;
         native.playerStop();
-        outLevel.setValue(0);
+        setOut(0);
         // Keep what was said before the interruption in the conversation.
-        if (realtimeTurn.current.assistant) saveTurn('……');
-        setAssistantText('');
+        log.interrupted();
+        realtimeTurn.current.assistant = '';
+        showAssistant('', true);
         setPhaseBoth('hearing');
       },
       onSpeechStopped: () => setPhaseBoth('thinking'),
-      onUserText: (text) => { realtimeTurn.current.user = text; setUserText(text); },
+      onUserTurn: (itemId) => log.userTurn(itemId),
+      onUserText: (text, meta) => { if (log.userText(text, meta) && text) setUserText(text); },
       onAssistantText: (delta) => {
         if (!realtimeTurn.current.acceptAudio) return;
+        log.assistantText(delta);
         realtimeTurn.current.assistant += delta;
-        setAssistantText(realtimeTurn.current.assistant);
+        showAssistant(realtimeTurn.current.assistant);
       },
       onResponseDone: () => {
         native.playerEnd();
-        if (realtimeTurn.current.acceptAudio) saveTurn();
+        if (realtimeTurn.current.acceptAudio) { log.responseDone(); realtimeTurn.current.assistant = ''; }
         if (phaseRef.current === 'thinking') setPhaseBoth('listening');
       },
-      onError: (message) => setNotice(message),
-      onClose: (reason) => { setError(`实时语音连接已断开：${reason}`); setPhaseBoth('error'); },
+      onError: (message) => {
+        setNotice(realtimeErrorText(message));
+        // A failed answer must not leave the screen stuck on “thinking”.
+        if (phaseRef.current === 'thinking') setPhaseBoth('listening');
+      },
+      onClose: (reason) => {
+        // Nothing to talk to any more: release the microphone, the player and the screen lock.
+        try { native.cancelCapture(); } catch { /* idle */ }
+        try { native.playerStop(); } catch { /* idle */ }
+        try { void Promise.resolve(deactivateKeepAwake(KEEP_AWAKE_TAG)).catch(() => undefined); } catch { /* not active */ }
+        realtime.current = null;
+        log.close();
+        setError(`实时语音连接已断开：${realtimeErrorText(reason)}`);
+        setPhaseBoth('error');
+      },
     });
     try {
       await session.connect();
@@ -394,15 +495,15 @@ export function useVoiceConversation(active: boolean) {
     }
     realtime.current = session;
     setEngine('realtime');
-    setEngineLabel(`实时语音 · ${prettyModel(settings.realtimeModel)}`);
+    setEngineLabel(`实时语音 · ${target.label} · ${prettyModel(target.model)}`);
     setSyntheticVoice(false);
     listen(onVoiceEvent('onPcm', ({ data }) => session.sendAudio(data)));
-    listen(onVoiceEvent('onPlaybackLevel', ({ level }) => outLevel.setValue(level)));
+    listen(onVoiceEvent('onPlaybackLevel', ({ level }) => setOut(level)));
     listen(onVoiceEvent('onPlaybackDone', ({ interrupted }) => {
       if (!interrupted && phaseRef.current === 'speaking') setPhaseBoth('listening');
     }));
     native.playerStart(24000, true);
-    await native.startCapture({ sampleRate: 24000, emitPcm: true, conversation: true, chunkMs: 40 });
+    await native.startCapture({ sampleRate: inputRate, emitPcm: true, conversation: true, chunkMs: 40 });
     check();
     setPhaseBoth('listening');
   }, [outLevel, setPhaseBoth]);
@@ -413,7 +514,7 @@ export function useVoiceConversation(active: boolean) {
     const own: Array<() => void> = [];
     const listen = (off: () => void) => { own.push(off); offs.current.push(off); };
     setPhaseBoth('connecting');
-    setError(null); setNotice(null); setUserText(''); setAssistantText(''); setMuted(false);
+    setError(null); setNotice(null); setUserText(''); showAssistant('', true); setMuted(false);
     try {
       const native = requireVoiceNative();
       nativeRef.current = native;
@@ -424,8 +525,12 @@ export function useVoiceConversation(active: boolean) {
       settingsRef.current = settings;
       // Android pauses the microphone of apps whose screen went off.
       void activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch(() => undefined);
-      listen(onVoiceEvent('onLevel', ({ level }) => micLevel.setValue(level)));
-      listen(onVoiceEvent('onCaptureError', ({ message }) => setNotice(message)));
+      listen(onVoiceEvent('onLevel', ({ level }) => setMic(level)));
+      listen(onVoiceEvent('onCaptureError', ({ message }) => {
+        // The microphone stopped: say so instead of pretending to listen.
+        setError(message || '麦克风已停止工作');
+        setPhaseBoth('error');
+      }));
       const wantsRealtime = settings.conversationEngine === 'realtime' || (settings.conversationEngine === 'auto' && Boolean(settings.realtimeProviderId));
       if (wantsRealtime) {
         try {
@@ -464,7 +569,7 @@ export function useVoiceConversation(active: boolean) {
     setMuted((value) => {
       const next = !value;
       try { nativeRef.current?.setMuted(next); } catch { /* idle */ }
-      if (next) micLevel.setValue(0);
+      if (next) setMic(0);
       return next;
     });
   }, [micLevel]);

@@ -1,4 +1,5 @@
-import { extractTextToolCall, imageToolDefinition, normalizeImageLabel, parseImageToolArguments, visibleStreamingText } from '../agent/image-tool';
+import { extractTextToolCall, imageToolDefinition, normalizeImageLabel, parseImageToolArguments } from '../agent/image-tool';
+import { visibleStreamingText } from '../agent/tools';
 import { createUtf8Decoder, readSse } from '../api/sse';
 
 test('parses tool arguments from JSON strings or objects and normalizes labels', () => {
@@ -6,7 +7,7 @@ test('parses tool arguments from JSON strings or objects and normalizes labels',
     prompt: '海边日落', referenceImages: ['图1', '图2'], aspectRatio: '16:9', transparent: false,
   });
   expect(parseImageToolArguments({ prompt: '贴纸', transparent_background: true, aspect_ratio: '4:3' })).toEqual({
-    prompt: '贴纸', referenceImages: [], aspectRatio: null, transparent: true,
+    prompt: '贴纸', referenceImages: [], aspectRatio: '4:3', transparent: true,
   });
   expect(parseImageToolArguments('{"prompt":""}')).toBeNull();
   expect(parseImageToolArguments('not json')).toBeNull();

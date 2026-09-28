@@ -1,11 +1,19 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
+  ActivityIndicator, BackHandler, FlatList, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { useAgents } from '../agent/agents';
+import type { CustomAgent, GeneratedFile, PhoneAction } from '../agent/types';
+import { MemoryBoxSettingsSheet } from '../companion/MemoryBoxSettingsSheet';
+import { SpaceSwitch } from '../companion/SpaceSwitch';
 import { AboutSheet } from '../components/AboutSheet';
+import { AgentAvatar, AgentsSheet } from '../components/AgentsSheet';
+import { FilePreviewSheet } from '../components/FilePreviewSheet';
+import { PersonalizationSheet } from '../components/PersonalizationSheet';
+import { ToolsSheet } from '../components/ToolsSheet';
 import { AppSettingsSheet } from '../components/AppSettingsSheet';
 import { BrandMark, GradientText, LivingMark } from '../components/Brand';
 import { InspirationGrid, type InspirationItem } from '../components/Inspiration';
@@ -20,6 +28,7 @@ import { ImagePreview } from '../components/ImagePreview';
 import { MaskEditor } from '../components/MaskEditor';
 import { MessageBubble } from '../components/MessageBubble';
 import { ModelSwitcher } from '../components/ModelSwitcher';
+import { Onboarding } from '../components/Onboarding';
 import { NetworkDiagnostics } from '../components/NetworkDiagnostics';
 import { ProviderManager } from '../components/ProviderManager';
 import { Appear, AppDialog, IconButton, MotionPressable, PrimaryButton, Sheet, showToast, ToastHost, dismissKeyboardAndBlur, type DialogAction, type IconName } from '../components/ui';
@@ -28,22 +37,38 @@ import { isImageAttachment, pickAnyFiles, validateAttachments } from '../documen
 import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
 import { pickFromFiles, pickFromGallery, prepareReferenceForMask, prepareReferenceFromAttachment, takePhoto } from '../image-inputs';
 import { useApp, useElapsedSeconds } from '../state/AppContext';
+import { getSetting, setSetting } from '../storage/database';
+import { useVoiceSettings } from '../voice/settings';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
 import { colors, prettyModel, radius, shadow } from '../theme';
 
 type Dialog = { title: string; message: string; actions?: DialogAction[]; icon?: IconName };
 
 /** Quick tools under the inspiration grid. */
-const SUGGESTIONS: { icon: IconName; title: string; hint: string; prompt?: string; action?: 'files' | 'gallery' | 'camera'; draw?: boolean }[] = [
+const SUGGESTIONS: { icon: IconName; title: string; hint: string; prompt?: string; action?: 'files' | 'gallery' | 'camera' | 'research'; draw?: boolean }[] = [
+  { icon: 'telescope', title: '深度研究', hint: '多轮搜索，写成带来源的报告', action: 'research' },
   { icon: 'wand', title: '改一张照片', hint: '换背景、换风格、局部重绘', action: 'gallery', draw: true },
   { icon: 'file', title: '读懂文件', hint: '总结要点、提炼数据', action: 'files' },
   { icon: 'scan', title: '拍照提问', hint: '拍一张照片来问我', action: 'camera' },
   { icon: 'lightbulb', title: '一起想点子', hint: '周末去哪儿玩更有意思', prompt: '帮我策划一个轻松有趣的周末：' },
 ];
 
+const ONBOARDING_KEY = 'onboarding_done';
+
 export function ChatScreen() {
   const app = useApp();
   const revealed = useLaunchRevealed();
+  // First install only: decided once when the app is ready (upgrades with services already set up skip it).
+  const [onboarding, setOnboarding] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!app.ready || onboarding !== null) return;
+    let alive = true;
+    void getSetting(ONBOARDING_KEY).catch(() => '1').then((done) => { if (alive) setOnboarding(!done && app.providers.length === 0); });
+    return () => { alive = false; };
+  }, [app.ready, app.providers.length, onboarding]);
+  const finishOnboarding = useCallback(() => { setOnboarding(false); void setSetting(ONBOARDING_KEY, '1').catch(() => undefined); }, []);
+  const voiceSettings = useVoiceSettings();
+  const voiceReady = Boolean((voiceSettings.inputEngine === 'local' && voiceSettings.localModel) || voiceSettings.transcribeProviderId || voiceSettings.ttsProviderId || voiceSettings.realtimeProviderId);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const inputRef = useRef<TextInput>(null);
   const followRef = useRef(true);
@@ -71,6 +96,14 @@ export function ChatScreen() {
   const [updateToken, setUpdateToken] = useState(0);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
+  const [research, setResearch] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [personalOpen, setPersonalOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [previewFile, setPreviewFile] = useState<GeneratedFile | null>(null);
+  const [memoryBoxOpen, setMemoryBoxOpen] = useState(false);
+  const agents = useAgents();
+  const activeAgent = agents.find((agent) => agent.id === app.activeAgentId) ?? null;
 
   const report = useCallback((title: string, error: unknown, icon: IconName = 'alert') =>
     setDialog({ title, message: error instanceof Error ? error.message : '请稍后再试', icon }), []);
@@ -81,6 +114,12 @@ export function ChatScreen() {
     providers: app.providers, chatProvider: app.chatProvider, onText: setPrompt,
     onError: (error) => report('语音输入没有完成', error, 'mic'),
   });
+  const { state: dictationState, cancel: cancelDictation } = dictation;
+  useEffect(() => {
+    if (dictationState === 'idle') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => { cancelDictation(); return true; });
+    return () => sub.remove();
+  }, [dictationState, cancelDictation]);
   const sendMessage = app.send;
   const followUp = useCallback((text: string) => {
     followRef.current = true;
@@ -94,13 +133,31 @@ export function ChatScreen() {
       { label: '编辑后重新发送', tone: 'primary', onPress: () => { setDialog(null); setPrompt(message.prompt); setTimeout(() => inputRef.current?.focus(), 80); } },
     ],
   }), []);
+  const { runAction: runPhoneAction, dismissAction: dismissPhoneAction, newChat: startChat } = app;
+  const onRunAction = useCallback((message: ChatMessage, action: PhoneAction) => void runPhoneAction(message, action.id).catch((error) => report('操作没有完成', error, 'bolt')), [runPhoneAction, report]);
+  const onDismissAction = useCallback((message: ChatMessage, action: PhoneAction) => void dismissPhoneAction(message, action.id), [dismissPhoneAction]);
+  const startAgent = useCallback((agent: CustomAgent) => {
+    try { dismissKeyboardAndBlur(); startChat(agent.id); } catch (error) { report('稍等一下', error, 'hourglass'); }
+  }, [startChat, report]);
+  const openLive = () => {
+    dismissKeyboardAndBlur();
+    if (app.busy) { showToast('等这条回复完成后再开始 Live', 'hourglass'); return; }
+    if (!app.chatProvider) {
+      setDialog({ title: 'Live 需要对话模型', message: 'Live 语音对话会用你的对话模型来理解和回答。请先在“服务”里添加一个支持对话的服务商。', icon: 'waveform', actions: [
+        { label: '稍后', tone: 'secondary', onPress: () => setDialog(null) },
+        { label: '添加服务', tone: 'primary', onPress: () => { setDialog(null); setProvidersOpen(true); } },
+      ] });
+      return;
+    }
+    setLiveOpen(true);
+  };
   const saveImage = useCallback((uri: string) => void saveToGallery(uri).then(() => showToast('已保存到相册')).catch((error) => report('保存失败', error)), [report]);
   const share = useCallback((uri: string) => void shareImage(uri).catch((error) => report('分享失败', error)), [report]);
 
 
   // Each conversation keeps its own unsent draft (text + attachments), like a mail app.
-  const draftRef = useRef({ prompt, images, documents, maskUri });
-  draftRef.current = { prompt, images, documents, maskUri };
+  const draftRef = useRef({ prompt, images, documents, maskUri, research });
+  draftRef.current = { prompt, images, documents, maskUri, research };
   const drafts = useRef(new Map<string, typeof draftRef.current>());
   const draftKey = useRef(app.activeConversationId ?? 'new');
   useEffect(() => {
@@ -110,7 +167,7 @@ export function ChatScreen() {
     if (next === draftKey.current) return;
     instantScrollRef.current = true;
     const current = draftRef.current;
-    if (current.prompt.trim() || current.images.length || current.documents.length || current.maskUri) drafts.current.set(draftKey.current, current);
+    if (current.prompt.trim() || current.images.length || current.documents.length || current.maskUri || current.research) drafts.current.set(draftKey.current, current);
     else drafts.current.delete(draftKey.current);
     const restored = drafts.current.get(next);
     drafts.current.delete(next);
@@ -119,8 +176,20 @@ export function ChatScreen() {
     setImages(restored?.images ?? []);
     setDocuments(restored?.documents ?? []);
     setMaskUri(restored?.maskUri ?? null);
+    setResearch(restored?.research ?? false);
   }, [app.activeConversationId]);
 
+  // Where the answering model changes mid-conversation, a small divider says who answers from here on.
+  const modelSwitches = useMemo(() => {
+    const switches = new Map<string, string>();
+    let previous: string | null = null;
+    for (const message of app.messages) {
+      if (message.role !== 'assistant' || !message.analysisModel) continue;
+      if (previous && previous !== message.analysisModel) switches.set(message.id, prettyModel(message.analysisModel));
+      previous = message.analysisModel;
+    }
+    return switches;
+  }, [app.messages]);
   if (!app.ready) {
     return <SafeAreaView style={styles.loading}><BrandMark size={64} /></SafeAreaView>;
   }
@@ -186,13 +255,13 @@ export function ChatScreen() {
     if (!app.providers.length) { setProvidersOpen(true); return; }
     const text = prompt.trim();
     if (!text && !images.length && !documents.length) return;
-    const sent = { text, images, documents, maskUri };
+    const sent = { text, images, documents, maskUri, research: research && Boolean(app.chatProvider) };
     followRef.current = true;
     setShowJump(false);
-    setPrompt(''); setImages([]); setDocuments([]); setMaskUri(null);
-    draftRef.current = { prompt: '', images: [], documents: [], maskUri: null };
+    setPrompt(''); setImages([]); setDocuments([]); setMaskUri(null); setResearch(false);
+    draftRef.current = { prompt: '', images: [], documents: [], maskUri: null, research: false };
     void app.send(sent).catch((error) => {
-      setPrompt(text); setImages(sent.images); setDocuments(sent.documents); setMaskUri(sent.maskUri);
+      setPrompt(text); setImages(sent.images); setDocuments(sent.documents); setMaskUri(sent.maskUri); setResearch(sent.research);
       report('没有发送出去', error);
     });
   };
@@ -206,7 +275,14 @@ export function ChatScreen() {
   };
 
 
-  const useSuggestion = (item: typeof SUGGESTIONS[number]) => {
+  const toggleResearch = () => {
+    setAttachOpen(false);
+    if (!app.chatProvider) { report('深度研究需要对话模型', new Error('请先在“服务”里添加一个支持对话的服务商。'), 'telescope'); return; }
+    setResearch((value) => !value);
+    setTimeout(() => inputRef.current?.focus(), 120);
+  };
+  const applySuggestion = (item: typeof SUGGESTIONS[number]) => {
+    if (item.action === 'research') { if (!research) toggleResearch(); else setTimeout(() => inputRef.current?.focus(), 60); return; }
     if (item.action === 'gallery' && item.draw) setPrompt('把这张照片换成');
     if (item.action === 'files') { void addFiles(); return; }
     if (item.action === 'gallery') { void addImages('gallery'); return; }
@@ -214,7 +290,7 @@ export function ChatScreen() {
     setPrompt(item.prompt ?? '');
     setTimeout(() => inputRef.current?.focus(), 60);
   };
-  const useInspiration = (item: InspirationItem) => {
+  const applyInspiration = (item: InspirationItem) => {
     setPrompt(item.prompt);
     setTimeout(() => inputRef.current?.focus(), 60);
   };
@@ -222,8 +298,23 @@ export function ChatScreen() {
   const lastId = app.messages[app.messages.length - 1]?.id;
   const engine = prettyModel(app.chatProvider?.chatModel ?? app.imageProvider?.model);
   const secondary = app.chatProvider && app.imageProvider && app.imageProvider.id !== app.chatProvider.id ? app.imageProvider : undefined;
-  const isDraft = !app.activeConversationId && app.messages.length === 0;
+  const isDraft = !app.activeConversationId && app.messages.length === 0 && !app.activeAgentId;
   const connected = app.providers.length > 0;
+  const covered = drawer || settings || liveOpen || providersOpen || voiceOpen || modelsOpen || agentsOpen || personalOpen || toolsOpen || memoryBoxOpen || about || network;
+  const headerTitle = app.activeConversation?.title || activeAgent?.name || 'Salcara';
+  const headerModel = activeAgent && headerTitle !== activeAgent.name ? [activeAgent.name, engine].filter(Boolean).join(' · ') : engine;
+
+  if (onboarding) {
+    return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
+      <Onboarding key={revealed ? 'shown' : 'intro'} chatProvider={app.chatProvider} imageProvider={app.imageProvider} voiceReady={voiceReady}
+        onConnect={() => setProvidersOpen(true)} onVoice={() => setVoiceOpen(true)} onFinish={finishOnboarding} />
+      <ProviderManager visible={providersOpen} onClose={() => setProvidersOpen(false)} />
+      <VoiceSettingsSheet visible={voiceOpen} onClose={() => setVoiceOpen(false)} />
+      <ToastHost />
+    </SafeAreaView>;
+  }
+
+  if (onboarding === null && !connected) return <View style={styles.screen} />;
 
   if (!connected) {
     return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -236,17 +327,23 @@ export function ChatScreen() {
   return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
     <View style={styles.header}>
       <IconButton icon="menu" label="打开侧边栏" onPress={() => setDrawer(true)} />
-      <MotionPressable scaleTo={0.96} accessibilityRole="button" accessibilityLabel="切换模型" onPress={() => setModelsOpen(true)} wrapperStyle={styles.titleWrap} style={styles.titleButton}>
-        <Text style={styles.title}>Salcara</Text>
-        {engine ? <Text style={styles.engine} numberOfLines={1}>{engine}</Text> : null}
-        <Icon name="chevronRight" size={15} color={colors.subtle} strokeWidth={2} />
+      <SpaceSwitch space="assistant" onSwitch={app.switchSpace} />
+      <MotionPressable scaleTo={0.96} accessibilityRole="button" accessibilityLabel={`${headerTitle}${engine ? `，${engine}` : ''}，切换模型`} onPress={() => setModelsOpen(true)} wrapperStyle={styles.titleWrap} style={styles.titleButton}>
+        {activeAgent ? <AgentAvatar agent={activeAgent} size={24} /> : null}
+        <View style={styles.titleText}>
+          <Text style={styles.title} numberOfLines={1}>{headerTitle}</Text>
+          {headerModel ? <Text style={styles.engine} numberOfLines={1}>{headerModel}</Text> : null}
+        </View>
+        <Icon name="chevronDown" size={14} color={colors.subtle} strokeWidth={2} />
       </MotionPressable>
       <IconButton icon="compose" label="新对话" disabled={isDraft} onPress={newChat} />
     </View>
 
     <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       {app.messages.length === 0
-        ? <Home key={`${app.activeConversationId ?? 'draft'}${revealed ? '' : ':intro'}`} canDraw={Boolean(app.imageProvider)} onSuggestion={useSuggestion} onInspiration={useInspiration} />
+        ? activeAgent
+          ? <AgentHome key={activeAgent.id} agent={activeAgent} onStarter={(text) => { setPrompt(text); setTimeout(() => inputRef.current?.focus(), 60); }} />
+          : <Home key={`${app.activeConversationId ?? 'draft'}${revealed ? '' : ':intro'}`} canDraw={Boolean(app.imageProvider)} agents={agents} onAgent={startAgent} onSuggestion={applySuggestion} onInspiration={applyInspiration} covered={covered} />
         : <View style={{ flex: 1 }}>
           <FlatList
             ref={listRef}
@@ -282,7 +379,11 @@ export function ChatScreen() {
               lastFollowRef.current = now;
               listRef.current?.scrollToEnd({ animated: true });
             }}
-            renderItem={({ item }) => <MessageBubble
+            renderItem={({ item }) => <>{modelSwitches.has(item.id) && <View style={styles.switchRow} accessibilityRole="text">
+              <View style={styles.switchLine} />
+              <Text style={styles.switchText} numberOfLines={1}>以下由 {modelSwitches.get(item.id)} 回答 · 前文已同步</Text>
+              <View style={styles.switchLine} />
+            </View>}<MessageBubble
               message={item}
               phase={item.id === lastId ? app.phase : 'idle'}
               elapsedSeconds={item.id === lastId && item.preparedPrompt ? elapsedSeconds : 0}
@@ -294,7 +395,10 @@ export function ChatScreen() {
               onShare={share}
               onFollowUp={followUp}
               onUserMessageAction={userMessageAction}
-            />}
+              onRunAction={onRunAction}
+              onDismissAction={onDismissAction}
+              onOpenFile={setPreviewFile}
+            /></>}
           />
           {showJump && <Appear style={styles.jumpWrap} distance={6}>
             <MotionPressable accessibilityRole="button" accessibilityLabel="回到底部" onPress={() => { followRef.current = true; setShowJump(false); listRef.current?.scrollToEnd({ animated: true }); }} style={styles.jump}>
@@ -317,12 +421,14 @@ export function ChatScreen() {
         onRemoveImage={removeImage}
         onRemoveDocument={removeDocument}
         onEditMask={() => void openMask()}
-        placeholder={dictation.state !== 'idle' ? '正在听…' : images.length ? '想怎么处理这张图？' : documents.length ? '想从文件里了解什么？' : undefined}
+        placeholder={dictation.state !== 'idle' ? '正在听…' : research ? '想研究什么问题？' : images.length ? '想怎么处理这张图？' : documents.length ? '想从文件里了解什么？' : activeAgent ? `给 ${activeAgent.name} 发消息` : undefined}
+        research={research}
+        onClearResearch={() => setResearch(false)}
         dictation={{
           state: dictation.state, level: dictation.level, startedAt: dictation.startedAt,
           onStart: () => { void dictation.start(prompt); }, onStop: () => { void dictation.stop(); }, onCancel: dictation.cancel,
         }}
-        onOpenLive={app.chatProvider ? () => { dismissKeyboardAndBlur(); setLiveOpen(true); } : undefined}
+        onOpenLive={openLive}
       />
     </KeyboardAvoidingView>
 
@@ -333,12 +439,23 @@ export function ChatScreen() {
         <AttachTile icon="paperclip" label="文件" onPress={() => void addImages('files')} />
       </View>
       <Text style={styles.attachHint}>最多 4 张图片和 4 个文件 · 支持 PDF、Word、Excel、PPT 与代码</Text>
+      <View style={styles.toolRows}>
+        <ToolRow icon="telescope" title="深度研究" detail="先列计划，多轮搜索阅读，写成带来源的报告" active={research} onPress={toggleResearch} />
+        <ToolRow icon="bot" title="智能体" detail={agents.length ? `${agents.length} 个 · 一键切换专属助手` : '创建有专属指令和工具的助手'} onPress={() => { setAttachOpen(false); setAgentsOpen(true); }} />
+      </View>
     </Sheet>
-    <ConversationDrawer visible={drawer} onClose={() => setDrawer(false)} onNewChat={newChat} onOpenSettings={() => setSettings(true)} />
+    <ConversationDrawer visible={drawer} onClose={() => setDrawer(false)} onNewChat={newChat} onOpenSettings={() => setSettings(true)}
+      onOpenAgents={() => setAgentsOpen(true)} onStartAgent={startAgent} />
     <AppSettingsSheet visible={settings} onClose={() => setSettings(false)}
       onOpenProviders={() => setProvidersOpen(true)} onOpenModels={() => setModelsOpen(true)}
       onOpenNetwork={() => setNetwork(true)} onOpenAbout={() => setAbout(true)} onCheckUpdates={() => setUpdateToken((value) => value + 1)}
-      onOpenVoice={() => setVoiceOpen(true)} />
+      onOpenVoice={() => setVoiceOpen(true)} onOpenPersonalization={() => setPersonalOpen(true)} onOpenTools={() => setToolsOpen(true)} onOpenAgents={() => setAgentsOpen(true)}
+      onOpenMemoryBox={() => setMemoryBoxOpen(true)} />
+    <MemoryBoxSettingsSheet visible={memoryBoxOpen} onClose={() => setMemoryBoxOpen(false)} />
+    <PersonalizationSheet visible={personalOpen} onClose={() => setPersonalOpen(false)} />
+    <ToolsSheet visible={toolsOpen} onClose={() => setToolsOpen(false)} />
+    <AgentsSheet visible={agentsOpen} onClose={() => setAgentsOpen(false)} onStart={startAgent} />
+    <FilePreviewSheet file={previewFile} onClose={() => setPreviewFile(null)} />
     <LiveMode visible={liveOpen} paused={voiceOpen} onClose={() => setLiveOpen(false)} onOpenSettings={() => setVoiceOpen(true)} />
     <VoiceSettingsSheet visible={voiceOpen} onClose={() => setVoiceOpen(false)} />
     <ProviderManager visible={providersOpen} onClose={() => setProvidersOpen(false)} />
@@ -363,14 +480,25 @@ function greeting() {
   return hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 13 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
 }
 
-function Home({ canDraw, onSuggestion, onInspiration }: { canDraw: boolean; onSuggestion: (item: typeof SUGGESTIONS[number]) => void; onInspiration: (item: InspirationItem) => void }) {
+function Home({ canDraw, agents, onAgent, onSuggestion, onInspiration, covered = false }: {
+  canDraw: boolean; agents: CustomAgent[]; onAgent: (agent: CustomAgent) => void; covered?: boolean;
+  onSuggestion: (item: typeof SUGGESTIONS[number]) => void; onInspiration: (item: InspirationItem) => void;
+}) {
   const { width } = useWindowDimensions();
   const items = SUGGESTIONS.filter((item) => canDraw || !item.draw);
   return <View style={{ flex: 1 }}>
     <ScrollView contentContainerStyle={styles.home} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
-      <Appear distance={8}><LivingMark size={34} /></Appear>
+      <Appear distance={8}><LivingMark size={34} active={!covered} /></Appear>
       <Appear delay={90} distance={12}><GradientText text={greeting()} fontSize={34} width={Math.min(width - 56, 360)} /></Appear>
       <Appear delay={170} distance={12}><Text style={styles.homeSubtitle}>{canDraw ? '想聊点什么，\n或者让我画点什么？' : '今天想聊点什么？'}</Text></Appear>
+      {agents.length ? <Appear delay={210} distance={10}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.agentChips} style={styles.agentStrip} keyboardShouldPersistTaps="handled">
+          {agents.map((agent) => <MotionPressable key={agent.id} scaleTo={0.95} accessibilityRole="button" accessibilityLabel={`和 ${agent.name} 对话`} onPress={() => onAgent(agent)} style={styles.agentChip}>
+            <AgentAvatar agent={agent} size={24} />
+            <Text style={styles.agentChipText} numberOfLines={1}>{agent.name}</Text>
+          </MotionPressable>)}
+        </ScrollView>
+      </Appear> : null}
       <InspirationGrid canDraw={canDraw} onPick={onInspiration} />
     </ScrollView>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.suggestions} keyboardShouldPersistTaps="handled">
@@ -384,8 +512,35 @@ function Home({ canDraw, onSuggestion, onInspiration }: { canDraw: boolean; onSu
   </View>;
 }
 
+/** Home of a custom agent: who it is and a few ways to start. */
+function AgentHome({ agent, onStarter }: { agent: CustomAgent; onStarter: (text: string) => void }) {
+  return <ScrollView contentContainerStyle={styles.agentHome} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
+    <Appear distance={10}><AgentAvatar agent={agent} size={76} /></Appear>
+    <Appear delay={80} distance={10}><Text style={styles.agentHomeName}>{agent.name}</Text></Appear>
+    {agent.description ? <Appear delay={140} distance={10}><Text style={styles.agentHomeDetail}>{agent.description}</Text></Appear> : null}
+    <View style={styles.starters}>
+      {agent.starters.map((starter, index) => <Appear key={`${index}-${starter}`} delay={200 + index * 60} distance={8}>
+        <MotionPressable scaleTo={0.97} accessibilityRole="button" accessibilityLabel={starter} onPress={() => onStarter(starter)} style={styles.starter}>
+          <Text style={styles.starterText}>{starter}</Text>
+        </MotionPressable>
+      </Appear>)}
+    </View>
+  </ScrollView>;
+}
+
+function ToolRow({ icon, title, detail, active = false, onPress }: { icon: IconName; title: string; detail: string; active?: boolean; onPress: () => void }) {
+  return <MotionPressable scaleTo={0.98} accessibilityRole="button" accessibilityState={{ selected: active }} accessibilityLabel={title} onPress={onPress} style={[styles.toolRow, active && styles.toolRowActive]}>
+    <View style={[styles.toolIcon, active && { backgroundColor: colors.primary }]}><Icon name={icon} size={19} color={active ? '#FFFFFF' : colors.textSecondary} /></View>
+    <View style={{ flex: 1 }}>
+      <Text style={styles.toolTitle}>{title}</Text>
+      <Text style={styles.toolDetail} numberOfLines={1}>{detail}</Text>
+    </View>
+    {active ? <Icon name="check" size={18} color={colors.primary} strokeWidth={2.2} /> : <Icon name="chevronRight" size={17} color={colors.faint} />}
+  </MotionPressable>;
+}
+
 function Welcome({ onStart }: { onStart: () => void }) {
-  return <View style={styles.welcome}>
+  return <ScrollView contentContainerStyle={styles.welcome} showsVerticalScrollIndicator={false}>
     <View style={styles.welcomeCenter}>
       <Appear distance={10}><View style={styles.welcomeHalo}><BrandMark size={104} /></View></Appear>
       <Appear delay={120}><Text style={styles.welcomeTitle}>Salcara</Text></Appear>
@@ -398,7 +553,7 @@ function Welcome({ onStart }: { onStart: () => void }) {
     </View>
     <Appear delay={420}><PrimaryButton label="开始使用" onPress={onStart} /></Appear>
     <Text style={styles.welcomeNote}>需要一个兼容 OpenAI 或 Claude 的 API 服务</Text>
-  </View>;
+  </ScrollView>;
 }
 
 function Feature({ icon, text }: { icon: IconName; text: string }) {
@@ -417,12 +572,16 @@ function AttachTile({ icon, label, onPress }: { icon: IconName; label: string; o
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.canvas },
+  switchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 6, paddingHorizontal: 12 },
+  switchLine: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
+  switchText: { color: colors.subtle, fontSize: 11.5, letterSpacing: 0.2, maxWidth: '70%' },
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.canvas },
   header: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, gap: 4 },
   titleWrap: { flex: 1, flexShrink: 1 },
-  titleButton: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', height: 40, paddingHorizontal: 8, borderRadius: 20 },
-  title: { color: colors.text, fontSize: 18, fontWeight: '600', letterSpacing: -0.3 },
-  engine: { color: colors.subtle, fontSize: 15, flexShrink: 1 },
+  titleButton: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', maxWidth: '100%', minHeight: 44, paddingHorizontal: 8, borderRadius: 20 },
+  titleText: { flexShrink: 1 },
+  title: { color: colors.text, fontSize: 15.5, lineHeight: 20, fontWeight: '600', letterSpacing: -0.3 },
+  engine: { color: colors.subtle, fontSize: 12, lineHeight: 16 },
   body: { flex: 1 },
   messages: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 28, gap: 26, width: '100%', maxWidth: 780, alignSelf: 'center' },
   jumpWrap: { position: 'absolute', bottom: 12, alignSelf: 'center' },
@@ -430,14 +589,30 @@ const styles = StyleSheet.create({
   home: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 20, paddingTop: 24, paddingBottom: 20, gap: 10 },
   homeSubtitle: { color: '#8A90A9', fontSize: 26, lineHeight: 35, fontWeight: '500', letterSpacing: -0.5 },
   suggestions: { paddingHorizontal: 12, gap: 8, paddingBottom: 4 },
-  suggestion: { flexDirection: 'row', alignItems: 'center', gap: 7, height: 40, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.surface },
+  agentStrip: { marginHorizontal: -20, flexGrow: 0, marginTop: 6 },
+  agentChips: { paddingHorizontal: 20, gap: 8 },
+  agentChip: { flexDirection: 'row', alignItems: 'center', gap: 8, height: 38, paddingLeft: 7, paddingRight: 14, borderRadius: 19, backgroundColor: colors.surface, maxWidth: 200 },
+  agentChipText: { color: colors.textSecondary, fontSize: 14, fontWeight: '500', flexShrink: 1 },
+  agentHome: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 28, paddingVertical: 24, gap: 8 },
+  agentHomeName: { color: colors.text, fontSize: 26, fontWeight: '700', letterSpacing: -0.5, marginTop: 10 },
+  agentHomeDetail: { color: colors.textMuted, fontSize: 15, lineHeight: 22, textAlign: 'center' },
+  starters: { alignSelf: 'stretch', gap: 8, marginTop: 18 },
+  starter: { paddingVertical: 13, paddingHorizontal: 16, borderRadius: 18, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card },
+  starterText: { color: colors.textSecondary, fontSize: 14.5, lineHeight: 20 },
+  toolRows: { paddingHorizontal: 18, gap: 8, marginTop: 6, marginBottom: 4 },
+  toolRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, borderRadius: 18, backgroundColor: colors.surface },
+  toolRowActive: { backgroundColor: colors.primarySoft },
+  toolIcon: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card },
+  toolTitle: { color: colors.text, fontSize: 15, fontWeight: '500' },
+  toolDetail: { color: colors.subtle, fontSize: 12.5, marginTop: 2 },
+  suggestion: { flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: 40, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.surface },
   suggestionTitle: { color: colors.textSecondary, fontSize: 13.5, fontWeight: '500' },
   attachRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 18, paddingTop: 8 },
   attachTile: { height: 96, borderRadius: 22, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', gap: 10 },
   attachLabel: { color: colors.text, fontSize: 14, fontWeight: '500' },
   attachHint: { color: colors.subtle, fontSize: 12, textAlign: 'center', marginTop: 16, marginBottom: 6, paddingHorizontal: 24 },
-  welcome: { flex: 1, paddingHorizontal: 24, paddingBottom: 12 },
-  welcomeCenter: { flex: 1, justifyContent: 'center' },
+  welcome: { flexGrow: 1, paddingHorizontal: 24, paddingBottom: 12 },
+  welcomeCenter: { flexGrow: 1, justifyContent: 'center', paddingVertical: 24 },
   welcomeHalo: { width: 104, height: 104, marginBottom: 26 },
   welcomeTitle: { color: colors.text, fontSize: 40, fontWeight: '700', letterSpacing: -1.2 },
   welcomeTagline: { color: colors.textMuted, fontSize: 20, lineHeight: 30, marginTop: 10, letterSpacing: -0.3 },
