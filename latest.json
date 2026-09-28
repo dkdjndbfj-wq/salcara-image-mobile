@@ -1,15 +1,15 @@
 {
-  "version": "1.5.0",
-  "tagName": "v1.5.0",
-  "title": "Salcara AI v1.5.0",
-  "notes": "# Salcara AI v1.5.0\n\nAndroid `versionCode` 为 16，可覆盖安装 v1.3.x，会话、服务商与密钥都会保留。本版包含原计划 v1.4.0 的全部内容。\n\n## 全新体验\n\n- **真正的 Agent**：同一个对话里想聊就聊、想画就画。对话模型通过工具调用自己决定何时画图、改图，说“把刚才那张改成夜景”即可，不再有模式切换和“接着上一张创作”。\n- **语音输入**：输入框新增麦克风，边说边出字。三档本地离线模型——极速 Zipformer、均衡 Paraformer（推荐）、精准 SenseVoice（自带标点，支持中英日韩粤）——可在“设置 → 语音”自由下载、切换、删除，支持国内镜像；也可以使用服务商的云端语音识别。\n- **Live 语音对话**：输入框为空时点右侧的 Live 按钮进入沉浸式语音对话。极光随你的声音起伏、思考时流转、回答时变暖跳动，大字幕实时显示，说话或点按屏幕即可打断。\n  - 分段语音：任意对话模型 + 语音合成（云端或手机系统语音），还能在对话里继续画图，内容保存进会话。\n  - 实时语音模型：OpenAI Realtime（默认 gpt-realtime-2.1），延迟更低；连不上时自动改用分段语音。\n- **全新界面与品牌**：新 Logo（矢量）与开机动画，首页“来点灵感”，图片生成后从极光中“显影”，并可一键“换个风格 / 改成横版 / 再来一张 / 加点细节”。\n- **多个对话同时进行**：一个对话在画图时，可以切到别的对话或新建对话继续聊；侧边栏用呼吸圆点标出进行中的对话。\n- 长按自己的消息可以复制或编辑后重新发送；回答里的网址可以直接点开；回复进行中也能继续添加附件。\n\n## 更稳、更省\n\n- **不会重复扣费**：生图请求只有在确定没有发出（域名解析、连接失败）时才会换一条线路重试；连接中途断开不再自动重发，避免同一张图付两次钱。\n- **删除服务商不再删除对话**：旧版本删除最后一个服务商会连带删除全部会话，现已修复，升级时自动迁移数据库。\n- 等待超时（10 分钟）会明确提示“图片可能仍在服务商处生成”，不再显示成“已停止”。\n- 生成中被关闭的应用：已经写出的文字会保留。\n- 重新生成图片、删除进行中的对话、废弃的草稿附件都不会再留下占用空间的文件；启动时自动清理无人引用的旧文件。\n- 切换对话时草稿（文字和附件）按对话保留，切回来还在。\n- 流式输出更可靠、更顺滑；追问同一份 PDF / Office 文件时复用已解析内容，不再每轮重新处理。\n- 通知提示在弹窗和图片预览上方也能看到；涂抹区域重新打开会保留；“拍照提问”直接打开相机；设置子页面返回回到设置。\n\n## 权限\n\n新增麦克风权限，只在语音输入和 Live 对话时使用。本地模型的声音只在手机上处理；使用云端语音时，录音只发送给你选择的服务商。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.5.0",
-  "publishedAt": "2026-09-26T19:05:20Z",
+  "version": "1.6.0",
+  "tagName": "v1.6.0",
+  "title": "Salcara AI v1.6.0",
+  "notes": "# Salcara AI v1.6.0\n\nAndroid `versionCode` 为 17，可直接覆盖安装 v1.5.0。服务商、密钥、会话和本地图片会保留。\n\n## 聊天空间与记忆匣\n\n- 新增独立的“聊天”空间，可创建角色并持续对话；与助手空间的会话分开保存。\n- 每个角色有自己的分层对话记忆和记忆匣，支持查看、搜索、编辑、删除及导出为 Obsidian Markdown。\n- 角色可按设置使用对话、图片、联网和 Live 语音能力；记忆整理可单独配置或关闭。\n\n## 更多模型与工具\n\n- 新增可配置的智能体、工具箱和工具调用步骤展示；支持按需配置工具、搜索与文件能力。\n- 增加语音服务商与协议选项，语音识别、语音合成和实时语音可分别配置。\n- 增加自定义图片画幅。除常用比例外，可输入比例或宽高；使用前会按模型允许的尺寸规则校验。\n- 增加更多文件预览、个人化设置和 Live 界面资源。\n\n## 兼容性与修复\n\n- 保留 v1.5.0 的服务商、密钥、会话和图片，可覆盖安装升级。\n- 修复语音供应商测试中的 Jest mock 初始化问题，并通过类型检查和自动化测试。\n\n## 权限\n\n语音功能按需使用麦克风。手机操作功能只有在用户确认相应卡片后才会调用 Android 系统功能。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.6.0",
+  "publishedAt": "2026-09-28T16:42:14Z",
   "apk": {
-    "name": "salcara-image-android-v1.5.0.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.5.0/salcara-image-android-v1.5.0.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/591265282",
-    "size": 129102338,
-    "digest": "sha256:45c0e9dda7eda6211dc82b9fc94b9f663406314692670ec8ab1ce018662b464d"
+    "name": "salcara-image-android-v1.6.0.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.6.0/salcara-image-android-v1.6.0.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/595888331",
+    "size": 130951560,
+    "digest": "sha256:9f45e3acee13eb4587202bc11fe1dfb805e35c9aa88f95f5be47f55db260d621"
   }
 }
