@@ -10,7 +10,7 @@ import { searchMessages } from '../storage/database';
 import { formatNote } from './context';
 import { writeMemory } from './pipeline';
 import { retrieve } from './search';
-import { embedTexts, type MemoryBoxSettings } from './settings';
+import { embeddingModelOf, embedTexts, type MemoryBoxSettings } from './settings';
 import { loadBox, updateCharacter } from './store';
 import type { Character } from './types';
 
@@ -57,8 +57,8 @@ export async function createCompanionToolbox(options: {
         if (!input) return { content: '参数不是有效的 JSON。' };
         const query = text(input.query);
         const box = await loadBox(character.id);
-        const vectors = await embedTexts(options.embeddings, options.boxSettings.embeddingModel, [query], context.signal);
-        const hits = retrieve(box.notes, box.links, { query, queryEmbedding: vectors?.[0], embeddingModel: options.boxSettings.embeddingModel, limit: 8, includeEpisodes: true, includeOutdated: true });
+        const vectors = await embedTexts(options.embeddings, embeddingModelOf(options.embeddings), [query], context.signal);
+        const hits = retrieve(box.notes, box.links, { query, queryEmbedding: vectors?.[0], embeddingModel: embeddingModelOf(options.embeddings), limit: 8, includeEpisodes: true, includeOutdated: true });
         step('recall', `回想：${query.slice(0, 24)}`, hits.length ? `想起 ${hits.length} 件事` : '没有找到');
         addRecalled(hits.map((hit) => ({ id: hit.note.id, title: hit.note.title })));
         return { content: hits.length ? hits.map((hit) => formatNote(hit.note)).join('\n') : '记忆匣里没有找到相关的事。' };

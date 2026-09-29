@@ -25,6 +25,7 @@ import { isPoke, POKE_PREFIX, pokeText, rainFor, setReaction, useReactions } fro
 import { CharacterSheet } from './CharacterSheet';
 import { CompanionMessage, useTaps } from './CompanionMessage';
 import { MemoryBoxSettingsSheet } from './MemoryBoxSettingsSheet';
+import { SettingsCenter } from '../components/SettingsCenter';
 import { MemoryCanvas } from './MemoryCanvas';
 import { SpaceSwitch } from './SpaceSwitch';
 import { warm } from './theme';
@@ -38,6 +39,7 @@ export function CompanionScreen() {
   const character = characters.find((item) => item.id === app.activeCharacterId) ?? null;
   const [sheet, setSheet] = useState<{ id: string | null } | null>(null);
   const [boxSettings, setBoxSettings] = useState(false);
+  const [settings, setSettings] = useState(false);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const report = useCallback((title: string, error: unknown) => setDialog({ title, message: error instanceof Error ? error.message : '请稍后再试', icon: 'alert' }), []);
   const open = useCallback((id: string) => { void app.openCharacter(id).catch((error) => report('打不开这个聊天', error)); }, [app, report]);
@@ -54,10 +56,11 @@ export function CompanionScreen() {
 
   return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
     {character
-      ? <Thread key={character.id} character={character} covered={Boolean(sheet || boxSettings || dialog)} onEdit={() => setSheet({ id: character.id })} report={report} />
-      : <CharacterList characters={characters} onOpen={open} onCreate={() => setSheet({ id: null })} onSettings={() => setBoxSettings(true)} />}
+      ? <Thread key={character.id} character={character} covered={Boolean(sheet || boxSettings || dialog || settings)} onEdit={() => setSheet({ id: character.id })} report={report} />
+      : <CharacterList characters={characters} onOpen={open} onCreate={() => setSheet({ id: null })} onSettings={() => setBoxSettings(true)} onAppSettings={() => setSettings(true)} />}
     <CharacterSheet visible={Boolean(sheet)} characterId={sheet?.id ?? null} onClose={() => setSheet(null)} onCreated={(created) => open(created.id)} />
     <MemoryBoxSettingsSheet visible={boxSettings} onClose={() => setBoxSettings(false)} />
+    <SettingsCenter visible={settings} onClose={() => setSettings(false)} />
     <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} icon={dialog?.icon} actions={dialog?.actions} onClose={() => setDialog(null)} />
     <ToastHost />
   </SafeAreaView>;
@@ -75,7 +78,7 @@ function relativeTime(time: number) {
   return `${date.getMonth() + 1}/${date.getDate()}`;
 }
 
-function CharacterList({ characters, onOpen, onCreate, onSettings }: { characters: Character[]; onOpen: (id: string) => void; onCreate: () => void; onSettings: () => void }) {
+function CharacterList({ characters, onOpen, onCreate, onSettings, onAppSettings }: { characters: Character[]; onOpen: (id: string) => void; onCreate: () => void; onSettings: () => void; onAppSettings: () => void }) {
   const app = useApp();
   const [previews, setPreviews] = useState<Record<string, string>>({});
   // Reload only when a thread actually changed, not on every character update (memory work touches them often).
@@ -116,13 +119,14 @@ function CharacterList({ characters, onOpen, onCreate, onSettings }: { character
       <View style={{ flex: 1 }} />
       <Pressable accessibilityRole="button" accessibilityLabel="记忆匣设置" hitSlop={6} onPress={onSettings} style={styles.headerIcon}><Icon name="memory" size={21} color={warm.text} /></Pressable>
       <Pressable accessibilityRole="button" accessibilityLabel="新的聊天伙伴" hitSlop={6} onPress={onCreate} style={styles.headerIcon}><Icon name="plus" size={22} color={warm.text} /></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="设置" hitSlop={6} onPress={onAppSettings} style={styles.headerIcon}><Icon name="settings" size={21} color={warm.text} /></Pressable>
     </View>
     <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
       <Appear distance={10}><Text style={styles.bigTitle}>聊天</Text></Appear>
       <Appear delay={60} distance={10}><Text style={styles.subtitle}>和记得你的伙伴聊聊。每个角色都有自己的记忆匣，聊多久都不会忘。</Text></Appear>
       {!app.chatProvider ? <View style={styles.notice}>
         <Icon name="info" size={16} color={warm.accentDeep} />
-        <Text style={styles.noticeText}>先在“助手 → 设置 → 服务”里添加一个对话模型，就可以开始聊天了。</Text>
+        <Text style={styles.noticeText} onPress={onAppSettings}>先点右上角“设置 → API 管理”添加一个 API，就可以开始聊天了。</Text>
       </View> : null}
       {characters.map((item, index) => <Appear key={item.id} delay={100 + Math.min(index, 8) * 40} distance={8}>
         <MotionPressable scaleTo={0.98} accessibilityRole="button" accessibilityLabel={`和 ${item.name} 聊天`} onPress={() => onOpen(item.id)} style={styles.card}>
@@ -260,7 +264,7 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
   const openLive = () => {
     dismissKeyboardAndBlur();
     if (app.busy) { showToast('等 TA 说完再开始 Live', 'hourglass'); return; }
-    if (!app.chatProvider) { report('Live 需要对话模型', new Error('请先在助手空间的“设置 → 服务”添加一个对话服务商。')); return; }
+    if (!app.chatProvider) { report('Live 需要对话模型', new Error('请先在“设置 → API 管理”添加一个能对话的 API。')); return; }
     setLive(true);
   };
   const subtitle = status.state === 'working' ? '正在整理记忆…' : app.busy ? '正在输入…' : character.relationship || '在线';

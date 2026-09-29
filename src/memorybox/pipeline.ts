@@ -3,7 +3,7 @@ import { useSyncExternalStore } from 'react';
 import { rejectsMemory } from '../agent/memory';
 import type { ChatMessage, ProviderProfile } from '../domain';
 import { listMessagesBetween } from '../storage/database';
-import { embeddingProvider, embedTexts, loadMemoryBoxSettings, type MemoryBoxSettings } from './settings';
+import { embeddingModelOf, embeddingProvider, embedTexts, loadMemoryBoxSettings, type MemoryBoxSettings } from './settings';
 import { retrieve } from './search';
 import { addLinks, loadBox, loadCharacters, newNote, patchNotes, putNotes, removeOrphans, updateCharacter, updateNote } from './store';
 import { NOTE_TYPES, type Character, type MemNote, type NoteType } from './types';
@@ -287,16 +287,16 @@ async function embedMissing(owner: string, settings: MemoryBoxSettings): Promise
   const provider = embeddingProvider(env.providers(), settings, env.chatProvider());
   if (!provider) return;
   const box = await loadBox(owner);
-  const missing = box.notes.filter((note) => !note.embedding || note.embeddingModel !== settings.embeddingModel).slice(0, 64);
+  const missing = box.notes.filter((note) => !note.embedding || note.embeddingModel !== embeddingModelOf(provider)).slice(0, 64);
   for (let start = 0; start < missing.length; start += 32) {
     const chunk = missing.slice(start, start + 32);
-    const vectors = await embedTexts(provider, settings.embeddingModel, chunk.map((note) => `${note.title}\n${note.content}`));
+    const vectors = await embedTexts(provider, embeddingModelOf(provider), chunk.map((note) => `${note.title}\n${note.content}`));
     if (!vectors) return;
     // Only the vector columns: the note may have been edited while the request ran (an edit clears the vector again).
     const latest = new Map((await loadBox(owner)).notes.map((note) => [note.id, note]));
     await patchNotes(owner, chunk.flatMap((note, index) => {
       const now = latest.get(note.id);
-      return now && now.title === note.title && now.content === note.content ? [{ id: note.id, patch: { embedding: vectors[index], embeddingModel: settings.embeddingModel, updatedAt: now.updatedAt } }] : [];
+      return now && now.title === note.title && now.content === note.content ? [{ id: note.id, patch: { embedding: vectors[index], embeddingModel: embeddingModelOf(provider), updatedAt: now.updatedAt } }] : [];
     }));
   }
 }
@@ -427,8 +427,8 @@ export async function writeMemory(characterId: string, input: { title: string; c
   if (env) {
     const settings = await loadMemoryBoxSettings();
     const provider = embeddingProvider(env.providers(), settings, env.chatProvider());
-    const vectors = await embedTexts(provider, settings.embeddingModel, [`${note.title}\n${note.content}`]);
-    if (vectors) await patchNotes(characterId, [{ id: note.id, patch: { embedding: vectors[0], embeddingModel: settings.embeddingModel, updatedAt: note.updatedAt } }]);
+    const vectors = await embedTexts(provider, embeddingModelOf(provider), [`${note.title}\n${note.content}`]);
+    if (vectors) await patchNotes(characterId, [{ id: note.id, patch: { embedding: vectors[0], embeddingModel: embeddingModelOf(provider), updatedAt: note.updatedAt } }]);
   }
   return note;
 }

@@ -19,7 +19,7 @@ export const IMAGE_TOOL_PARAMETERS = {
   properties: {
     prompt: {
       type: 'string',
-      description: '交给图片模型的完整作图描述：主体、构图、风格、光线、配色、画面中需要出现的文字（原文放在引号里）。编辑图片时写清楚改什么、保留什么。可以结合对话和附件资料补全细节。',
+      description: '交给图片模型的作图要求，按系统说明书写（默认是用户原话，不扩写）。画面中需要出现的文字用引号保留原文。'
     },
     reference_images: {
       type: 'array',

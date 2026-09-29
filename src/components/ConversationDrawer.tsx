@@ -8,7 +8,6 @@ import type { Conversation } from '../domain';
 import { searchMessages } from '../storage/database';
 import { useApp } from '../state/AppContext';
 import { colors, prettyModel, radius, shadow } from '../theme';
-import { AgentAvatar } from './AgentsSheet';
 import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { AppDialog, dismissKeyboardAndBlur, MotionPressable, useReducedMotion, type DialogAction } from './ui';
@@ -109,15 +108,6 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
             <Pressable accessibilityRole="button" accessibilityLabel="开始新对话" onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={({ pressed }) => [styles.brandRow, pressed && { backgroundColor: colors.surface }]}>
               <BrandMark size={30} />
               <Text style={styles.brand}>Salcara</Text>
-            </Pressable>
-            {agents.slice(0, 3).map((agent) => <Pressable key={agent.id} accessibilityRole="button" accessibilityLabel={`和 ${agent.name} 对话`}
-              onPress={() => { dismissKeyboardAndBlur(); onClose(); onStartAgent(agent); }} style={({ pressed }) => [styles.agentRow, pressed && { backgroundColor: colors.surface }]}>
-              <AgentAvatar agent={agent} size={30} />
-              <Text style={styles.agentName} numberOfLines={1}>{agent.name}</Text>
-            </Pressable>)}
-            <Pressable accessibilityRole="button" accessibilityLabel="智能体" onPress={() => { dismissKeyboardAndBlur(); onClose(); onOpenAgents(); }} style={({ pressed }) => [styles.agentRow, pressed && { backgroundColor: colors.surface }]}>
-              <View style={styles.agentIcon}><Icon name="bot" size={17} color={colors.textSecondary} /></View>
-              <Text style={styles.agentName}>{agents.length ? '全部智能体' : '智能体'}</Text>
             </Pressable>
           </> : null}
 

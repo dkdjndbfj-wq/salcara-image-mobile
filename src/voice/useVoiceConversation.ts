@@ -17,7 +17,6 @@ import { missingTargetMessage, openRealtime, resolveTarget, synthesize, transcri
 import { VoiceExchanges } from './exchanges';
 import { levelSetter } from './levels';
 import type { LiveSession } from './realtime';
-import { isServiceRef } from './services';
 import { loadVoiceSettings, type VoiceSettings } from './settings';
 import { takeSentences, toSpeakable } from './speech-text';
 
@@ -436,7 +435,7 @@ export function useVoiceConversation(active: boolean) {
     exchanges.current = log;
     const instructions = `${await realtimePersona(current.activeCharacterId)}${VOICE_INSTRUCTIONS}${conversationContext(current.messages)}`;
     // The realtime API can only use its own transcription models: pass one only when recognition is set to the same service.
-    const sameService = settings.transcribeProviderId === settings.realtimeProviderId || (!settings.transcribeProviderId && !isServiceRef(settings.realtimeProviderId));
+    const sameService = settings.transcribeProviderId === settings.realtimeProviderId || (!settings.transcribeProviderId && !settings.realtimeProviderId);
     const transcribeModel = sameService && /transcribe|whisper|asr/i.test(settings.transcribeModel) ? settings.transcribeModel : undefined;
     const { session, inputRate } = openRealtime(target, instructions, transcribeModel, {
       onResponseStarted: () => { realtimeTurn.current.acceptAudio = true; },

@@ -13,11 +13,13 @@ import { DEFAULT_AGENT_SETTINGS, loadAgentSettings } from '../agent/settings';
 import { createToolbox } from '../agent/toolbox';
 import { emptyTrace, hasTraceContent, traceFileUris, type AgentTrace, type PhoneAction } from '../agent/types';
 import { runAgentTurn } from '../api/chat-api';
+import { deleteServiceSecrets, migrateSpeechServices } from '../api/services';
+import { loadVoiceSettings, updateVoiceSettings } from '../voice/settings';
 import { buildCompanionContext, personaPrompt } from '../memorybox/context';
 import { normalizeCharacter, type CharacterDraft } from '../memorybox/characters';
 import { catchUpAll, configureMemoryPipeline, scheduleMemoryWork } from '../memorybox/pipeline';
 import { retrieve } from '../memorybox/search';
-import { embeddingProvider, embedTexts, loadMemoryBoxSettings } from '../memorybox/settings';
+import { embeddingModelOf, embeddingProvider, embedTexts, loadMemoryBoxSettings } from '../memorybox/settings';
 import { deleteCharacterRecords, listAboutUserNotes, loadBox, loadCharacters, saveCharacter, touchNotes, updateCharacter } from '../memorybox/store';
 import { createCompanionToolbox } from '../memorybox/tools';
 import type { Character } from '../memorybox/types';
@@ -135,6 +137,23 @@ function pickImage(providers: ProviderProfile[], id: string | null): ProviderPro
   return providers.find((item) => item.id === id && item.model) ?? providers.find((item) => item.model) ?? null;
 }
 
+/**
+ * “用我的原话”: the image model gets the user's own words, so a model that reasons by itself (GPT Image)
+ * isn't steered by a rewritten prompt. The chat model's version is only used when the words lean on
+ * earlier context (“按刚才的方案”“再来一张”“按附件”) or say nothing drawable (“好”“画吧”).
+ */
+export function faithfulPrompt(userText: string, modelPrompt: string): string {
+  const own = userText.trim();
+  const drafted = modelPrompt.trim();
+  if (!own) return drafted;
+  const leansOnContext = /刚才|上面|前面|之前|上一张|上张|那张|这个方案|那个方案|方案|同样|一样的|照着|按照|根据|参考|这段|那段|文案|附件|文件|文档|再来|再画|重画|再生成|继续|按这个|就这样|上述/.test(own);
+  const saysNothing = own.replace(/[\s，。！？、,.!?~～]/g, '').length < 5 || /^(好|好的|可以|行|画吧|画一下|开始|生成吧|来吧|嗯|ok)$/i.test(own.replace(/[\s，。！？、,.!?~～]/g, ''));
+  if (!drafted || (!leansOnContext && !saysNothing)) return own;
+  if (saysNothing) return drafted;
+  // Context was needed: the user's words stay first and unchanged, the gathered context follows.
+  return drafted.includes(own) ? drafted : `${own}\n\n补充（来自前面的对话）：${drafted}`;
+}
+
 export function describeImageDefaults(provider: ProviderProfile | null): string {
   if (!provider) return '';
   return [`模型 ${provider.model}`, provider.aspectRatio && `比例 ${provider.aspectRatio === 'auto' ? '自动' : provider.aspectRatio}`, provider.resolutionTier && `清晰度 ${provider.resolutionTier}`, provider.quality && `画质 ${provider.quality}`].filter(Boolean).join('，');
@@ -199,6 +218,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // Older builds persisted blank “新会话” rows. A new chat is now a draft
       // that only exists in memory, so remove any leftovers once.
       await deleteEmptyConversations();
+      // Speech accounts from early 1.5 builds become ordinary services.
+      await migrateSpeechServices(async (map) => {
+        const current = await loadVoiceSettings();
+        const moved = (ref: string | null) => (ref && map[ref] !== undefined ? map[ref] : ref?.startsWith('svc:') ? null : ref);
+        await updateVoiceSettings({ transcribeProviderId: moved(current.transcribeProviderId), ttsProviderId: moved(current.ttsProviderId), realtimeProviderId: moved(current.realtimeProviderId) });
+      }).catch(() => undefined);
       // Tidy files left behind by discarded drafts or interrupted runs (in the background).
       void (async () => {
         try { sweepUnreferencedFiles(await listReferencedFileNames()); } catch { /* best effort, never blocks startup */ }
@@ -466,8 +491,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const remaining = (await listProviders()).filter((item) => item.id !== providerId);
     // Chat history is never deleted with a provider; new messages use whichever provider is selected.
     if (remaining[0]) await reassignConversations(providerId, remaining[0].id);
+    const removed = (await listProviders()).find((item) => item.id === providerId);
     await deleteProviderRecord(providerId);
-    await deleteProviderKey(providerId);
+    if (removed) await deleteServiceSecrets(removed); else await deleteProviderKey(providerId);
+    // Voice functions that used it go back to following the chat service.
+    const voice = await loadVoiceSettings();
+    await updateVoiceSettings({
+      ...(voice.transcribeProviderId === providerId ? { transcribeProviderId: null } : {}),
+      ...(voice.ttsProviderId === providerId ? { ttsProviderId: null } : {}),
+      ...(voice.realtimeProviderId === providerId ? { realtimeProviderId: null } : {}),
+    });
     setProviders(remaining);
     await refreshConversations();
     if (chatProviderId === providerId) { const next = pickChat(remaining, null); setChatProviderId(next?.id ?? null); await setSetting(CHAT_PROVIDER_KEY, next?.id ?? null); }
@@ -545,6 +578,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (references.length >= 4) break;
     }
     const usesMask = Boolean(userMessage.maskUri) && references[0]?.uri === userMessage.references[0]?.uri;
+    const settings = await loadAgentSettings().catch(() => DEFAULT_AGENT_SETTINGS);
+    // A redraw after the self-check is the model's correction, not the user's words again.
+    const redraw = Boolean(message.agent?.drafts?.length);
+    const prompt = settings.imagePrompt === 'enhance' || redraw ? call.prompt : faithfulPrompt(userMessage.prompt, call.prompt);
     const ratio: AspectRatio = call.aspectRatio ?? provider.aspectRatio ?? '1:1';
     const tier: ResolutionTier = provider.resolutionTier ?? '1K';
     return {
@@ -555,7 +592,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       quality: (provider.quality ?? 'auto') as Quality,
       size: sizeFor(ratio, tier, provider.model),
       transparent: call.transparent,
-      preparedPrompt: call.prompt,
+      preparedPrompt: prompt,
       references,
       maskUri: usesMask ? userMessage.maskUri : null,
     };
@@ -692,11 +729,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             boxSettings.enabled ? loadBox(character.id) : Promise.resolve({ notes: [], links: [] }),
             // Newest turns first (summaries may lag behind; then only the most recent raw turns matter).
             listRecentMessages(conversationId, 80, userMessage.createdAt),
-            boxSettings.enabled && character.memoryMode !== 'off' ? embedTexts(embedder, boxSettings.embeddingModel, [query], controller.signal) : Promise.resolve(null),
+            boxSettings.enabled && character.memoryMode !== 'off' ? embedTexts(embedder, embeddingModelOf(embedder), [query], controller.signal) : Promise.resolve(null),
           ]);
           const context = buildCompanionContext({
             character: boxSettings.enabled ? character : { ...character, coreMemory: '' }, notes: box.notes, links: box.links, query,
-            queryEmbedding: queryVectors?.[0], embeddingModel: boxSettings.embeddingModel,
+            queryEmbedding: queryVectors?.[0], embeddingModel: embeddingModelOf(embedder),
             recent: recent.filter((item) => item.id !== userMessage.id && item.id !== assistant.id), memoryOn: boxSettings.enabled && character.memoryMode !== 'off',
           });
           if (!boxSettings.enabled) context.history = recent.filter((item) => item.id !== userMessage.id && item.id !== assistant.id);
@@ -751,7 +788,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             baseUrl: chat.baseUrl, apiKey, model, api: chat.chatApi,
             history: modelHistory, prompt: userMessage.prompt, references: userMessage.references, documents: userMessage.documents,
             signal: controller.signal,
-            toolMode: toolkit.specs.length || toolkit.nativeSearch ? 'native' : 'none', imageAvailable: Boolean(image), imageDefaults: describeImageDefaults(image), voice,
+            toolMode: toolkit.specs.length || toolkit.nativeSearch ? 'native' : 'none', imageAvailable: Boolean(image), imageDefaults: describeImageDefaults(image), imagePrompt: settings.imagePrompt, voice,
             toolkit, extraInstructions: instructions, suggestions: settings.suggestions && !voice && !character, persona,
           }, showText);
           // Let the typewriter finish the last few words instead of jumping.
@@ -850,7 +887,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const send = useCallback(async ({ text, images = [], documents = [], maskUri = null, voice = false, research = false }: SendInput) => {
     const prompt = text.trim();
     if (!prompt && !images.length && !documents.length) throw new Error('请输入内容，或添加图片 / 文件');
-    if (!chatProvider && !imageProvider) throw new Error('还没有连接 AI 服务，请先添加服务商');
+    if (!chatProvider && !imageProvider) throw new Error('还没有添加 API，请先在“设置 → API 管理”里添加');
     const activeId = activeIdRef.current;
     // The chat space writes only into the open character's thread; it must never start (or append to) an assistant chat.
     if (spaceRef.current === 'companion' && (!activeId || !activeCharacterRef.current)) throw new Error('还没有打开聊天伙伴的对话，请返回列表重新进入后再发');
@@ -889,7 +926,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // A custom agent or a chat character may prefer its own chat provider and model.
       const agent = agentId ? (await loadAgents().catch(() => [])).find((item) => item.id === agentId) ?? null : null;
       const character = characterId ? (await loadCharacters().catch(() => [])).find((item) => item.id === characterId) ?? null : null;
-      const { chat, chatModel } = chatFor(character ?? agent);
+      // The chat space uses the same model as the assistant; only a custom agent may bring its own.
+      const { chat, chatModel } = chatFor(agent);
       if (character) void updateCharacter(character.id, { lastMessageAt: now }).catch(() => undefined);
 
       const base = {
@@ -991,7 +1029,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (!imageJob) {
         const agent = conversation?.agentId ? (await loadAgents().catch(() => [])).find((item) => item.id === conversation.agentId) ?? null : null;
         const character = characterId ? (await loadCharacters().catch(() => [])).find((item) => item.id === characterId) ?? null : null;
-        current = chatFor(character ?? agent);
+        current = chatFor(agent);
       }
       const reset: ChatMessage = {
         ...message, status: 'pending', error: null, imageUri: null, elapsedMs: null,

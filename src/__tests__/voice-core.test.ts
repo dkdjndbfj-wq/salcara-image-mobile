@@ -42,7 +42,7 @@ test('voice settings fall back to safe defaults', () => {
   expect(parseVoiceSettings(null)).toEqual(DEFAULT_VOICE_SETTINGS);
   expect(parseVoiceSettings('not json')).toEqual(DEFAULT_VOICE_SETTINGS);
   const parsed = parseVoiceSettings(JSON.stringify({ inputEngine: 'local', localModel: 'sensevoice', mirror: 'bogus', ttsModel: '  ', conversationEngine: 'realtime' }));
-  expect(parsed).toMatchObject({ inputEngine: 'local', localModel: 'sensevoice', mirror: 'hf-mirror', ttsModel: 'gpt-4o-mini-tts', conversationEngine: 'realtime' });
+  expect(parsed).toMatchObject({ inputEngine: 'local', localModel: 'sensevoice', mirror: 'hf-mirror', ttsModel: '', conversationEngine: 'realtime' });
 });
 
 test('base64 encoder matches Node for every tail length', () => {

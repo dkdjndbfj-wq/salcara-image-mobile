@@ -70,7 +70,7 @@ jest.mock('../storage/database', () => ({
   },
 }));
 
-import { AppProvider, useApp } from '../state/AppContext';
+import { AppProvider, faithfulPrompt, useApp } from '../state/AppContext';
 import { RemoteImageDownloadError } from '../storage/files';
 
 let app: ReturnType<typeof useApp>;
@@ -128,9 +128,10 @@ test('the chat model decides to draw; the tool call is saved before the paid ima
   await act(async () => { await app.send({ text: '画一只橘猫，竖版，透明背景' }); });
   const request = mockAgent.mock.calls[0][0];
   expect(request).toMatchObject({ model: 'vision-model', toolMode: 'native', imageAvailable: true, prompt: '画一只橘猫，竖版，透明背景' });
-  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'gpt-image-2', prompt: '竖版橘猫', size: '1536x2736', quality: 'high', transparent: true }));
+  // “用我的原话”: the image model gets the user's words, not the chat model's rewrite.
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'gpt-image-2', prompt: '画一只橘猫，竖版，透明背景', size: '1536x2736', quality: 'high', transparent: true }));
   expect(mockOrder).toEqual(['saved-image-job', 'generate']);
-  expect(app.messages[1]).toMatchObject({ status: 'complete', mode: 'generate', text: '好的，我来画。', imageUri: 'file:///cat.png', preparedPrompt: '竖版橘猫', analysisModel: 'vision-model', providerId: 'image' });
+  expect(app.messages[1]).toMatchObject({ status: 'complete', mode: 'generate', text: '好的，我来画。', imageUri: 'file:///cat.png', preparedPrompt: '画一只橘猫，竖版，透明背景', analysisModel: 'vision-model', providerId: 'image' });
 });
 
 test('references resolve to the current upload (with mask) or a copy of an earlier generated image', async () => {
@@ -138,7 +139,7 @@ test('references resolve to the current upload (with mask) or a copy of an earli
   mockEdit.mockResolvedValue('file:///night.png');
   await mount();
   await act(async () => { await app.send({ text: '把背景换成夜景', images: [upload], maskUri: 'file:///mask.png' }); });
-  expect(mockEdit.mock.calls[0][0]).toMatchObject({ references: [upload], maskUri: 'file:///mask.png', prompt: '换成夜景', size: '2048x2048' });
+  expect(mockEdit.mock.calls[0][0]).toMatchObject({ references: [upload], maskUri: 'file:///mask.png', prompt: '把背景换成夜景', size: '2048x2048' });
 
   mockAgent.mockResolvedValueOnce({ text: '', imageCall: { prompt: '再加一轮月亮', referenceImages: ['图2'], aspectRatio: null, transparent: false }, images: images([['图1', upload.uri], ['图2', 'file:///night.png']]), toolMode: 'native' });
   mockEdit.mockResolvedValue('file:///moon.png');
@@ -376,4 +377,13 @@ test('stopping mid-step marks running steps as stopped; research and agent flags
   await act(async () => { app.stop(); await pending; });
   expect(app.messages[1]).toMatchObject({ status: 'cancelled' });
   expect(app.messages[1].agent?.research).toBe(true);
+});
+
+test('image prompts keep the user’s own words unless they lean on earlier context', () => {
+  expect(faithfulPrompt('把背景换成夜景，人物别动', '将背景替换为璀璨星空下的都市夜景，霓虹灯光，电影感')).toBe('把背景换成夜景，人物别动');
+  // Needs the earlier discussion: the user's words first, the gathered context after.
+  expect(faithfulPrompt('按刚才的方案画海报', '夏日音乐节海报，标题“Salcara Live”')).toBe('按刚才的方案画海报\n\n补充（来自前面的对话）：夏日音乐节海报，标题“Salcara Live”');
+  // Says nothing drawable by itself (“画吧”): the drafted prompt is used.
+  expect(faithfulPrompt('好，画吧', '一只在云朵上睡觉的橘猫')).toBe('一只在云朵上睡觉的橘猫');
+  expect(faithfulPrompt('', '一座雪山')).toBe('一座雪山');
 });

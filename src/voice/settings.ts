@@ -12,8 +12,8 @@ export interface VoiceSettings {
   inputEngine: InputEngine;
   localModel: AsrModelId | null;
   /**
-   * Service per function: a chat provider id (OpenAI-compatible), or `svc:<id>` for a speech service.
-   * null = the chat provider when it has an OpenAI-style API.
+   * Service per function (a service id). null = follow the chat service when its vendor can do it.
+   * Empty model / voice = that vendor's default.
    */
   transcribeProviderId: string | null;
   transcribeModel: string;
@@ -35,17 +35,17 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   inputEngine: 'cloud',
   localModel: null,
   transcribeProviderId: null,
-  transcribeModel: 'gpt-4o-mini-transcribe',
+  transcribeModel: '',
   transcribeLanguage: '',
   mirror: 'hf-mirror',
   conversationEngine: 'auto',
   realtimeProviderId: null,
-  realtimeModel: 'gpt-realtime-2.1',
-  realtimeVoice: 'marin',
+  realtimeModel: '',
+  realtimeVoice: '',
   speechOutput: 'cloud',
   ttsProviderId: null,
-  ttsModel: 'gpt-4o-mini-tts',
-  ttsVoice: 'marin',
+  ttsModel: '',
+  ttsVoice: '',
 };
 
 export const VOICES: Array<{ id: string; label: string }> = [

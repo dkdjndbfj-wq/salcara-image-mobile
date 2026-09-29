@@ -10,6 +10,8 @@ import { getSetting, setSetting } from '../storage/database';
  */
 export type SearchEngine = 'auto' | 'native' | 'builtin' | 'tavily' | 'brave' | 'searxng' | 'off';
 export type ImageCheck = 'off' | 'check' | 'redraw';
+/** original: the user's own words go to the image model; enhance: the chat model writes a detailed prompt. */
+export type ImagePromptMode = 'original' | 'enhance';
 
 export interface AgentSettings {
   webSearch: SearchEngine;
@@ -22,6 +24,7 @@ export interface AgentSettings {
   suggestions: boolean;
   /** After drawing: look at the result, and optionally redraw once when it clearly misses. */
   imageCheck: ImageCheck;
+  imagePrompt: ImagePromptMode;
   phoneActions: boolean;
   historySearch: boolean;
 }
@@ -34,6 +37,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   responseStyle: '',
   suggestions: true,
   imageCheck: 'off',
+  imagePrompt: 'original',
   phoneActions: true,
   historySearch: true,
 };
@@ -67,6 +71,7 @@ export function parseAgentSettings(raw: string | null): AgentSettings {
       responseStyle: text(value.responseStyle, 1500),
       suggestions: flag(value.suggestions, true),
       imageCheck: value.imageCheck === 'check' || value.imageCheck === 'redraw' ? value.imageCheck : 'off',
+      imagePrompt: value.imagePrompt === 'enhance' ? 'enhance' : 'original',
       phoneActions: flag(value.phoneActions, true),
       historySearch: flag(value.historySearch, true),
     };

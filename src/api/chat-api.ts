@@ -75,6 +75,8 @@ export interface ChatRequest {
   now?: Date;
   /** Replaces the whole system prompt (background memory work). */
   system?: string;
+  /** How the image prompt is written (default: the user's own words). */
+  imagePrompt?: 'original' | 'enhance';
   /** A chat character: replaces Salcara's identity and answer style, keeps tool guidance. */
   persona?: string;
 }
@@ -145,7 +147,7 @@ export function localTimeLine(now = new Date()): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} 周${WEEKDAYS[now.getDay()]} ${pad(now.getHours())}:${pad(now.getMinutes())}（${zone}）`;
 }
 
-type InstructionInput = Pick<ChatRequest, 'toolMode' | 'imageDefaults' | 'imageAvailable' | 'voice' | 'extraInstructions' | 'suggestions' | 'now' | 'persona'>;
+type InstructionInput = Pick<ChatRequest, 'toolMode' | 'imageDefaults' | 'imageAvailable' | 'voice' | 'extraInstructions' | 'suggestions' | 'now' | 'persona' | 'imagePrompt'>;
 
 export function agentInstructions(request: InstructionInput, specs?: ToolSpec[], options: { nativeSearch?: boolean; finalStep?: boolean } = {}): string {
   const mode = request.toolMode ?? 'none';
@@ -161,13 +163,15 @@ export function agentInstructions(request: InstructionInput, specs?: ToolSpec[],
     lines.push(
       `当用户想要一张图片时（画、生成、设计海报/头像/壁纸/插画、修改、编辑、换背景、换风格、上色、扩图、抠图、"把刚才那张改成……"等），直接调用 ${IMAGE_TOOL_NAME}，不要先征求确认，也不要只回复提示词。`,
       '修改或参考已有图片时，把对应编号放进 reference_images，第一个是主图；用户说"这张/刚才那张/上一张"通常指最近的一张。用户上传了图片并要求基于它创作时同样要填写编号。',
-      '作图提示词要具体完整，结合对话上下文和附件资料补全主体、构图、风格、光线与配色；需要出现在画面里的文字用引号保留原文。',
+      request.imagePrompt === 'enhance'
+        ? '作图提示词要具体完整，结合对话上下文和附件资料补全主体、构图、风格、光线与配色；需要出现在画面里的文字用引号保留原文。'
+        : '作图描述要忠于用户原话：把用户这次的要求原样写进 prompt（可以去掉“帮我画一下”这类口头语），不要自己添加风格、构图、光线、配色或其他细节，也不要换说法——图片模型自己会理解和发挥。只有用户的话依赖前文时（如“按刚才的方案”“用上面那段文案”“和上一张一样的风格”“按附件”），才把前文里必要的内容原样补在后面。改图时只写要改什么，不要描述原图里其他部分。',
       '只是讨论、分析图片或文件、询问怎么作图、让你写提示词时，正常用文字回答，不要调用工具。',
       '调用作图工具时可以先用一句简短的话告诉用户你要画什么，不要把整段提示词重复给用户，也不要声称图片已经完成。',
     );
     if (request.imageDefaults) lines.push(`用户默认的图片参数：${request.imageDefaults}。只有用户明确要求时才改变比例或透明背景。`);
   } else if (!request.imageAvailable && !request.persona) {
-    lines.push('当前没有配置图片服务，无法生成图片。用户要求作图时，说明需要在「设置 → 服务商」添加图片 API，并可以顺便给出一段可用的作图提示词。');
+    lines.push('当前没有配置图片服务，无法生成图片。用户要求作图时，说明需要在「设置 → API 管理」添加能绘图的 API，再在「切换模型 → 绘图」里选择模型，并可以顺便给出一段可用的作图提示词。');
   }
   if (has('web_search')) {
     lines.push('遇到新闻、天气、价格、日期、版本、人物近况等可能变化的事实，或你不确定的内容，先联网搜索再回答，不要凭记忆编造。回答中使用了搜索或网页资料时，在相关句子后用 [1]、[2] 这样的编号标注来源，编号对应工具结果里的来源编号。');

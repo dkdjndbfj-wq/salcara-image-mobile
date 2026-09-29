@@ -197,7 +197,7 @@ export async function searchBrave(query: string, key: string, options: { recency
 
 export async function searchSearxng(query: string, instance: string, options: { recency?: Recency; count?: number; signal?: AbortSignal }): Promise<SearchResponse> {
   const base = instance.trim().replace(/\/+$/, '').replace(/\/search$/, '');
-  if (!/^https?:\/\//i.test(base)) throw new WebToolError('请在“设置 → 工具与联网”填写 SearXNG 地址');
+  if (!/^https?:\/\//i.test(base)) throw new WebToolError('请在“设置 → 联网与手机操作”填写 SearXNG 地址');
   const params = queryString({ q: query, format: 'json', time_range: options.recency });
   const response = await timedFetch(`${base}/search?${params}`, { headers: { Accept: 'application/json' } }, SEARCH_TIMEOUT_MS, options.signal);
   if (response.status === 403) { response.cancel(); throw new WebToolError('SearXNG 实例拒绝了 JSON 请求（需要在 settings.yml 开启 json 格式）'); }
@@ -292,7 +292,7 @@ export async function searchBuiltin(query: string, options: { count?: number; si
     if (error instanceof Error && error.name === 'AbortError') throw error;
     failures.push(error instanceof Error ? error.message : 'DuckDuckGo 不可用');
   }
-  throw new WebToolError(`内置搜索暂时不可用（${failures.join('；')}）。可在“设置 → 工具与联网”填写 Tavily 或 Brave 密钥获得稳定搜索`);
+  throw new WebToolError(`内置搜索暂时不可用（${failures.join('；')}）。可在“设置 → 联网与手机操作”填写 Tavily 或 Brave 密钥获得稳定搜索`);
 }
 
 function cleanResults(results: SearchResult[]): SearchResult[] {

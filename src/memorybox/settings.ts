@@ -2,6 +2,7 @@ import { fetch as expoFetch } from 'expo/fetch';
 import { useSyncExternalStore } from 'react';
 
 import type { ProviderProfile } from '../domain';
+import { vendorForService } from '../api/vendors';
 import { normalizeBaseUrl } from '../domain-utils';
 import { getSetting, setSetting } from '../storage/database';
 import { getProviderKey } from '../storage/secure-keys';
@@ -80,10 +81,20 @@ export function resetMemoryBoxSettingsForTesting(value = DEFAULT_MEMORY_BOX_SETT
 
 // ——— Embeddings ———
 
-/** The OpenAI-compatible provider used for embeddings, if any. */
+/** Embedding model per vendor, so semantic recall works without any setup. Other vendors: keyword recall. */
+const EMBEDDING_MODELS: Record<string, string> = {
+  openai: 'text-embedding-3-small', custom: 'text-embedding-3-small', openrouter: 'openai/text-embedding-3-small',
+  dashscope: 'text-embedding-v4', zhipu: 'embedding-3', siliconflow: 'BAAI/bge-m3', gemini: 'gemini-embedding-001', mistral: 'mistral-embed',
+};
+
+export function embeddingModelOf(provider: ProviderProfile | null | undefined): string {
+  return provider ? EMBEDDING_MODELS[vendorForService(provider).id] ?? 'text-embedding-3-small' : '';
+}
+
+/** The service used for embeddings: the chat service when its vendor has an embeddings API, else any that has. */
 export function embeddingProvider(providers: ProviderProfile[], settings: MemoryBoxSettings, fallback: ProviderProfile | null): ProviderProfile | null {
   if (!settings.enabled || !settings.embeddings) return null;
-  const openai = (item: ProviderProfile | null | undefined): item is ProviderProfile => Boolean(item && item.chatApi !== 'anthropic');
+  const openai = (item: ProviderProfile | null | undefined): item is ProviderProfile => Boolean(item && item.chatApi !== 'anthropic' && EMBEDDING_MODELS[vendorForService(item).id]);
   const chosen = providers.find((item) => item.id === settings.embeddingProviderId);
   if (openai(chosen)) return chosen;
   if (openai(fallback)) return fallback;

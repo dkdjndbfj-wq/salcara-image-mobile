@@ -10,13 +10,12 @@ import type { CustomAgent, GeneratedFile, PhoneAction } from '../agent/types';
 import { MemoryBoxSettingsSheet } from '../companion/MemoryBoxSettingsSheet';
 import { SpaceSwitch } from '../companion/SpaceSwitch';
 import { AboutSheet } from '../components/AboutSheet';
-import { AgentAvatar, AgentsSheet } from '../components/AgentsSheet';
+import { AgentAvatar } from '../components/AgentsSheet';
 import { FilePreviewSheet } from '../components/FilePreviewSheet';
 import { PersonalizationSheet } from '../components/PersonalizationSheet';
 import { ToolsSheet } from '../components/ToolsSheet';
 import { AppSettingsSheet } from '../components/AppSettingsSheet';
 import { BrandMark, GradientText, LivingMark } from '../components/Brand';
-import { InspirationGrid, type InspirationItem } from '../components/Inspiration';
 import { useLaunchRevealed } from '../components/LaunchIntro';
 import { LiveMode } from '../components/LiveMode';
 import { VoiceSettingsSheet } from '../components/VoiceSettingsSheet';
@@ -88,6 +87,7 @@ export function ChatScreen() {
   const [liveOpen, setLiveOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [modelsOpen, setModelsOpen] = useState(false);
+  const [modelsTab, setModelsTab] = useState<'chat' | 'image'>('chat');
   const [about, setAbout] = useState(false);
   const [network, setNetwork] = useState(false);
   const [maskOpen, setMaskOpen] = useState(false);
@@ -143,9 +143,9 @@ export function ChatScreen() {
     dismissKeyboardAndBlur();
     if (app.busy) { showToast('等这条回复完成后再开始 Live', 'hourglass'); return; }
     if (!app.chatProvider) {
-      setDialog({ title: 'Live 需要对话模型', message: 'Live 语音对话会用你的对话模型来理解和回答。请先在“服务”里添加一个支持对话的服务商。', icon: 'waveform', actions: [
+      setDialog({ title: 'Live 需要对话模型', message: 'Live 语音对话会用你的对话模型来理解和回答。请先在“API 管理”里添加一个能对话的 API。', icon: 'waveform', actions: [
         { label: '稍后', tone: 'secondary', onPress: () => setDialog(null) },
-        { label: '添加服务', tone: 'primary', onPress: () => { setDialog(null); setProvidersOpen(true); } },
+        { label: '添加 API', tone: 'primary', onPress: () => { setDialog(null); setProvidersOpen(true); } },
       ] });
       return;
     }
@@ -277,7 +277,7 @@ export function ChatScreen() {
 
   const toggleResearch = () => {
     setAttachOpen(false);
-    if (!app.chatProvider) { report('深度研究需要对话模型', new Error('请先在“服务”里添加一个支持对话的服务商。'), 'telescope'); return; }
+    if (!app.chatProvider) { report('深度研究需要对话模型', new Error('请先在“API 管理”里添加一个能对话的 API。'), 'telescope'); return; }
     setResearch((value) => !value);
     setTimeout(() => inputRef.current?.focus(), 120);
   };
@@ -288,10 +288,6 @@ export function ChatScreen() {
     if (item.action === 'gallery') { void addImages('gallery'); return; }
     if (item.action === 'camera') { void addImages('camera'); return; }
     setPrompt(item.prompt ?? '');
-    setTimeout(() => inputRef.current?.focus(), 60);
-  };
-  const applyInspiration = (item: InspirationItem) => {
-    setPrompt(item.prompt);
     setTimeout(() => inputRef.current?.focus(), 60);
   };
 
@@ -343,7 +339,7 @@ export function ChatScreen() {
       {app.messages.length === 0
         ? activeAgent
           ? <AgentHome key={activeAgent.id} agent={activeAgent} onStarter={(text) => { setPrompt(text); setTimeout(() => inputRef.current?.focus(), 60); }} />
-          : <Home key={`${app.activeConversationId ?? 'draft'}${revealed ? '' : ':intro'}`} canDraw={Boolean(app.imageProvider)} agents={agents} onAgent={startAgent} onSuggestion={applySuggestion} onInspiration={applyInspiration} covered={covered} />
+          : <Home key={`${app.activeConversationId ?? 'draft'}${revealed ? '' : ':intro'}`} canDraw={Boolean(app.imageProvider)} onSuggestion={applySuggestion} covered={covered} />
         : <View style={{ flex: 1 }}>
           <FlatList
             ref={listRef}
@@ -441,25 +437,23 @@ export function ChatScreen() {
       <Text style={styles.attachHint}>最多 4 张图片和 4 个文件 · 支持 PDF、Word、Excel、PPT 与代码</Text>
       <View style={styles.toolRows}>
         <ToolRow icon="telescope" title="深度研究" detail="先列计划，多轮搜索阅读，写成带来源的报告" active={research} onPress={toggleResearch} />
-        <ToolRow icon="bot" title="智能体" detail={agents.length ? `${agents.length} 个 · 一键切换专属助手` : '创建有专属指令和工具的助手'} onPress={() => { setAttachOpen(false); setAgentsOpen(true); }} />
       </View>
     </Sheet>
     <ConversationDrawer visible={drawer} onClose={() => setDrawer(false)} onNewChat={newChat} onOpenSettings={() => setSettings(true)}
       onOpenAgents={() => setAgentsOpen(true)} onStartAgent={startAgent} />
     <AppSettingsSheet visible={settings} onClose={() => setSettings(false)}
-      onOpenProviders={() => setProvidersOpen(true)} onOpenModels={() => setModelsOpen(true)}
+      onOpenProviders={() => setProvidersOpen(true)} onOpenModels={(tab) => { setModelsTab(tab ?? 'chat'); setModelsOpen(true); }}
       onOpenNetwork={() => setNetwork(true)} onOpenAbout={() => setAbout(true)} onCheckUpdates={() => setUpdateToken((value) => value + 1)}
       onOpenVoice={() => setVoiceOpen(true)} onOpenPersonalization={() => setPersonalOpen(true)} onOpenTools={() => setToolsOpen(true)} onOpenAgents={() => setAgentsOpen(true)}
       onOpenMemoryBox={() => setMemoryBoxOpen(true)} />
     <MemoryBoxSettingsSheet visible={memoryBoxOpen} onClose={() => setMemoryBoxOpen(false)} />
     <PersonalizationSheet visible={personalOpen} onClose={() => setPersonalOpen(false)} />
     <ToolsSheet visible={toolsOpen} onClose={() => setToolsOpen(false)} />
-    <AgentsSheet visible={agentsOpen} onClose={() => setAgentsOpen(false)} onStart={startAgent} />
     <FilePreviewSheet file={previewFile} onClose={() => setPreviewFile(null)} />
     <LiveMode visible={liveOpen} paused={voiceOpen} onClose={() => setLiveOpen(false)} onOpenSettings={() => setVoiceOpen(true)} />
     <VoiceSettingsSheet visible={voiceOpen} onClose={() => setVoiceOpen(false)} />
     <ProviderManager visible={providersOpen} onClose={() => setProvidersOpen(false)} />
-    <ModelSwitcher visible={modelsOpen} onClose={() => setModelsOpen(false)} onManageProviders={() => setProvidersOpen(true)} />
+    <ModelSwitcher visible={modelsOpen} initialTab={modelsTab} onClose={() => { setModelsOpen(false); setModelsTab('chat'); }} onManageProviders={() => setProvidersOpen(true)} />
     <AboutSheet visible={about} onClose={() => setAbout(false)} onCheckUpdates={() => setUpdateToken((value) => value + 1)} />
     <NetworkDiagnostics visible={network} onClose={() => setNetwork(false)}
       providerId={(app.chatProvider ?? app.imageProvider)?.id ?? ''} baseUrl={(app.chatProvider ?? app.imageProvider)?.baseUrl ?? ''} api={app.chatProvider?.chatApi}
@@ -480,9 +474,9 @@ function greeting() {
   return hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 13 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
 }
 
-function Home({ canDraw, agents, onAgent, onSuggestion, onInspiration, covered = false }: {
-  canDraw: boolean; agents: CustomAgent[]; onAgent: (agent: CustomAgent) => void; covered?: boolean;
-  onSuggestion: (item: typeof SUGGESTIONS[number]) => void; onInspiration: (item: InspirationItem) => void;
+function Home({ canDraw, onSuggestion, covered = false }: {
+  canDraw: boolean; covered?: boolean;
+  onSuggestion: (item: typeof SUGGESTIONS[number]) => void;
 }) {
   const { width } = useWindowDimensions();
   const items = SUGGESTIONS.filter((item) => canDraw || !item.draw);
@@ -491,15 +485,6 @@ function Home({ canDraw, agents, onAgent, onSuggestion, onInspiration, covered =
       <Appear distance={8}><LivingMark size={34} active={!covered} /></Appear>
       <Appear delay={90} distance={12}><GradientText text={greeting()} fontSize={34} width={Math.min(width - 56, 360)} /></Appear>
       <Appear delay={170} distance={12}><Text style={styles.homeSubtitle}>{canDraw ? '想聊点什么，\n或者让我画点什么？' : '今天想聊点什么？'}</Text></Appear>
-      {agents.length ? <Appear delay={210} distance={10}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.agentChips} style={styles.agentStrip} keyboardShouldPersistTaps="handled">
-          {agents.map((agent) => <MotionPressable key={agent.id} scaleTo={0.95} accessibilityRole="button" accessibilityLabel={`和 ${agent.name} 对话`} onPress={() => onAgent(agent)} style={styles.agentChip}>
-            <AgentAvatar agent={agent} size={24} />
-            <Text style={styles.agentChipText} numberOfLines={1}>{agent.name}</Text>
-          </MotionPressable>)}
-        </ScrollView>
-      </Appear> : null}
-      <InspirationGrid canDraw={canDraw} onPick={onInspiration} />
     </ScrollView>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.suggestions} keyboardShouldPersistTaps="handled">
       {items.map((item, index) => <Appear key={item.title} delay={260 + index * 60} distance={10}>

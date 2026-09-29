@@ -4,24 +4,18 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Ellipse, LinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
 
 /**
- * The Live entrance, staged like a film title from the layered key visual:
- * a light blooms up from the bottom edge (the Gemini-style handshake), the camera dollies through the stars,
- * the character comes into focus with a rim-light flash while the starfield racks out of focus behind her,
- * the logo resolves from a soft glow, a glint runs across the letters and a comet laps its ring,
- * the HUD lines draw in, and bokeh drifts in the foreground. It then hands over to Live,
- * leaving the soft starfield and particles as the stage — and the character, who stays with you:
- * she opens her eyes as the entrance peaks, blinks now and then, closes her eyes to think,
- * and her rim light breathes with the voice while she speaks.
+ * The Live entrance, staged like a film title over the starfield of the key visual:
+ * a light blooms up from the bottom edge (the Gemini-style handshake), the camera dollies through the stars
+ * and racks them softly out of focus, the logo resolves from a soft glow, a glint runs across the letters
+ * and a comet laps its ring, the welcome line and HUD lines draw in, and bokeh drifts in the foreground.
+ * Once the titles have landed they lift away and Live takes over: only the starfield, bokeh and rising motes
+ * stay as the stage, and the stars quietly brighten with the voice and pulse while Salcara thinks.
  * Everything is transform/opacity on the native driver; soft-focus layers are pre-blurred images.
  */
 
 const ASSETS = {
   stars: require('../../assets/live/stars.webp') as ImageSourcePropType,
   starsSoft: require('../../assets/live/stars-soft.webp') as ImageSourcePropType,
-  character: require('../../assets/live/character.webp') as ImageSourcePropType,
-  characterSoft: require('../../assets/live/character-soft.webp') as ImageSourcePropType,
-  characterGlow: require('../../assets/live/character-glow.webp') as ImageSourcePropType,
-  eyesClosed: require('../../assets/live/eyes-closed.webp') as ImageSourcePropType,
   logo: require('../../assets/live/logo.webp') as ImageSourcePropType,
   logoSoft: require('../../assets/live/logo-soft.webp') as ImageSourcePropType,
   tagline: require('../../assets/live/tagline.webp') as ImageSourcePropType,
@@ -34,19 +28,14 @@ const ASSETS = {
 /** The key visual is 941×1672; every piece keeps its place from that frame. */
 const POSTER = { width: 941, height: 1672 };
 type Piece = { x: number; y: number; w: number; h: number };
-const PIECES: Record<'corner' | 'logo' | 'tagline' | 'spark' | 'side' | 'footer' | 'character', Piece> = {
+const PIECES: Record<'corner' | 'logo' | 'tagline' | 'spark' | 'side' | 'footer', Piece> = {
   corner: { x: 42, y: 15, w: 413, h: 229 },
   logo: { x: 53, y: 140, w: 860, h: 340 },
   tagline: { x: 156, y: 411, w: 646, h: 104 },
   spark: { x: 42, y: 542, w: 49, h: 49 },
   side: { x: 49, y: 596, w: 150, h: 181 },
   footer: { x: 9, y: 1550, w: 459, h: 122 },
-  // The cut-out character sits at 92% scale in the composed poster.
-  character: { x: 50, y: 226, w: 866, h: 1538 },
 };
-/** The closed-eye patch, in the cut-out character's own 941×1672 frame, and where the iris sits. */
-const EYES = { x: 640, y: 730, w: 290, h: 245 };
-const IRIS = { x: 795, y: 850 };
 /** The ring around the logo, fitted from the artwork: centre, unit major axis and semi-axes. */
 const RING = { cx: 446, cy: 304, ux: 0.9526, uy: -0.3043, a: 362, b: 69 };
 const RING_SAMPLES = 48;
@@ -135,13 +124,12 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
   const insets = useSafeAreaInsets();
   const [posterGone, setPosterGone] = useState(mode === 'none');
   const lite = mode === 'short';
-  const ids = useRef({ bloom: nextId('bloom'), sweep: nextId('sweep'), scrimX: nextId('scrimX'), scrimY: nextId('scrimY') }).current;
+  const ids = useRef({ bloom: nextId('bloom'), sweep: nextId('sweep'), scrim: nextId('scrim') }).current;
 
-  // Layout: the starfield and character cover the screen like the poster; the HUD text is fitted to the width
+  // Layout: the starfield covers the screen like the poster; the HUD text is fitted to the width
   // (never cropped) and spread so the header sits under the status bar and the footer on the bottom edge.
   const cover = Math.max(W / POSTER.width, H / POSTER.height);
   const art = { left: (W - POSTER.width * cover) / 2, top: (H - POSTER.height * cover) / 2, width: POSTER.width * cover, height: POSTER.height * cover };
-  const person = { left: art.left + PIECES.character.x * cover, top: art.top + PIECES.character.y * cover, width: PIECES.character.w * cover, height: PIECES.character.h * cover };
   const s = Math.min(W / POSTER.width, (H / POSTER.height) * 1.05);
   const offX = (W - POSTER.width * s) / 2;
   const spare = Math.max(0, H - POSTER.height * s);
@@ -150,20 +138,16 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
   const frame = (piece: Piece, top: number) => ({ left: offX + piece.x * s, top: top + piece.y * s, width: piece.w * s, height: piece.h * s });
   const footerTop = H - (POSTER.height - PIECES.footer.y) * s - insets.bottom * 0.35;
   const logo = frame(PIECES.logo, headTop);
-  const inPerson = (x: number, y: number) => ({ x: person.left + (x / POSTER.width) * person.width, y: person.top + (y / POSTER.height) * person.height });
-  const eyesAt = inPerson(EYES.x, EYES.y);
-  const eyes = { left: eyesAt.x, top: eyesAt.y, width: (EYES.w / POSTER.width) * person.width, height: (EYES.h / POSTER.height) * person.height };
-  const iris = inPerson(IRIS.x, IRIS.y);
 
   const v = useRef(Object.fromEntries([
-    'bloom', 'dolly', 'warp', 'focus', 'char', 'charSharp', 'rim', 'logo', 'logoSharp', 'glint', 'comet', 'sweep',
-    'corner', 'tagline', 'spark', 'side', 'footer', 'bokeh', 'exit', 'drift', 'wake', 'blink', 'closed', 'speakOn', 'think',
+    'bloom', 'dolly', 'warp', 'focus', 'logo', 'logoSharp', 'glint', 'comet', 'sweep',
+    'corner', 'tagline', 'spark', 'side', 'footer', 'bokeh', 'exit', 'drift', 'voiceOn', 'think',
   ].map((name) => [name, new Animated.Value(0)])) as Record<string, Animated.Value>).current;
   const initialised = useRef(false);
   if (!initialised.current) {
     initialised.current = true;
     // Without an entrance everything starts in its settled state.
-    if (mode === 'none') for (const name of ['focus', 'dolly', 'char', 'charSharp', 'wake', 'exit', 'bloom']) v[name].setValue(1);
+    if (mode === 'none') for (const name of ['focus', 'dolly', 'warp', 'exit', 'bloom']) v[name].setValue(1);
   }
   const fallbackEnergy = useRef(new Animated.Value(0)).current;
   const voice = energy ?? fallbackEnergy;
@@ -179,16 +163,14 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
     if (exiting.current) return;
     exiting.current = true;
     main.current?.stop();
-    // Live comes in once the poster has mostly cleared, so captions never sit on top of the artwork.
+    // Live comes in once the titles have mostly lifted away, so captions never sit on top of the welcome text.
     revealTimer.current = setTimeout(() => callbacks.current.onReveal(), lite ? 220 : 480);
     Animated.parallel([
       Animated.timing(v.exit, { toValue: 1, duration: lite ? 480 : 820, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
       Animated.timing(v.focus, { toValue: 1, duration: 600, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }),
       Animated.timing(v.dolly, { toValue: 1, duration: 600, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(v.warp, { toValue: 1, duration: 400, useNativeDriver: true }),
       Animated.timing(v.bloom, { toValue: 1, duration: 500, useNativeDriver: true }),
-      Animated.timing(v.wake, { toValue: 1, duration: 380, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }),
-      Animated.timing(v.char, { toValue: 1, duration: 500, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      Animated.timing(v.charSharp, { toValue: 1, duration: 400, useNativeDriver: true }),
     ]).start(() => {
       setPosterGone(true);
       callbacks.current.onDone?.();
@@ -211,32 +193,27 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
     const expo = Easing.out(Easing.exp);
     const steps = lite ? [
       at(0, v.bloom, 900, Easing.inOut(Easing.cubic)), at(0, v.dolly, 1500, expo), at(0, v.warp, 900),
-      at(150, v.char, 800, expo), at(450, v.charSharp, 700), at(500, v.focus, 800, Easing.inOut(Easing.cubic)),
-      at(400, v.logo, 800, expo), at(700, v.logoSharp, 600), at(900, v.tagline, 700, expo), at(300, v.bokeh, 900),
-      at(1200, v.wake, 420, Easing.inOut(Easing.cubic)),
-      Animated.delay(1900),
+      at(350, v.focus, 800, Easing.inOut(Easing.cubic)),
+      at(150, v.logo, 800, expo), at(450, v.logoSharp, 600), at(500, v.tagline, 700, expo), at(200, v.bokeh, 900),
+      Animated.delay(1700),
     ] : [
       at(0, v.bloom, 1400, Easing.inOut(Easing.cubic)),
       at(0, v.dolly, 2600, expo),
       at(0, v.warp, 1500, Easing.out(Easing.quad)),
-      at(550, v.char, 1500, expo),
-      at(1000, v.charSharp, 800, Easing.inOut(Easing.cubic)),
-      at(1050, v.rim, 900, Easing.inOut(Easing.sin)),
-      at(1150, v.focus, 1100, Easing.inOut(Easing.cubic)),
-      at(1250, v.logo, 1100, expo),
-      at(1550, v.logoSharp, 650, Easing.inOut(Easing.cubic)),
-      at(1350, v.sweep, 1300, Easing.inOut(Easing.cubic)),
-      at(1850, v.comet, 1600, Easing.inOut(Easing.sin)),
-      at(1600, v.tagline, 900, expo),
-      at(1750, v.corner, 800, expo),
-      at(1900, v.spark, 700, Easing.out(Easing.back(1.8))),
-      at(2000, v.side, 800, expo),
-      at(2150, v.footer, 800, expo),
-      at(2300, v.glint, 900, Easing.inOut(Easing.cubic)),
-      at(900, v.bokeh, 1600, Easing.inOut(Easing.quad)),
-      // The peak: she opens her eyes.
-      at(2750, v.wake, 520, Easing.inOut(Easing.cubic)),
-      Animated.delay(4300),
+      at(1100, v.focus, 1200, Easing.inOut(Easing.cubic)),
+      at(500, v.logo, 1100, expo),
+      at(800, v.logoSharp, 650, Easing.inOut(Easing.cubic)),
+      at(700, v.sweep, 1300, Easing.inOut(Easing.cubic)),
+      at(1200, v.comet, 1600, Easing.inOut(Easing.sin)),
+      at(900, v.tagline, 900, expo),
+      at(1000, v.corner, 800, expo),
+      at(1150, v.spark, 700, Easing.out(Easing.back(1.8))),
+      at(1250, v.side, 800, expo),
+      at(1400, v.footer, 800, expo),
+      at(1700, v.glint, 900, Easing.inOut(Easing.cubic)),
+      at(400, v.bokeh, 1600, Easing.inOut(Easing.quad)),
+      // A short beat on the finished title card, then it lifts away and Live takes over.
+      Animated.delay(3500),
     ];
     main.current = Animated.parallel(steps);
     main.current.start(({ finished }) => { if (finished) exit(); });
@@ -263,19 +240,16 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
 
   const out = v.exit.interpolate({ inputRange: [0, 1], outputRange: [1, 0] });
   const clamp01 = { inputRange: [0, 1], outputRange: [0, 1], extrapolate: 'clamp' as const };
-  const eyesClosed = Animated.add(Animated.add(v.wake.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }), v.blink), v.closed).interpolate(clamp01);
-  const glow = Animated.add(Animated.add(
-    v.rim.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0, 0.85, 0] }),
-    Animated.multiply(v.speakOn, voice.interpolate({ inputRange: [0, 1], outputRange: [0.02, 0.28], extrapolate: 'clamp' })),
-  ), v.think.interpolate({ inputRange: [0, 1], outputRange: [0, 0.22] })).interpolate(clamp01);
+  // Once settled, the sharp stars come up with the voice (yours while you talk, Salcara's while it speaks) and pulse while it thinks.
+  const twinkle = Animated.add(
+    Animated.multiply(v.voiceOn, voice.interpolate({ inputRange: [0.15, 1], outputRange: [0, 0.5], extrapolate: 'clamp' })),
+    v.think.interpolate({ inputRange: [0, 1], outputRange: [0, 0.3] }),
+  ).interpolate(clamp01);
 
-  // After the entrance she reacts to the conversation: eyes closed while thinking, rim light with her voice, blinking.
   const settled = posterGone || exiting.current;
   useEffect(() => {
     if (!settled) return undefined;
-    const closedTarget = phase === 'thinking' || phase === 'error' ? 1 : 0;
-    Animated.timing(v.closed, { toValue: closedTarget, duration: closedTarget ? 340 : 240, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }).start();
-    Animated.timing(v.speakOn, { toValue: phase === 'speaking' ? 1 : 0, duration: 320, useNativeDriver: true }).start();
+    Animated.timing(v.voiceOn, { toValue: phase === 'speaking' || phase === 'hearing' ? 1 : 0, duration: 320, useNativeDriver: true }).start();
     if (phase !== 'thinking' || mode === 'none') { Animated.timing(v.think, { toValue: 0, duration: 300, useNativeDriver: true }).start(); return undefined; }
     const loop = Animated.loop(Animated.sequence([
       Animated.timing(v.think, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
@@ -284,28 +258,6 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
     loop.start();
     return () => loop.stop();
   }, [settled, phase, mode, v]);
-  const phaseRef = useRef(phase);
-  phaseRef.current = phase;
-  useEffect(() => {
-    if (!settled || mode === 'none') return undefined;
-    let timer: ReturnType<typeof setTimeout>;
-    const blinkOnce = () => Animated.sequence([
-      Animated.timing(v.blink, { toValue: 1, duration: 70, easing: Easing.in(Easing.quad), useNativeDriver: true }),
-      Animated.delay(45),
-      Animated.timing(v.blink, { toValue: 0, duration: 120, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-    ]);
-    const schedule = () => {
-      timer = setTimeout(() => {
-        const current = phaseRef.current;
-        if (current !== 'thinking' && current !== 'error') {
-          (Math.random() < 0.2 ? Animated.sequence([blinkOnce(), Animated.delay(120), blinkOnce()]) : blinkOnce()).start();
-        }
-        schedule();
-      }, 2400 + Math.random() * 3600);
-    };
-    schedule();
-    return () => clearTimeout(timer);
-  }, [settled, mode, v]);
   const ring = useMemo(() => Array.from({ length: RING_SAMPLES + 1 }, (_, index) => {
     const t = Math.PI + (index / RING_SAMPLES) * Math.PI * 2;
     const px = RING.cx + RING.a * RING.ux * Math.cos(t) - RING.b * RING.uy * Math.sin(t);
@@ -341,19 +293,23 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
       </Svg>
     </Animated.View>
 
-    {/* Starfield: a dolly through sharp stars (with a faster foreground copy for depth), then a rack focus to soft stars. */}
+    {/* Starfield: a dolly through sharp stars (with a faster foreground copy for depth), then a rack focus to soft stars,
+        keeping a faint layer of sharp stars that brightens with the voice during Live. */}
     <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, {
       transform: [
         { scale: Animated.add(scale(v.dolly, 1.32, 1.05), v.drift.interpolate({ inputRange: [0, 1], outputRange: [0, -0.05] })) },
         { rotate: v.dolly.interpolate({ inputRange: [0, 1], outputRange: ['-4deg', '0deg'] }) },
       ],
     }]}>
-      {posterGone ? null : <Animated.View style={[StyleSheet.absoluteFill, { opacity: Animated.multiply(v.warp, v.focus.interpolate({ inputRange: [0, 1], outputRange: [1, 0] })) }]}>
-        <Image source={ASSETS.stars} style={{ position: 'absolute', ...art }} resizeMode="cover" fadeDuration={0} />
-      </Animated.View>}
-      <Animated.View style={[StyleSheet.absoluteFill, { opacity: v.focus.interpolate({ inputRange: [0, 1], outputRange: [0, 0.75] }) }]}>
+      <Animated.View style={[StyleSheet.absoluteFill, { opacity: v.focus.interpolate({ inputRange: [0, 1], outputRange: [0, 0.85] }) }]}>
         <Image source={ASSETS.starsSoft} style={{ position: 'absolute', ...art }} resizeMode="cover" fadeDuration={0} />
       </Animated.View>
+      <Animated.View style={[StyleSheet.absoluteFill, { opacity: Animated.multiply(v.warp, v.focus.interpolate({ inputRange: [0, 1], outputRange: [1, 0.3] })) }]}>
+        <Image source={ASSETS.stars} style={{ position: 'absolute', ...art }} resizeMode="cover" fadeDuration={0} />
+      </Animated.View>
+      {settled ? <Animated.View style={[StyleSheet.absoluteFill, { opacity: twinkle }]}>
+        <Image source={ASSETS.stars} style={{ position: 'absolute', ...art }} resizeMode="cover" fadeDuration={0} />
+      </Animated.View> : null}
     </Animated.View>
     {posterGone || lite ? null : <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, {
       opacity: v.warp.interpolate({ inputRange: [0, 0.25, 1], outputRange: [0, 0.45, 0] }),
@@ -362,52 +318,18 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
       <Image source={ASSETS.stars} style={{ position: 'absolute', ...art }} resizeMode="cover" fadeDuration={0} />
     </Animated.View>}
 
-    {/* Character: arrives out of focus from the right, a rim light flares, she snaps into focus and opens her eyes.
-        She stays through the whole Live session, eased to the right behind a reading scrim. */}
-    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, {
-      transform: [
-        { translateX: Animated.add(scale(v.char, W * 0.12, 0), v.exit.interpolate({ inputRange: [0, 1], outputRange: [0, -W * 0.05] })) },
-        { translateY: v.exit.interpolate({ inputRange: [0, 1], outputRange: [0, -H * 0.05] }) },
-        { scale: Animated.add(scale(v.char, 1.12, 1), v.drift.interpolate({ inputRange: [0, 1], outputRange: [0, 0.03] })) },
-      ],
-    }]}>
-      {posterGone ? null : <Animated.View style={[StyleSheet.absoluteFill, { opacity: Animated.multiply(v.char, v.charSharp.interpolate({ inputRange: [0, 1], outputRange: [1, 0] })) }]}>
-        <Image source={ASSETS.characterSoft} style={{ position: 'absolute', ...person }} resizeMode="cover" fadeDuration={0} />
-      </Animated.View>}
-      <Animated.View style={[StyleSheet.absoluteFill, { opacity: v.charSharp }]}>
-        <Image source={ASSETS.character} style={{ position: 'absolute', ...person }} resizeMode="cover" fadeDuration={0} />
-        <Animated.View style={{ position: 'absolute', ...eyes, opacity: eyesClosed }}>
-          <Image source={ASSETS.eyesClosed} style={styles.fill} fadeDuration={0} />
-        </Animated.View>
-      </Animated.View>
-      <Animated.View style={[StyleSheet.absoluteFill, { opacity: glow }]}>
-        <Image source={ASSETS.characterGlow} style={{ position: 'absolute', ...person }} resizeMode="cover" fadeDuration={0} />
-      </Animated.View>
-      {/* A glint in her eye as she wakes. */}
-      <Animated.View style={{
-        position: 'absolute', left: iris.x - 36, top: iris.y - 36,
-        opacity: v.wake.interpolate({ inputRange: [0, 0.35, 0.7, 1], outputRange: [0, 1, 0.4, 0] }),
-        transform: [{ scale: v.wake.interpolate({ inputRange: [0, 0.4, 1], outputRange: [0.3, 1.2, 1.6] }) }],
-      }}><Halo size={72} color="#CFE9FF" /></Animated.View>
-    </Animated.View>
-    {/* Reading scrim for Live captions: dark on the left and bottom, clear over her face. */}
+    {/* Reading scrim for the Live controls and captions: a little shade under the top bar, more along the bottom. */}
     <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: v.exit }]}>
       <Svg width={W} height={H}>
         <Defs>
-          <LinearGradient id={ids.scrimX} x1="0" y1="0" x2="1" y2="0">
-            <Stop offset="0" stopColor="#060917" stopOpacity={0.7} />
-            <Stop offset="0.5" stopColor="#060917" stopOpacity={0.3} />
-            <Stop offset="1" stopColor="#060917" stopOpacity={0} />
-          </LinearGradient>
-          <LinearGradient id={ids.scrimY} x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor="#060917" stopOpacity={0.4} />
-            <Stop offset="0.22" stopColor="#060917" stopOpacity={0} />
-            <Stop offset="0.6" stopColor="#060917" stopOpacity={0.05} />
+          <LinearGradient id={ids.scrim} x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor="#060917" stopOpacity={0.45} />
+            <Stop offset="0.2" stopColor="#060917" stopOpacity={0} />
+            <Stop offset="0.5" stopColor="#060917" stopOpacity={0.08} />
             <Stop offset="1" stopColor="#060917" stopOpacity={0.85} />
           </LinearGradient>
         </Defs>
-        <Rect x="0" y="0" width={W} height={H} fill={`url(#${ids.scrimX})`} />
-        <Rect x="0" y="0" width={W} height={H} fill={`url(#${ids.scrimY})`} />
+        <Rect x="0" y="0" width={W} height={H} fill={`url(#${ids.scrim})`} />
       </Svg>
     </Animated.View>
 
@@ -430,7 +352,7 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
         </Svg>
       </Animated.View>}
 
-      {/* HUD text and logo. */}
+      {/* HUD text, logo and the welcome line: they only belong to the entrance and lift away as Live takes over. */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, {
         opacity: out,
         transform: [{ translateY: v.exit.interpolate({ inputRange: [0, 1], outputRange: [0, -18] }) }, { scale: v.exit.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] }) }],
@@ -478,6 +400,7 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
           position: 'absolute', left: point.x - 32, top: point.y - 32, opacity: value, transform: [{ scale: scale(value, 0.4, 1.35) }],
         }}><Halo size={64} color={color} /></Animated.View>)}
 
+        {/* 欢迎来到聊天 live / WELCOME TO CHAT LIVE */}
         <Animated.View style={{
           position: 'absolute', ...frame(PIECES.tagline, headTop), opacity: v.tagline,
           transform: [{ translateY: scale(v.tagline, 14, 0) }, { scaleX: scale(v.tagline, 1.18) }],

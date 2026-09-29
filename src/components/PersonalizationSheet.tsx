@@ -20,7 +20,7 @@ export function PersonalizationSheet({ visible, onClose }: { visible: boolean; o
   const [confirmClear, setConfirmClear] = useState(false);
   const save = (patch: Parameters<typeof updateAgentSettings>[0]) => void updateAgentSettings(patch).catch(() => showToast('没有保存成功', 'alert'));
 
-  return <Sheet visible={visible} title="个性化" onClose={onClose} presentation="page">
+  return <Sheet visible={visible} title="关于我与回答风格" onClose={onClose} presentation="page">
     <View style={styles.body}>
       <SectionLabel>关于我</SectionLabel>
       <Group style={styles.group}>

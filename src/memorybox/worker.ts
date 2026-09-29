@@ -12,11 +12,8 @@ import type { Character } from './types';
 export interface WorkerModel { provider: ProviderProfile; model: string }
 
 export function resolveWorker(providers: ProviderProfile[], settings: MemoryBoxSettings, character: Character | null, chatProvider: ProviderProfile | null): WorkerModel | null {
-  const byId = (id: string | null | undefined) => providers.find((item) => item.id === id) ?? null;
-  const chosen = byId(settings.workerProviderId);
-  if (chosen && (settings.workerModel || chosen.chatModel)) return { provider: chosen, model: settings.workerModel || chosen.chatModel! };
-  const own = byId(character?.providerId);
-  if (own && (character?.model || own.chatModel)) return { provider: own, model: character?.model || own.chatModel! };
+  // Memory work uses the same chat model as everything else (one model setting for the whole app).
+  void settings; void character;
   if (chatProvider?.chatModel) return { provider: chatProvider, model: chatProvider.chatModel };
   const any = providers.find((item) => item.chatModel);
   return any ? { provider: any, model: any.chatModel! } : null;

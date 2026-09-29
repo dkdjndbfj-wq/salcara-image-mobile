@@ -8,7 +8,7 @@ import { BLANK_CHARACTER, CHARACTER_COLORS, CHARACTER_TEMPLATES, type CharacterD
 import { clearBox, updateCharacter, useCharacters } from '../memorybox/store';
 import type { Character, MemoryMode } from '../memorybox/types';
 import { useApp } from '../state/AppContext';
-import { colors, prettyModel } from '../theme';
+import { colors } from '../theme';
 import { deleteAvatar, pickAvatar } from './avatar';
 import { CharacterAvatar } from './CharacterAvatar';
 import { warm } from './theme';
@@ -67,7 +67,6 @@ export function CharacterSheet({ visible, characterId, onClose, onCreated }: {
       showToast(error instanceof Error ? error.message : '没有选到图片', 'alert');
     }
   };
-  const chatProviders = app.providers.filter((item) => item.chatModel);
   const save = async () => {
     if (!draft) return;
     setSaving(true);
@@ -145,14 +144,7 @@ export function CharacterSheet({ visible, characterId, onClose, onCreated }: {
           <ToggleRow icon="globe" title="会查资料" detail="聊到新闻、天气、时事时可以上网看看" value={draft.canSearch} onChange={(canSearch) => set({ canSearch })} />
         </Group>
 
-        <SectionLabel>对话模型</SectionLabel>
-        <View style={styles.chips}>
-          <Chip label="跟随当前选择" selected={!draft.providerId} onPress={() => set({ providerId: null, model: null })} />
-          {chatProviders.map((provider) => <Chip key={provider.id} label={`${provider.name} · ${prettyModel(provider.chatModel)}`} selected={draft.providerId === provider.id}
-            onPress={() => set({ providerId: provider.id, model: provider.chatModel ?? null })} />)}
-        </View>
-        {draft.providerId ? <TextInput value={draft.model ?? ''} onChangeText={(model) => set({ model })} placeholder="模型 ID" placeholderTextColor={warm.faint}
-          autoCapitalize="none" autoCorrect={false} style={[styles.input, { marginTop: 10 }]} /> : null}
+        <Text style={styles.modelNote}>对话模型和助手通用，在“设置 → 模型”里切换。</Text>
 
         {existing ? <View style={styles.danger}>
           <Pressable accessibilityRole="button" onPress={() => setConfirm('clear')} style={styles.dangerRow}><Icon name="memory" size={18} color={colors.danger} /><Text style={styles.dangerText}>清空记忆匣</Text></Pressable>
@@ -236,5 +228,6 @@ const styles = StyleSheet.create({
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   danger: { marginTop: 28, gap: 4 },
   dangerRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, paddingHorizontal: 6 },
+  modelNote: { color: warm.muted, fontSize: 12.5, lineHeight: 18, marginTop: 18, marginHorizontal: 6 },
   dangerText: { color: colors.danger, fontSize: 15, fontWeight: '500' },
 });

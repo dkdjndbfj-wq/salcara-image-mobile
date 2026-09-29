@@ -2,6 +2,7 @@ import { normalizeBaseUrl } from '../domain-utils';
 import * as SQLite from 'expo-sqlite';
 
 import { ALL_CAPABILITIES, parseTrace, traceFileUris, type AgentCapability, type CustomAgent, type HistoryHit, type Memory } from '../agent/types';
+import { vendorById } from '../api/vendors';
 import type { ChatMessage, Conversation, DocumentAttachment, ProviderProfile, ReferenceImage } from '../domain';
 
 const DATABASE_NAME = 'salcara-image.db';
@@ -19,6 +20,8 @@ type ProviderRow = {
   chat_api: ProviderProfile['chatApi'];
   analysis_provider_id: string | null;
   image_provider_id: string | null;
+  vendor?: string | null;
+  extra_json?: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -225,6 +228,8 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         chat_api: "TEXT NOT NULL DEFAULT 'chat-completions'",
         analysis_provider_id: 'TEXT',
         image_provider_id: 'TEXT',
+        vendor: 'TEXT',
+        extra_json: 'TEXT',
       });
       // Existing installs receive the legacy image default for rows created by
       // the old schema; all new rows are written explicitly as auto below.
@@ -319,8 +324,8 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
   const db = await getDatabase();
   await db.runAsync(
     `INSERT INTO providers
-      (id, name, base_url, model, quality, aspect_ratio, resolution_tier, chat_model, chat_api, analysis_provider_id, image_provider_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, base_url, model, quality, aspect_ratio, resolution_tier, chat_model, chat_api, analysis_provider_id, image_provider_id, vendor, extra_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       base_url = excluded.base_url,
@@ -332,6 +337,8 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
       chat_api = excluded.chat_api,
       analysis_provider_id = excluded.analysis_provider_id,
       image_provider_id = excluded.image_provider_id,
+      vendor = excluded.vendor,
+      extra_json = excluded.extra_json,
       updated_at = excluded.updated_at`,
     profile.id,
     profile.name,
@@ -344,6 +351,8 @@ export async function upsertProvider(profile: ProviderProfile): Promise<void> {
     profile.chatApi ?? 'chat-completions',
     profile.analysisProviderId ?? null,
     profile.imageProviderId ?? null,
+    profile.vendor ?? null,
+    profile.extra && Object.keys(profile.extra).length ? JSON.stringify(profile.extra) : null,
     profile.createdAt,
     profile.updatedAt,
   );
@@ -548,6 +557,15 @@ function serializeTrace(message: ChatMessage): string | null {
 }
 
 /** Addresses saved by older versions could carry a wrong trailing /v1 (e.g. …/api/v3/v1); read them repaired. */
+function parseExtra(raw: string | null | undefined): Record<string, string> | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, item]) => typeof item === 'string')) as Record<string, string>;
+  } catch { return null; }
+}
+
 function repairedBaseUrl(value: string): string {
   try { return normalizeBaseUrl(value); } catch { return value; }
 }
@@ -556,7 +574,8 @@ function mapProvider(row: ProviderRow): ProviderProfile {
   return {
     id: row.id,
     name: row.name,
-    baseUrl: repairedBaseUrl(row.base_url),
+    // Speech-only vendors keep their address as typed (an Azure endpoint, or none at all).
+    baseUrl: row.vendor && !vendorById(row.vendor)?.chatApi ? row.base_url : repairedBaseUrl(row.base_url),
     model: row.model,
     quality: row.quality,
     aspectRatio: row.aspect_ratio,
@@ -565,6 +584,8 @@ function mapProvider(row: ProviderRow): ProviderProfile {
     chatApi: row.chat_api === 'responses' || row.chat_api === 'anthropic' ? row.chat_api : 'chat-completions',
     analysisProviderId: row.analysis_provider_id ?? null,
     imageProviderId: row.image_provider_id ?? null,
+    vendor: row.vendor ?? null,
+    extra: parseExtra(row.extra_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

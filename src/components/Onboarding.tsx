@@ -226,7 +226,7 @@ function Fact({ icon, text }: { icon: IconName; text: string }) {
 function Voice({ active }: { active: boolean }) {
   const ring = useLoop(2400, active);
   return <View>
-    <Title kicker="Live" title="开口就聊，像打电话一样" text="说话时可以随时打断她；聊天空间里的每个角色，都有自己的 Live。" />
+    <Title kicker="Live" title="开口就聊，像打电话一样" text="说话时可以随时打断；聊天空间里的每个角色，都有自己的 Live。" />
     <View style={styles.liveStage}>
       {[0, 0.33, 0.66].map((offset) => {
         const phase = Animated.modulo(Animated.add(ring, offset), 1);
@@ -236,7 +236,8 @@ function Voice({ active }: { active: boolean }) {
         }]} />;
       })}
       <View style={styles.portrait}>
-        <Image source={require('../../assets/onboarding-live.webp')} style={styles.portraitImage} resizeMode="cover" />
+        <Image source={require('../../assets/live/stars.webp')} style={styles.portraitImage} resizeMode="cover" />
+        <View style={styles.portraitMark}><BrandMark size={64} /></View>
       </View>
       <View style={styles.liveBadge}><Icon name="waveform" size={14} color="#FFFFFF" /><Text style={styles.liveBadgeText}>正在听…</Text></View>
     </View>
@@ -321,6 +322,7 @@ const styles = StyleSheet.create({
   ring: { position: 'absolute', width: 190, height: 238, borderRadius: 40, borderWidth: 2, borderColor: colors.accent },
   portrait: { width: 190, height: 238, borderRadius: 32, overflow: 'hidden', backgroundColor: colors.primarySoft, borderWidth: 3, borderColor: '#FFFFFF', ...shadow.float },
   portraitImage: { width: '100%', height: '100%' },
+  portraitMark: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   liveBadge: { position: 'absolute', bottom: 20, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, height: 28, borderRadius: 14, backgroundColor: 'rgba(14,19,37,0.78)' },
   liveBadgeText: { color: '#FFFFFF', fontSize: 12.5, fontWeight: '600' },
   step: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },

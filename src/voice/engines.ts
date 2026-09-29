@@ -6,12 +6,11 @@ import { createId, joinUrl, normalizeBaseUrl } from '../domain-utils';
 import { fileBase64 } from '../storage/files';
 import { File } from 'expo-file-system';
 import { decodeBase64, decodeHex, PcmSink, PLAYER_RATE, utf8 } from './pcm';
-import { supportsSpeechApi } from './providers';
-import { isServiceRef, loadSpeechServices, serviceById, serviceValues, SERVICE_PREFIX } from './services';
+import { serviceValues } from '../api/services';
 import { GeminiLiveSession, realtimeInputRate, realtimeUrl, RealtimeSession, type LiveSession, type RealtimeHandlers } from './realtime';
 import { SpeechApiError, streamSpeech, transcribeAudio } from './speech-api';
 import { getProviderKey } from '../storage/secure-keys';
-import { vendorById, type RealtimeProtocol, type SpeechKind, type SttProtocol, type TtsProtocol } from './vendors';
+import { capabilityOf, speechBaseFor, vendorForService, type RealtimeProtocol, type SpeechKind, type SttProtocol, type TtsProtocol } from './vendors';
 
 /**
  * One entry point per speech function. A target is whatever the user picked for that function —
@@ -34,38 +33,34 @@ export interface SpeechTarget {
 
 const KIND_NAME: Record<SpeechKind, string> = { stt: '语音识别', tts: '语音合成', realtime: '实时语音' };
 
-/** Resolves the service picked for a function; `null` when nothing usable is configured. */
+/**
+ * Resolves the service picked for a function; `null` when nothing usable is configured.
+ * `ref` is a service id; null means “the chat service, if its vendor can do this”.
+ */
 export async function resolveTarget(kind: SpeechKind, ref: string | null, model: string, voice: string, providers: ProviderProfile[], chatProvider: ProviderProfile | null): Promise<SpeechTarget | null> {
-  if (isServiceRef(ref)) {
-    await loadSpeechServices();
-    const service = serviceById(ref.slice(SERVICE_PREFIX.length));
-    const vendor = vendorById(service?.vendor);
-    const capability = vendor?.[kind];
-    if (!service || !vendor || !capability) return null;
-    const values = await serviceValues(service);
-    const baseUrl = vendor.id === 'azure-openai'
-      ? `${(values.endpoint || '').replace(/\/+$/, '')}/openai/v1`
-      : values.baseUrl || vendor.baseUrl || '';
-    return {
-      kind, protocol: capability.protocol, vendor: vendor.id, label: service.name || vendor.name, values, baseUrl,
-      model: model.trim() || capability.models[0] || '', voice: voice.trim() || capability.voices?.[0]?.id || '', extra: capability.extra,
-    };
-  }
-  // A chat provider with an OpenAI-style API (the default when nothing else is picked).
-  const preferred = providers.find((item) => item.id === ref);
-  // A provider that was deleted since falls back to the chat provider; one that exists but can't do speech doesn't.
-  const provider = supportsSpeechApi(preferred) ? preferred : preferred ? null : supportsSpeechApi(chatProvider) ? chatProvider : null;
-  if (!provider) return null;
-  const apiKey = await getProviderKey(provider.id);
-  if (!apiKey) throw new Error(`没有找到“${provider.name}”的 API 密钥`);
+  const preferred = ref ? providers.find((item) => item.id === ref) ?? null : null;
+  // A service deleted since falls back to the chat service; one that exists but can't do this doesn't.
+  const service = preferred ?? chatProvider;
+  if (!service) return null;
+  const vendor = vendorForService(service);
+  const capability = capabilityOf(vendor, kind);
+  if (!capability) return null;
+  const values = await serviceValues(service);
+  if (!values.apiKey) throw new Error(`没有找到“${service.name}”的 API 密钥`);
+  const baseUrl = vendor.id === 'azure-openai'
+    ? `${service.baseUrl.trim().replace(/\/+$/, '').replace(/(\/openai)?\/v1$/, '')}/openai/v1`
+    : speechBaseFor(vendor, service.baseUrl);
+  // Following the chat service: its vendor's defaults (a saved model/voice may belong to another vendor).
+  const chosen = preferred ? model.trim() : '';
+  const chosenVoice = preferred ? voice.trim() : '';
   return {
-    kind, protocol: 'openai', vendor: 'provider', label: provider.name, values: { apiKey }, baseUrl: provider.baseUrl,
-    model: model.trim(), voice: voice.trim(),
+    kind, protocol: capability.protocol, vendor: vendor.id, label: service.name || vendor.name, values, baseUrl,
+    model: chosen || capability.models[0] || '', voice: chosenVoice || capability.voices?.[0]?.id || '', extra: capability.extra,
   };
 }
 
 export function missingTargetMessage(kind: SpeechKind): string {
-  return `还没有可用的${KIND_NAME[kind]}服务：请在“设置 → 语音”里为「${KIND_NAME[kind]}」选择一个服务（可添加 OpenAI、阿里云百炼、豆包、硅基流动等）`;
+  return `还没有可用的${KIND_NAME[kind]}：请在“设置 → 语音”里为「${KIND_NAME[kind]}」选择服务和模型（阿里云百炼、豆包语音、OpenAI、硅基流动等都可以）`;
 }
 
 // ——— helpers ———
@@ -350,8 +345,8 @@ export async function synthesize(target: SpeechTarget, { text, instructions, sig
   const sink = new PcmSink(onAudio);
   switch (protocol) {
     case 'openai': {
-      if (target.vendor === 'provider' || target.vendor === 'openai' || target.vendor === 'custom') {
-        await streamSpeech({ baseUrl: target.baseUrl, apiKey: v.apiKey, model: target.model, voice: target.voice, input: text, instructions: target.vendor === 'provider' || /gpt-4o/.test(target.model) ? instructions : undefined, signal, onAudio });
+      if (target.vendor === 'openai' || target.vendor === 'custom') {
+        await streamSpeech({ baseUrl: target.baseUrl, apiKey: v.apiKey, model: target.model, voice: target.voice, input: text, instructions: /gpt-4o|gpt-.*tts/.test(target.model) ? instructions : undefined, signal, onAudio });
         return;
       }
       // Other OpenAI-style /audio/speech APIs (硅基流动、智谱、阶跃、Azure…): raw PCM or WAV, normalised here.
@@ -443,7 +438,8 @@ export async function synthesize(target: SpeechTarget, { text, instructions, sig
     }
     case 'volcengine': {
       const voice = target.voice || 'zh_female_vv_uranus_bigtts';
-      const resource = /^S_/.test(voice) ? 'seed-icl-2.0' : /_uranus_|saturn_/.test(voice) ? 'seed-tts-2.0' : 'seed-tts-1.0';
+      // A chosen resource (seed-tts-2.0…) wins; “自动” derives it from the voice.
+      const resource = /^seed-/.test(target.model) ? target.model : /^S_/.test(voice) ? 'seed-icl-2.0' : /_uranus_|saturn_/.test(voice) ? 'seed-tts-2.0' : 'seed-tts-1.0';
       const response = await fetchImpl('https://openspeech.bytedance.com/api/v3/tts/unidirectional', {
         method: 'POST', signal, headers: volcHeaders(v, resource),
         body: JSON.stringify({ user: { uid: 'salcara' }, req_params: { text, speaker: voice, audio_params: { format: 'pcm', sample_rate: PLAYER_RATE } } }),

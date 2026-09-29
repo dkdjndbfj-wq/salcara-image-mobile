@@ -8,12 +8,12 @@ import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { Group, ListRow, Sheet, showToast } from './ui';
 
-const QQ_NUMBER = '2423034538';
+const QQ_GROUP = '881490534';
 
 export function AboutSheet({ visible, onClose, onCheckUpdates }: { visible: boolean; onClose: () => void; onCheckUpdates: () => void }) {
   const version = Application.nativeApplicationVersion ?? '开发版';
   const build = Application.nativeBuildVersion;
-  const copyQQ = () => void Clipboard.setStringAsync(QQ_NUMBER).then(() => showToast('QQ 号已复制'));
+  const copyQQ = () => void Clipboard.setStringAsync(QQ_GROUP).then(() => showToast('QQ 群号已复制，打开 QQ 搜索即可加入'));
   return <Sheet visible={visible} title="关于" onClose={onClose} presentation="page">
     <View style={styles.body}>
       <View style={styles.hero}>
@@ -24,7 +24,7 @@ export function AboutSheet({ visible, onClose, onCheckUpdates }: { visible: bool
       </View>
       <Group>
         <ListRow first icon="cloudDown" title="检查更新" onPress={() => { onClose(); onCheckUpdates(); }} />
-        <ListRow icon="chat" title="联系与反馈" value={`QQ ${QQ_NUMBER}`} onPress={copyQQ} right={<Icon name="copy" size={17} color={colors.faint} />} />
+        <ListRow icon="chat" title="反馈交流 QQ 群" value={QQ_GROUP} onPress={copyQQ} right={<Icon name="copy" size={17} color={colors.faint} />} />
       </Group>
       <Text style={styles.note}>新版本可在应用内下载安装。使用同一签名覆盖安装，会保留本机的对话与设置。</Text>
       <View style={styles.privacy}>

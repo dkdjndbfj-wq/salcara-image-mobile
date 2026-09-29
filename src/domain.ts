@@ -24,6 +24,10 @@ export interface ProviderProfile {
   chatApi?: ChatApi;
   analysisProviderId?: string | null;
   imageProviderId?: string | null;
+  /** Catalog id (src/api/vendors.ts); null for services added before the catalog (matched by address). */
+  vendor?: string | null;
+  /** Non-secret vendor fields such as an Azure region or a 火山 APP ID. */
+  extra?: Record<string, string> | null;
   createdAt: number;
   updatedAt: number;
 }

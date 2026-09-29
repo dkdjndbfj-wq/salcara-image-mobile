@@ -1,12 +1,9 @@
 jest.mock('expo/fetch', () => ({ fetch: jest.fn() }));
-jest.mock('expo-file-system', () => {
-  class File {
-    uri: string;
-    constructor(path: string) { this.uri = path; }
-    async bytes() { return new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4]); }
-  }
-  return { File };
-});
+jest.mock('expo-file-system', () => ({ File: class {
+  uri: string;
+  constructor(path: string) { this.uri = path; }
+  async bytes() { return new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4]); }
+} }));
 jest.mock('../storage/files', () => ({ fileBase64: async () => 'UklGRgECAwQ=' }));
 const mockSecrets: Record<string, string> = {};
 jest.mock('../storage/secure-keys', () => ({
@@ -20,7 +17,8 @@ jest.mock('../storage/database', () => ({ getSetting: async (key: string) => moc
 import { maxRecordingMs, openRealtime, resolveTarget, setSpeechFetchForTesting, speechLanguage, synthesize, transcribe, type SpeechTarget } from '../voice/engines';
 import { decodeBase64, decodeHex, PcmSink, resamplePcm16 } from '../voice/pcm';
 import { handleRealtimeEvent, sessionUpdate } from '../voice/realtime';
-import { deleteSpeechService, resetSpeechServicesForTesting, saveSpeechService, serviceRef } from '../voice/services';
+import { defaultModel, modelsFor, speechBaseFor, supports, vendorForService } from '../api/vendors';
+import type { ProviderProfile } from '../domain';
 import { encodeBase64 } from '../voice/speech-api';
 import { VENDORS } from '../voice/vendors';
 
@@ -43,12 +41,13 @@ function mockFetch(...responses: unknown[]) {
 const target = (patch: Partial<SpeechTarget>): SpeechTarget => ({ kind: 'tts', protocol: 'openai', vendor: 'openai', label: 'T', values: { apiKey: 'k' }, baseUrl: '', model: '', voice: '', ...patch });
 const pcm = (samples: number[]) => { const bytes = new Uint8Array(samples.length * 2); const view = new DataView(bytes.buffer); samples.forEach((value, index) => view.setInt16(index * 2, value, true)); return bytes; };
 
-test('every vendor declares at least one function with models, and field keys are unique', () => {
+test('every service vendor does something, speech functions have models, and field keys are unique', () => {
   for (const vendor of VENDORS) {
-    const kinds = (['stt', 'tts', 'realtime'] as const).filter((kind) => vendor[kind]);
+    const kinds = (['chat', 'image', 'stt', 'tts', 'realtime'] as const).filter((kind) => supports(vendor, kind));
     expect(kinds.length).toBeGreaterThan(0);
-    for (const kind of kinds) expect(vendor[kind]!.models.length).toBeGreaterThan(0);
-    expect(new Set(vendor.fields.map((field) => field.key)).size).toBe(vendor.fields.length);
+    for (const kind of (['stt', 'tts', 'realtime'] as const)) if (vendor[kind]) expect(vendor[kind]!.models.length).toBeGreaterThan(0);
+    const fields = vendor.fields ?? [];
+    expect(new Set(fields.map((field) => field.key)).size).toBe(fields.length);
   }
 });
 
@@ -102,25 +101,44 @@ test('PCM resampling is continuous across chunk boundaries', () => {
   expect(maxRecordingMs('baidu')).toBe(58_000);
 });
 
-test('saving a speech service with a missing field writes no secret', async () => {
-  resetSpeechServicesForTesting();
-  Object.keys(mockSecrets).forEach((key) => delete mockSecrets[key]);
-  let error = '';
-  await saveSpeechService({ vendor: 'baidu', name: '百度', config: {} }, { apiKey: 'a' }).catch((caught: Error) => { error = caught.message; });
-  expect(error).toContain('请填写');
-  expect(Object.keys(mockSecrets)).toEqual([]);
+const service = (patch: Partial<ProviderProfile>): ProviderProfile => ({ id: 's', name: '服务', baseUrl: '', model: null, quality: null, aspectRatio: null, resolutionTier: null, createdAt: 1, updatedAt: 1, ...patch });
+
+test('one service = address + key: speech resolves through the vendor catalog', async () => {
+  // 豆包语音: the key is sent as the access key, the APP ID comes from the service's extra fields.
+  mockSecrets.volc = 'volc-key';
+  const volc = service({ id: 'volc', name: '豆包语音', vendor: 'volcengine', extra: { appId: '123' } });
+  expect(await resolveTarget('stt', 'volc', '', '', [volc], null)).toMatchObject({ protocol: 'volcengine', model: 'bigmodel', values: { accessKey: 'volc-key', appId: '123' } });
+  expect(await resolveTarget('realtime', 'volc', '', '', [volc], null)).toBeNull();
+
+  // 百炼 added once for chat: its speech APIs live at the account root, not /compatible-mode/v1.
+  mockSecrets.ali = 'ali-key';
+  const ali = service({ id: 'ali', name: '百炼', vendor: 'dashscope', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', chatModel: 'qwen-plus' });
+  expect(await resolveTarget('tts', null, 'gpt-4o-mini-tts', 'marin', [ali], ali)).toMatchObject({ protocol: 'dashscope', baseUrl: 'https://dashscope.aliyuncs.com', model: 'qwen3-tts-flash', voice: 'Cherry' });
+  expect(await resolveTarget('stt', 'ali', 'qwen3-asr-flash', '', [ali], null)).toMatchObject({ model: 'qwen3-asr-flash' });
+
+  // A service deleted since falls back to the chat service; a chat-only vendor has no speech.
+  mockSecrets.ds = 'ds-key';
+  const deepseek = service({ id: 'ds', name: 'DeepSeek', vendor: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', chatModel: 'deepseek-chat' });
+  expect(await resolveTarget('stt', 'gone', '', '', [ali, deepseek], ali)).toMatchObject({ vendor: 'dashscope' });
+  expect(await resolveTarget('stt', null, '', '', [deepseek], deepseek)).toBeNull();
+
+  // Services added before the catalog are matched by address; Gemini speech drops the /openai path.
+  mockSecrets.g = 'g-key';
+  const gemini = service({ id: 'g', name: 'Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' });
+  expect(vendorForService(gemini).id).toBe('gemini');
+  expect(speechBaseFor(vendorForService(gemini), gemini.baseUrl)).toBe('https://generativelanguage.googleapis.com/v1beta');
+  expect(await resolveTarget('realtime', 'g', '', '', [gemini], null)).toMatchObject({ protocol: 'gemini', model: 'gemini-3.8-live' });
 });
 
-test('speech services keep secrets apart and resolve with their own vendor protocol', async () => {
-  resetSpeechServicesForTesting();
-  const service = await saveSpeechService({ vendor: 'volcengine', name: '豆包', config: { appId: '' } }, { accessKey: 'volc-key' });
-  expect(JSON.parse(mockStore.speech_services)[0].config.accessKey).toBeUndefined();
-  const resolved = await resolveTarget('stt', serviceRef(service.id), '', '', [], null);
-  expect(resolved).toMatchObject({ protocol: 'volcengine', model: 'bigmodel', values: { accessKey: 'volc-key' } });
-  expect(await resolveTarget('realtime', serviceRef(service.id), '', '', [], null)).toBeNull();
-  await deleteSpeechService(service.id);
-  expect(Object.keys(mockSecrets)).toEqual([]);
-  await expect(saveSpeechService({ vendor: 'baidu', name: '', config: {} }, { apiKey: 'a' })).rejects.toThrow('Secret Key');
+test('model lists per function mix the vendor’s known models with what the API reports', () => {
+  const openai = vendorForService(service({ vendor: 'openai', baseUrl: 'https://api.openai.com/v1' }));
+  const listed = ['gpt-5', 'gpt-image-2', 'whisper-1', 'gpt-4o-mini-tts', 'gpt-realtime', 'text-embedding-3-small'];
+  expect(modelsFor(openai, 'chat', listed)).toEqual(['gpt-5']);
+  expect(modelsFor(openai, 'image', listed)).toEqual(['gpt-image-2']);
+  expect(modelsFor(openai, 'stt', listed)).toContain('whisper-1');
+  expect(modelsFor(openai, 'tts', listed)[0]).toBe('gpt-4o-mini-tts');
+  expect(modelsFor(openai, 'realtime', listed)).toContain('gpt-realtime');
+  expect(defaultModel(openai, 'image', listed)).toBe('gpt-image-2');
 });
 
 test('recognition speaks each vendor’s API', async () => {
