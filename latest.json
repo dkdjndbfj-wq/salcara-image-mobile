@@ -1,15 +1,15 @@
 {
-  "version": "1.6.0",
-  "tagName": "v1.6.0",
-  "title": "Salcara AI v1.6.0",
-  "notes": "# Salcara AI v1.6.0\n\nAndroid `versionCode` 为 17，可直接覆盖安装 v1.5.0。服务商、密钥、会话和本地图片会保留。\n\n## 聊天空间与记忆匣\n\n- 新增独立的“聊天”空间，可创建角色并持续对话；与助手空间的会话分开保存。\n- 每个角色有自己的分层对话记忆和记忆匣，支持查看、搜索、编辑、删除及导出为 Obsidian Markdown。\n- 角色可按设置使用对话、图片、联网和 Live 语音能力；记忆整理可单独配置或关闭。\n\n## 更多模型与工具\n\n- 新增可配置的智能体、工具箱和工具调用步骤展示；支持按需配置工具、搜索与文件能力。\n- 增加语音服务商与协议选项，语音识别、语音合成和实时语音可分别配置。\n- 增加自定义图片画幅。除常用比例外，可输入比例或宽高；使用前会按模型允许的尺寸规则校验。\n- 增加更多文件预览、个人化设置和 Live 界面资源。\n\n## 兼容性与修复\n\n- 保留 v1.5.0 的服务商、密钥、会话和图片，可覆盖安装升级。\n- 修复语音供应商测试中的 Jest mock 初始化问题，并通过类型检查和自动化测试。\n\n## 权限\n\n语音功能按需使用麦克风。手机操作功能只有在用户确认相应卡片后才会调用 Android 系统功能。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.6.0",
-  "publishedAt": "2026-09-28T16:42:14Z",
+  "version": "1.6.1",
+  "tagName": "v1.6.1",
+  "title": "Salcara AI v1.6.1",
+  "notes": "# Salcara AI v1.6.1\n\nAndroid `versionCode` 为 18。可覆盖安装 v1.6.0；服务商、密钥、会话和本地文件保留。\n\n## 服务商与设置\n\n- 重新整理 API 管理：按服务商保存地址和密钥，对话、绘图、语音识别、语音合成及实时语音分别选择使用哪个服务和模型。\n- 新增常用服务商目录、功能选择器与统一设置入口；助手和聊天空间可使用同一套配置。\n- 旧语音服务配置在升级后迁移到统一的 API 服务列表。\n\n## 界面与维护\n\n- 调整模型切换、角色聊天、记忆匣、工具和语音设置界面。\n- 移除不再使用的 Live 图片资源、旧灵感组件和旧语音服务占位文件。\n- 修复语音测试夹具的兼容问题，并通过类型检查与自动化测试。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.6.1",
+  "publishedAt": "2026-09-29T04:02:36Z",
   "apk": {
-    "name": "salcara-image-android-v1.6.0.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.6.0/salcara-image-android-v1.6.0.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/595888331",
-    "size": 130951560,
-    "digest": "sha256:9f45e3acee13eb4587202bc11fe1dfb805e35c9aa88f95f5be47f55db260d621"
+    "name": "salcara-image-android-v1.6.1.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.6.1/salcara-image-android-v1.6.1.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/597200494",
+    "size": 130165039,
+    "digest": "sha256:dd9c9eb326149afa8d541c8315ebe22d1a3661f6b6c7e5b44f1c8022c499b975"
   }
 }
