@@ -1,15 +1,15 @@
 {
-  "version": "1.6.1",
-  "tagName": "v1.6.1",
-  "title": "Salcara AI v1.6.1",
-  "notes": "# Salcara AI v1.6.1\n\nAndroid `versionCode` 为 18。可覆盖安装 v1.6.0；服务商、密钥、会话和本地文件保留。\n\n## 服务商与设置\n\n- 重新整理 API 管理：按服务商保存地址和密钥，对话、绘图、语音识别、语音合成及实时语音分别选择使用哪个服务和模型。\n- 新增常用服务商目录、功能选择器与统一设置入口；助手和聊天空间可使用同一套配置。\n- 旧语音服务配置在升级后迁移到统一的 API 服务列表。\n\n## 界面与维护\n\n- 调整模型切换、角色聊天、记忆匣、工具和语音设置界面。\n- 移除不再使用的 Live 图片资源、旧灵感组件和旧语音服务占位文件。\n- 修复语音测试夹具的兼容问题，并通过类型检查与自动化测试。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.6.1",
-  "publishedAt": "2026-09-29T04:02:36Z",
+  "version": "1.6.2",
+  "tagName": "v1.6.2",
+  "title": "Salcara AI v1.6.2",
+  "notes": "# Salcara AI v1.6.2\n\nAndroid `versionCode` 为 19。可覆盖安装 v1.6.1；服务商、密钥、会话和本地文件保留。\n\n## 语音设置\n\n- 语音合成与实时语音分别展示可用音色；切换模型时，音色选项随模型更新。\n- 为 OpenAI、阿里云百炼及火山引擎的不同语音模型提供相应音色选项。\n- 继续支持手动填写自定义或克隆音色 ID；仅在已知预设音色与新模型不兼容时自动选择该模型的首个可用音色。\n\n## 验证\n\n- 修复语音测试夹具在 Jest 中的初始化错误。\n- 通过 TypeScript 类型检查与自动化测试。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.6.2",
+  "publishedAt": "2026-09-29T04:44:53Z",
   "apk": {
-    "name": "salcara-image-android-v1.6.1.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.6.1/salcara-image-android-v1.6.1.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/597200494",
-    "size": 130165039,
-    "digest": "sha256:dd9c9eb326149afa8d541c8315ebe22d1a3661f6b6c7e5b44f1c8022c499b975"
+    "name": "salcara-image-android-v1.6.2.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.6.2/salcara-image-android-v1.6.2.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/597273060",
+    "size": 130167875,
+    "digest": "sha256:6b19e4aa0b301bd92e347528b55a1fe38f9e78496c9910f8ae5d7a68eb3031fa"
   }
 }
