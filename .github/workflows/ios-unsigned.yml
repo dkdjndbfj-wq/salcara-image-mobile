@@ -1,0 +1,94 @@
+name: Unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to build
+        required: true
+        default: v1.7.0
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned-ipa:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Show build environment
+        run: |
+          sw_vers -productVersion
+          xcodebuild -version
+          pod --version
+      - name: Install JavaScript dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Check release version
+        shell: bash
+        run: |
+          node scripts/verify-release-version.mjs
+          test "$RELEASE_TAG" = "v$(node -p 'require("./package.json").version')"
+      - name: Generate native iOS project
+        run: npx expo prebuild --platform ios --no-install
+      - name: Install CocoaPods dependencies
+        working-directory: ios
+        run: pod install --repo-update
+      - name: Build unsigned iPhone archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="$(find ios -maxdepth 1 -name '*.xcodeproj' -print -quit)"
+          workspace="$(find ios -maxdepth 1 -name '*.xcworkspace' -print -quit)"
+          test -n "$project" && test -n "$workspace"
+          scheme="$(xcodebuild -list -json -project "$project" | jq -r '.project.schemes[0] // empty')"
+          test -n "$scheme"
+          echo "Building scheme: $scheme"
+          xcodebuild \
+            -workspace "$workspace" \
+            -scheme "$scheme" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/SalcaraAI-unsigned.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            archive
+      - name: Package and verify unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find "$RUNNER_TEMP/SalcaraAI-unsigned.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app" && test -d "$app"
+          test ! -e "$app/_CodeSignature"
+          out='build/ios-release'
+          mkdir -p "$out/Payload"
+          ditto "$app" "$out/Payload/$(basename "$app")"
+          ipa="salcara-ai-ios-unsigned-${RELEASE_TAG}.ipa"
+          (cd "$out" && zip -qry "$ipa" Payload)
+          (cd "$out" && shasum -a 256 "$ipa" > "$ipa.sha256")
+          unzip -t "$out/$ipa" >/dev/null
+          ls -lh "$out/$ipa" "$out/$ipa.sha256"
+      - name: Upload unsigned IPA for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: salcara-ai-ios-unsigned-${{ inputs.release_tag }}
+          path: |
+            build/ios-release/*.ipa
+            build/ios-release/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
