@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Salcara Bridge</title>
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="logo.svg" alt="" class="brand-logo">
+      <div>
+        <div class="brand-name">Salcara Bridge</div>
+        <div class="brand-sub">远程编程助手</div>
+      </div>
+    </div>
+    <nav class="nav" id="nav">
+      <a href="#overview" data-route="overview"><span class="ico" data-icon="home"></span><span>概览</span></a>
+      <a href="#login" data-route="login"><span class="ico" data-icon="key"></span><span>登录 / 中转站</span></a>
+      <a href="#tools" data-route="tools"><span class="ico" data-icon="plug"></span><span>工具配置</span></a>
+      <a href="#projects" data-route="projects"><span class="ico" data-icon="folder"></span><span>项目文件夹</span></a>
+      <a href="#sessions" data-route="sessions"><span class="ico" data-icon="chat"></span><span>会话</span><span class="nav-badge" id="approvalBadge" hidden>0</span></a>
+      <a href="#settings" data-route="settings"><span class="ico" data-icon="gear"></span><span>设置</span></a>
+    </nav>
+    <div class="side-foot">
+      <div class="conn" id="connPill"><span class="dot"></span><span class="conn-label">读取中…</span></div>
+      <div class="side-ver" id="sideVer"></div>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="page-head">
+      <div>
+        <h1 id="pageTitle"></h1>
+        <p id="pageSub"></p>
+      </div>
+      <div class="head-actions" id="headActions"></div>
+    </header>
+    <section id="view" class="view"></section>
+  </main>
+</div>
+<div id="modalRoot"></div>
+<div id="toastRoot" class="toasts"></div>
+<script src="app.js"></script>
+</body>
+</html>

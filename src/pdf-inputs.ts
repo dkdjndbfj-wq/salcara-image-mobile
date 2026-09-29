@@ -1,6 +1,5 @@
 import { requireOptionalNativeModule } from 'expo';
 import { Directory, File, Paths } from 'expo-file-system';
-import { Platform } from 'react-native';
 
 import { abortError } from './api/network';
 
@@ -34,13 +33,12 @@ function renderDirectory(uri: string): string | null {
 /** Returns every page, or rejects before any API call; no partial document. */
 export async function renderPdfPages(uri: string, signal?: AbortSignal): Promise<PdfRenderResult> {
   if (signal?.aborted) throw abortError();
-  if (Platform.OS !== 'android') throw new Error('PDF 页面解析目前仅支持 Android 安装版');
   if (!uri.startsWith('file://')) throw new Error('请先通过附件按钮导入本地 PDF');
   const source = new File(uri);
   if (!source.exists || (source.size ?? 0) <= 0) throw new Error('本地 PDF 不存在，请重新添加附件');
   if ((source.size ?? 0) > MAX_RENDER_BYTES) throw new Error('PDF 超过 20MB，请缩小文件后重试');
   const native = requireOptionalNativeModule<PdfModule>('SalcaraPdf');
-  if (!native) throw new Error('当前安装包缺少 PDF 页面解析组件，请安装最新完整 APK（Expo Go 不支持）');
+  if (!native) throw new Error('当前安装包缺少 PDF 页面解析组件，请安装最新完整版本（Expo Go 不支持）');
   const result = await native.renderPdfAsync(uri);
   const directory = typeof result?.directory === 'string' ? renderDirectory(result.directory) : null;
   if (!directory) throw new Error('PDF 解析返回了无效缓存路径');

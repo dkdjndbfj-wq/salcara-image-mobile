@@ -286,7 +286,8 @@ async function requestImageApi(url: string, options: Parameters<typeof fetch>[1]
 /** Failures that happen before any byte of the request reaches the server. */
 export function isConnectFailure(error: unknown): boolean {
   if (!(error instanceof Error) || isAbortError(error)) return false;
-  return /unknownhost|unable to resolve|no address associated|failed to connect|connectexception|connection refused|econnrefused|ehostunreach|enetunreach|network is unreachable|sslhandshake|handshake failed|cleartext/i.test(error.message);
+  // Android (OkHttp / Java) and iOS (NSURLError) wordings of “never reached the server”.
+  return /unknownhost|unable to resolve|no address associated|failed to connect|connectexception|connection refused|econnrefused|ehostunreach|enetunreach|network is unreachable|sslhandshake|handshake failed|cleartext|hostname could not be found|could not connect to the server|appears to be offline|not connected to the internet|app transport security/i.test(error.message);
 }
 
 function authorizationHeaders(apiKey: string): Record<string, string> {

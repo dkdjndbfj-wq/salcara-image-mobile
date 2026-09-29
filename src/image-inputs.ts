@@ -2,7 +2,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { File } from 'expo-file-system';
-import { Image } from 'react-native';
+import { Image, Platform } from 'react-native';
 
 import type { ReferenceImage } from './domain';
 import { createId } from './domain-utils';
@@ -22,8 +22,11 @@ type InputAsset = {
 };
 
 export async function pickFromGallery(remaining: number): Promise<ReferenceImage[]> {
-  const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-  if (!permission.granted) throw new Error('需要相册权限才能选择参考图');
+  // iOS uses the system photo picker, which needs no photo-library permission (asking would only prompt for full access).
+  if (Platform.OS !== 'ios') {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) throw new Error('需要相册权限才能选择参考图');
+  }
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ['images'],
     allowsMultipleSelection: remaining > 1,

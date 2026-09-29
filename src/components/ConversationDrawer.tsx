@@ -5,6 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAgents } from '../agent/agents';
 import type { CustomAgent, HistoryHit } from '../agent/types';
 import type { Conversation } from '../domain';
+import { usePendingApprovalCount } from '../remote/store';
 import { searchMessages } from '../storage/database';
 import { useApp } from '../state/AppContext';
 import { colors, prettyModel, radius, shadow } from '../theme';
@@ -12,9 +13,10 @@ import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { AppDialog, dismissKeyboardAndBlur, MotionPressable, useReducedMotion, type DialogAction } from './ui';
 
-export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings, onOpenAgents, onStartAgent }: {
-  visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void; onOpenAgents: () => void; onStartAgent: (agent: CustomAgent) => void;
+export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings, onOpenAgents, onStartAgent, onOpenRemote }: {
+  visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void; onOpenAgents: () => void; onStartAgent: (agent: CustomAgent) => void; onOpenRemote: () => void;
 }) {
+  const pendingApprovals = usePendingApprovalCount();
   const { conversations, activeConversationId, chatProvider, imageProvider, openConversation, deleteConversation, renameConversation, runningConversationIds } = useApp();
   const agents = useAgents();
   const [query, setQuery] = useState('');
@@ -108,6 +110,12 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
             <Pressable accessibilityRole="button" accessibilityLabel="开始新对话" onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={({ pressed }) => [styles.brandRow, pressed && { backgroundColor: colors.surface }]}>
               <BrandMark size={30} />
               <Text style={styles.brand}>Salcara</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`远程编程${pendingApprovals ? `，${pendingApprovals} 个待批准` : ''}`} onPress={() => { dismissKeyboardAndBlur(); onClose(); onOpenRemote(); }}
+              style={({ pressed }) => [styles.agentRow, pressed && { backgroundColor: colors.surface }]}>
+              <View style={styles.agentIcon}><Icon name="code" size={17} color={colors.textSecondary} /></View>
+              <Text style={styles.agentName}>远程编程</Text>
+              {pendingApprovals ? <View style={styles.badge}><Text style={styles.badgeText}>{pendingApprovals > 99 ? '99+' : pendingApprovals}</Text></View> : null}
             </Pressable>
           </> : null}
 
@@ -208,6 +216,8 @@ const styles = StyleSheet.create({
   agentRow: { flexDirection: 'row', alignItems: 'center', gap: 12, height: 44, paddingHorizontal: 8, borderRadius: 14 },
   agentIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
   agentName: { flex: 1, color: colors.textSecondary, fontSize: 15 },
+  badge: { minWidth: 20, height: 20, borderRadius: 10, paddingHorizontal: 6, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.danger, marginRight: 4 },
+  badgeText: { color: '#FFFFFF', fontSize: 11.5, fontWeight: '700' },
   hit: { paddingHorizontal: 10, paddingVertical: 9, borderRadius: 12, gap: 3 },
   hitTitle: { color: colors.text, fontSize: 14.5, fontWeight: '500' },
   hitSnippet: { color: colors.subtle, fontSize: 13, lineHeight: 18 },

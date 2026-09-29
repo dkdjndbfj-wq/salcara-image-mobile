@@ -48,3 +48,5 @@ yarn-error.*
 
 # Local native module build output (sherpa-onnx AAR is downloaded here at build time)
 modules/*/android/build/
+remote/bridge/desktop/bin/
+remote/bridge/desktop/out/

@@ -83,6 +83,18 @@ Android `versionCode` 为 16，可覆盖安装 v1.3.x，会话、服务商与密
 - **思考模型的工具调用更稳**：DeepSeek、Kimi 等思考模型的推理内容、Gemini 的思维签名会在同一轮的工具调用中原样回传，避免多步工具时报错。
 - **重新生成更安心**：重新生成使用当前选中的模型；如果失败或被停止，原来的回答会恢复，不会丢失。
 
+## 远程编程（中转站用户专享）
+
+- 在手机上看电脑里 Codex、Claude Code（含 Claude Desktop 的 Code 会话）的进度，能发新任务、继续对话、批准或拒绝命令和改文件、随时停止。
+- 会话按工具和来源区分（Codex CLI / IDE / App、Claude Code / Claude Desktop）。
+- 电脑端装「Salcara Bridge」（Windows / macOS），开机自启，本地控制台里一键把 Codex、Claude 配成走中转站。
+- 只有填了本中转站 API Key 的用户可用；任务照常走中转站计费。
+
+## 支持 iPhone
+
+- 新增 iOS 版本：对话、绘图、语音（云端识别）、远程编程都能用。
+- iPhone 上没有离线语音模型和设闹钟功能，日历、PDF 解析可用。
+
 ## 修复
 
 - API 地址：带版本号的地址（火山方舟 /api/v3、智谱 /api/paas/v4、Gemini /v1beta/openai、千帆 /v2 等）不再被错误地追加 /v1；已保存的错误地址会自动修正。修改服务商地址到另一个服务时，不会再把旧密钥发给新服务。

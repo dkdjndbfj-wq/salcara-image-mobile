@@ -239,7 +239,7 @@ export function SectionLabel({ children }: { children: ReactNode }) {
 }
 
 // ——— Toast ———
-type ToastMessage = { id: number; text: string; icon: IconName };
+type ToastMessage = { id: number; text: string; icon: IconName; onPress?: () => void };
 /**
  * Every open layer (screen, sheet, image preview) mounts its own host; the most
  * recently mounted one — the one on top — shows the toast, so confirmations are
@@ -247,7 +247,7 @@ type ToastMessage = { id: number; text: string; icon: IconName };
  */
 const toastListeners: Array<(toast: ToastMessage) => void> = [];
 let toastId = 0;
-export function showToast(text: string, icon: IconName = 'checkCircle') { toastListeners[toastListeners.length - 1]?.({ id: ++toastId, text, icon }); }
+export function showToast(text: string, icon: IconName = 'checkCircle', onPress?: () => void) { toastListeners[toastListeners.length - 1]?.({ id: ++toastId, text, icon, onPress }); }
 
 export function ToastHost() {
   const [toast, setToast] = useState<ToastMessage | null>(null);
@@ -265,16 +265,22 @@ export function ToastHost() {
     progress.setValue(0);
     const animation = Animated.sequence([
       Animated.spring(progress, { toValue: 1, damping: 18, stiffness: 240, useNativeDriver: true }),
-      Animated.delay(1400),
+      Animated.delay(toast.onPress ? 3600 : 1400),
       Animated.timing(progress, { toValue: 0, duration: 220, useNativeDriver: true }),
     ]);
     animation.start(({ finished }) => { if (finished) setToast(null); });
     return () => animation.stop();
   }, [toast, progress]);
   if (!toast) return null;
-  return <Animated.View pointerEvents="none" style={[styles.toast, { top: insets.top + 10, opacity: progress, transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [-20, 0] }) }, { scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) }] }]}>
+  const body = <>
     <View style={styles.toastIcon}><Icon name={toast.icon} size={15} color="#FFFFFF" strokeWidth={1.9} /></View>
     <Text style={styles.toastText} numberOfLines={3}>{toast.text}</Text>
+    {toast.onPress ? <Icon name="chevronRight" size={16} color="rgba(255,255,255,0.7)" /> : null}
+  </>;
+  return <Animated.View pointerEvents={toast.onPress ? 'box-none' : 'none'} style={[styles.toast, { top: insets.top + 10, opacity: progress, transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [-20, 0] }) }, { scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) }] }]}>
+    {toast.onPress
+      ? <Pressable accessibilityRole="button" onPress={() => { const action = toast.onPress; setToast(null); action?.(); }} style={styles.toastPress}>{body}</Pressable>
+      : body}
   </Animated.View>;
 }
 
@@ -334,6 +340,7 @@ const styles = StyleSheet.create({
   rowValue: { color: colors.subtle, fontSize: 14, maxWidth: '50%' },
   sectionLabel: { color: colors.subtle, fontSize: 12.5, fontWeight: '500', marginTop: 26, marginBottom: 8, marginLeft: 16 },
   toast: { position: 'absolute', alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 9, paddingLeft: 8, paddingRight: 18, paddingVertical: 8, minHeight: 44, maxWidth: '90%', borderRadius: 22, backgroundColor: 'rgba(14,19,37,0.9)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.14)', ...shadow.float, zIndex: 100 },
+  toastPress: { flexDirection: 'row', alignItems: 'center', gap: 9, flexShrink: 1 },
   toastIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(124,198,255,0.28)' },
   toastText: { color: '#FFFFFF', fontSize: 14, fontWeight: '500', flexShrink: 1, lineHeight: 19 },
 });

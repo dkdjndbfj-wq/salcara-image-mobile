@@ -1,6 +1,6 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { Animated, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Animated, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import type { Source } from '../agent/types';
 import { colors, radius } from '../theme';
@@ -163,6 +163,9 @@ function Caret() {
   return <Animated.View style={[styles.caret, { opacity }]} />;
 }
 
+/** iOS has no font named “monospace”. */
+const MONO = Platform.select({ ios: 'Menlo', default: 'monospace' });
+
 const styles = StyleSheet.create({
   content: { width: '100%', gap: 12 },
   blocks: { gap: 10 },
@@ -178,7 +181,7 @@ const styles = StyleSheet.create({
   dotHollow: { backgroundColor: 'transparent', borderWidth: 1.2, borderColor: colors.text },
   quote: { borderLeftWidth: 3, borderColor: colors.border, paddingLeft: 14, paddingVertical: 2 },
   divider: { height: 1, backgroundColor: colors.border, marginVertical: 8 },
-  inlineCode: { fontFamily: 'monospace', fontSize: 14, color: colors.text, backgroundColor: colors.surfaceStrong },
+  inlineCode: { fontFamily: MONO, fontSize: 14, color: colors.text, backgroundColor: colors.surfaceStrong },
   link: { color: colors.primaryStrong, textDecorationLine: 'underline' },
   citation: { fontSize: 11.5, lineHeight: 27, fontWeight: '600', color: colors.primaryDeep, backgroundColor: colors.primarySoft },
   tableScroll: { flexGrow: 0 },
@@ -193,7 +196,7 @@ const styles = StyleSheet.create({
   copy: { flexDirection: 'row', alignItems: 'center', gap: 4, height: 36, paddingHorizontal: 4 },
   language: { fontSize: 12, color: colors.textMuted },
   codeScroll: { padding: 14 },
-  code: { fontSize: 13.5, lineHeight: 21, fontFamily: 'monospace', color: colors.textSecondary },
+  code: { fontSize: 13.5, lineHeight: 21, fontFamily: MONO, color: colors.textSecondary },
   caretText: { color: colors.primary, fontSize: 12 },
   caret: { width: 9, height: 9, borderRadius: 5, backgroundColor: colors.primary, marginTop: 4 },
 });

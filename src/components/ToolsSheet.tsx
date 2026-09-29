@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 
 import { getSearchKey, SEARCH_ENGINES, setSearchKey, updateAgentSettings, useAgentSettings, type SearchKeyName } from '../agent/settings';
 import { colors, radius } from '../theme';
@@ -62,7 +62,7 @@ export function ToolsSheet({ visible, onClose }: { visible: boolean; onClose: ()
 
       <SectionLabel>手机操作</SectionLabel>
       <Group>
-        <ToggleRow first icon="alarm" title="闹钟、日程、短信、导航" detail="Salcara 会先生成确认卡片，你点确认后才打开系统应用" value={settings.phoneActions} onChange={(phoneActions) => save({ phoneActions })} />
+        <ToggleRow first icon={Platform.OS === 'ios' ? 'calendar' : 'alarm'} title={Platform.OS === 'ios' ? '日程、短信、邮件、导航' : '闹钟、日程、短信、导航'} detail={Platform.OS === 'ios' ? 'Salcara 会先生成确认卡片，你点确认后才添加日程或打开系统应用' : 'Salcara 会先生成确认卡片，你点确认后才打开系统应用'} value={settings.phoneActions} onChange={(phoneActions) => save({ phoneActions })} />
       </Group>
     </View>
     <AppDialog visible={confirmClear} title="清除搜索密钥？" message="将删除这台手机上保存的 Tavily 和 Brave Search 密钥，之后需要重新粘贴才能使用。" icon="trash"

@@ -164,6 +164,39 @@ export const TOOL_SPECS: Record<ToolName, ToolSpec> = {
 };
 
 /** The protocol-specific function definition. */
+/**
+ * phone_action as offered on iOS: iPhone lets no app create Clock alarms or timers, so those two
+ * actions (and their parameters) are left out instead of producing cards that cannot run.
+ */
+const IOS_PHONE_ACTION: ToolSpec = (() => {
+  const base = TOOL_SPECS.phone_action;
+  const parameters = base.parameters as { properties: Record<string, Record<string, unknown>>; required: string[] };
+  const properties: Record<string, Record<string, unknown>> = {};
+  for (const [key, value] of Object.entries(parameters.properties)) {
+    if (key === 'time' || key === 'days' || key === 'seconds') continue;
+    properties[key] = value;
+  }
+  properties.action = { ...properties.action, enum: ['calendar', 'sms', 'email', 'call', 'map', 'open_url', 'share_text'] };
+  properties.title = { ...properties.title, description: 'calendar 的标题' };
+  return {
+    ...base,
+    description: '在用户手机上准备一个操作：添加日程、写短信或邮件、打电话、地图导航、打开网址、分享文字。不会直接执行，用户会看到一张卡片并亲自点确认。时间一律用用户当地时间。iPhone 不支持由应用设置闹钟或倒计时：用户要设闹钟时请让他在“时钟”App 里设置，需要提醒可以改为添加日程。',
+    parameters: { ...parameters, properties },
+    example: '{"action":"calendar","title":"牙医","start":"2026-10-08T14:00"}',
+  };
+})();
+
+/** The phone_action spec for this platform (iOS without alarm / timer). */
+export function phoneActionSpec(os: string): ToolSpec {
+  return os === 'ios' ? IOS_PHONE_ACTION : TOOL_SPECS.phone_action;
+}
+
+/** Whether an offered phone_action spec can set alarms and timers. */
+export function phoneSpecHasClock(spec: ToolSpec | undefined): boolean {
+  const action = (spec?.parameters as { properties?: { action?: { enum?: string[] } } } | undefined)?.properties?.action;
+  return Boolean(action?.enum?.includes('alarm'));
+}
+
 export function toolDefinition(spec: ToolSpec, api: ChatApi): Record<string, unknown> {
   if (api === 'anthropic') return { name: spec.name, description: spec.description, input_schema: spec.parameters };
   if (api === 'responses') return { type: 'function', name: spec.name, description: spec.description, parameters: spec.parameters };

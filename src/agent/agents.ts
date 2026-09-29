@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { Platform } from 'react-native';
 
 import { createId } from '../domain-utils';
 import { deleteAgentRecord, listAgents, upsertAgent } from '../storage/database';
@@ -33,7 +34,7 @@ export const CAPABILITY_LABELS: Record<AgentCapability, { label: string; detail:
   search: { label: '联网搜索', detail: '搜索并阅读网页，附上来源' },
   image: { label: '画图', detail: '生成和修改图片' },
   files: { label: '生成文件', detail: '导出表格、文档和网页' },
-  actions: { label: '手机操作', detail: '闹钟、日程、短信、导航（需你确认）' },
+  actions: { label: '手机操作', detail: Platform.OS === 'ios' ? '日程、短信、邮件、导航（需你确认）' : '闹钟、日程、短信、导航（需你确认）' },
   memory: { label: '使用记忆', detail: '读取并更新你的个人记忆' },
 };
 

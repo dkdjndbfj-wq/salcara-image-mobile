@@ -1,6 +1,6 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { extensionOf, readGeneratedFile, shareGeneratedFile } from '../agent/files';
 import type { GeneratedFile } from '../agent/types';
@@ -70,6 +70,9 @@ export function FilePreviewSheet({ file, onClose }: { file: GeneratedFile | null
   </Sheet>;
 }
 
+/** iOS has no font named “monospace”. */
+const MONO = Platform.select({ ios: 'Menlo', default: 'monospace' });
+
 const styles = StyleSheet.create({
   body: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 12 },
   footer: { flexDirection: 'row', gap: 10 },
@@ -79,5 +82,5 @@ const styles = StyleSheet.create({
   head: { backgroundColor: colors.surface, borderTopWidth: 0 },
   cell: { width: 128, paddingHorizontal: 10, paddingVertical: 8, fontSize: 13, color: colors.text, borderLeftWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   headText: { fontWeight: '600' },
-  code: { fontFamily: 'monospace', fontSize: 12.5, lineHeight: 19, color: colors.textSecondary },
+  code: { fontFamily: MONO, fontSize: 12.5, lineHeight: 19, color: colors.textSecondary },
 });

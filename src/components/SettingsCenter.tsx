@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 
 import { MemoryBoxSettingsSheet } from '../companion/MemoryBoxSettingsSheet';
+import { RemoteScreen } from '../remote/RemoteScreen';
+import { useRemoteLink } from '../remote/useRemoteLink';
 import { useApp } from '../state/AppContext';
 import { AboutSheet } from './AboutSheet';
 import { AppSettingsSheet } from './AppSettingsSheet';
@@ -19,16 +21,17 @@ import { VoiceSettingsSheet } from './VoiceSettingsSheet';
  */
 export function SettingsCenter({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const app = useApp();
-  const [page, setPage] = useState<'providers' | 'models' | 'voice' | 'personal' | 'tools' | 'agents' | 'memory' | 'about' | 'network' | null>(null);
+  const [page, setPage] = useState<'providers' | 'models' | 'voice' | 'personal' | 'tools' | 'agents' | 'memory' | 'about' | 'network' | 'remote' | null>(null);
   const [updateToken, setUpdateToken] = useState(0);
   const [modelsTab, setModelsTab] = useState<'chat' | 'image'>('chat');
   const close = () => setPage(null);
   const main = app.chatProvider ?? app.imageProvider;
+  useRemoteLink(() => setPage('remote'));
   return <>
     <AppSettingsSheet visible={visible} onClose={onClose}
       onOpenProviders={() => setPage('providers')} onOpenModels={(tab) => { setModelsTab(tab ?? 'chat'); setPage('models'); }} onOpenVoice={() => setPage('voice')}
       onOpenPersonalization={() => setPage('personal')} onOpenTools={() => setPage('tools')} onOpenAgents={() => setPage('agents')}
-      onOpenMemoryBox={() => setPage('memory')} onOpenNetwork={() => setPage('network')} onOpenAbout={() => setPage('about')}
+      onOpenMemoryBox={() => setPage('memory')} onOpenNetwork={() => setPage('network')} onOpenAbout={() => setPage('about')} onOpenRemote={() => setPage('remote')}
       onCheckUpdates={() => setUpdateToken((value) => value + 1)} />
     <ProviderManager visible={page === 'providers'} onClose={close} />
     <ModelSwitcher visible={page === 'models'} initialTab={modelsTab} onClose={close} onManageProviders={() => setPage('providers')} />
@@ -37,6 +40,7 @@ export function SettingsCenter({ visible, onClose }: { visible: boolean; onClose
     <ToolsSheet visible={page === 'tools'} onClose={close} />
     <MemoryBoxSettingsSheet visible={page === 'memory'} onClose={close} />
     <AboutSheet visible={page === 'about'} onClose={close} onCheckUpdates={() => setUpdateToken((value) => value + 1)} />
+    <RemoteScreen visible={page === 'remote'} onClose={close} />
     <NetworkDiagnostics visible={page === 'network'} onClose={close} providerId={main?.id ?? ''} baseUrl={main?.baseUrl ?? ''} api={app.chatProvider?.chatApi} />
     {updateToken ? <UpdateManager manualCheckToken={updateToken} /> : null}
   </>;

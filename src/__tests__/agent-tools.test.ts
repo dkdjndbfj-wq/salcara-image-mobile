@@ -1,12 +1,12 @@
 const mockFetch = jest.fn();
 jest.mock('expo/fetch', () => ({ fetch: (...args: unknown[]) => mockFetch(...args) }));
 
-import { createPhoneAction, parseClock, parseLocalDateTime } from '../agent/actions';
+import { createPhoneAction, mapUrl, parseClock, parseLocalDateTime, phoneActionKinds, smsUrl } from '../agent/actions';
 import { normalizeAgent } from '../agent/agents';
 import { safeFileName } from '../agent/files';
 import { memoryPrompt, rejectsMemory } from '../agent/memory';
 import { parseAgentSettings } from '../agent/settings';
-import { extractMarkers, visibleStreamingText } from '../agent/tools';
+import { extractMarkers, phoneActionSpec, phoneSpecHasClock, TOOL_SPECS, visibleStreamingText } from '../agent/tools';
 import { parseTrace, traceFileUris } from '../agent/types';
 import {
   assertPublicUrl, htmlToText, resolveLocation, parseBingResults, parseDuckDuckGoResults, readWebpage, searchTavily, unwrapBingUrl, webSearch,
@@ -102,7 +102,7 @@ test('phone actions are validated and summarized; nothing runs until confirmed',
   expect(parseClock('7:05')).toEqual([7, 5]);
   expect(parseClock('19点半')).toEqual([19, 30]);
   expect(parseClock('25:00')).toBeNull();
-  const alarm = createPhoneAction({ action: 'alarm', time: '07:30', days: [1, 2, 3, 4, 5, 9], title: '晨跑' });
+  const alarm = createPhoneAction({ action: 'alarm', time: '07:30', days: [1, 2, 3, 4, 5, 9], title: '晨跑' }, new Date(), 'android');
   expect(alarm).toMatchObject({ kind: 'alarm', status: 'ready', summary: '闹钟 07:30 · 工作日 · 晨跑', params: { hour: 7, minute: 30, days: [1, 2, 3, 4, 5] } });
   const now = new Date(2026, 8, 27, 9, 0);
   const event = createPhoneAction({ action: 'calendar', title: '牙医', start: '2026-09-28T14:00', location: '市一院' }, now);
@@ -110,7 +110,7 @@ test('phone actions are validated and summarized; nothing runs until confirmed',
   expect(event.params.end).toBe(new Date(2026, 8, 28, 15, 0).getTime());
   const allDay = createPhoneAction({ action: 'calendar', title: '出游', start: '2026-10-01' }, now);
   expect(allDay.params.allDay).toBe(true);
-  expect(createPhoneAction({ action: 'timer', seconds: 330 }).summary).toBe('倒计时 5 分钟 30 秒');
+  expect(createPhoneAction({ action: 'timer', seconds: 330 }, new Date(), 'android').summary).toBe('倒计时 5 分钟 30 秒');
   expect(() => createPhoneAction({ action: 'call', to: 'abc' })).toThrow('电话号码');
   expect(() => createPhoneAction({ action: 'open_url', url: 'javascript:alert(1)' })).toThrow();
   expect(() => createPhoneAction({ action: 'calendar', title: 'x', start: '2026-02-30T10:00' })).toThrow('start');
@@ -173,4 +173,34 @@ test('redirects are followed by hand and never into the local network', async ()
   await expect(readWebpage('https://example.com/start')).rejects.toThrow('局域网');
   expect(mockFetch).toHaveBeenCalledTimes(1);
   expect(mockFetch.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
+});
+
+test('iOS: no alarm or timer cards, calendar and links still work', () => {
+  expect(phoneActionKinds('android')).toContain('alarm');
+  expect(phoneActionKinds('ios')).not.toContain('alarm');
+  expect(phoneActionKinds('ios')).not.toContain('timer');
+  expect(phoneActionKinds('ios')).toContain('calendar');
+  expect(() => createPhoneAction({ action: 'alarm', time: '07:30' }, new Date(), 'ios')).toThrow('时钟');
+  expect(() => createPhoneAction({ action: 'timer', seconds: 60 }, new Date(), 'ios')).toThrow('时钟');
+  const now = new Date(2026, 8, 27, 9, 0);
+  expect(createPhoneAction({ action: 'calendar', title: '牙医', start: '2026-09-28T14:00' }, now, 'ios').kind).toBe('calendar');
+
+  const ios = phoneActionSpec('ios');
+  expect(ios.name).toBe('phone_action');
+  expect(phoneSpecHasClock(ios)).toBe(false);
+  expect(phoneSpecHasClock(phoneActionSpec('android'))).toBe(true);
+  expect(phoneActionSpec('android')).toBe(TOOL_SPECS.phone_action);
+  const properties = (ios.parameters as { properties: Record<string, { enum?: string[] }> }).properties;
+  expect(properties.action.enum).toEqual(['calendar', 'sms', 'email', 'call', 'map', 'open_url', 'share_text']);
+  expect(properties.time).toBeUndefined();
+  expect(properties.seconds).toBeUndefined();
+  expect(ios.description).not.toContain('设闹钟、倒计时');
+  // The Android spec is left untouched.
+  expect((TOOL_SPECS.phone_action.parameters as { properties: Record<string, unknown> }).properties.time).toBeDefined();
+
+  expect(smsUrl('10086', '你好', 'ios')).toBe('sms:10086&body=%E4%BD%A0%E5%A5%BD');
+  expect(smsUrl('10086', '', 'android')).toBe('smsto:10086');
+  expect(smsUrl('10086', 'hi', 'android')).toBe('smsto:10086?body=hi');
+  expect(mapUrl('西湖', 'ios')).toBe('https://maps.apple.com/?q=%E8%A5%BF%E6%B9%96');
+  expect(mapUrl('西湖', 'android')).toBe('geo:0,0?q=%E8%A5%BF%E6%B9%96');
 });

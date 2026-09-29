@@ -13,6 +13,13 @@ if (app.android?.package !== 'top.salcara.image') {
   throw new Error(`Unexpected Android package: ${app.android?.package}`);
 }
 
+if (app.ios?.bundleIdentifier !== 'top.salcara.image') {
+  throw new Error(`Unexpected iOS bundleIdentifier: ${app.ios?.bundleIdentifier}`);
+}
+if (app.ios?.buildNumber !== String(app.android.versionCode)) {
+  throw new Error(`ios.buildNumber ${app.ios?.buildNumber} must match android.versionCode ${app.android.versionCode}`);
+}
+
 const tag = process.env.GITHUB_REF_TYPE === 'tag' ? process.env.GITHUB_REF_NAME : null;
 if (tag && tag !== `v${app.version}`) {
   throw new Error(`Release tag ${tag} must match app version v${app.version}`);

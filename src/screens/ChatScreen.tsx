@@ -23,6 +23,8 @@ import { useDictation } from '../voice/useDictation';
 import { Icon } from '../components/Icon';
 import { Composer } from '../components/Composer';
 import { ConversationDrawer } from '../components/ConversationDrawer';
+import { RemoteScreen } from '../remote/RemoteScreen';
+import { useRemoteLink } from '../remote/useRemoteLink';
 import { ImagePreview } from '../components/ImagePreview';
 import { MaskEditor } from '../components/MaskEditor';
 import { MessageBubble } from '../components/MessageBubble';
@@ -102,6 +104,8 @@ export function ChatScreen() {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [previewFile, setPreviewFile] = useState<GeneratedFile | null>(null);
   const [memoryBoxOpen, setMemoryBoxOpen] = useState(false);
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  useRemoteLink(() => setRemoteOpen(true));
   const agents = useAgents();
   const activeAgent = agents.find((agent) => agent.id === app.activeAgentId) ?? null;
 
@@ -296,7 +300,7 @@ export function ChatScreen() {
   const secondary = app.chatProvider && app.imageProvider && app.imageProvider.id !== app.chatProvider.id ? app.imageProvider : undefined;
   const isDraft = !app.activeConversationId && app.messages.length === 0 && !app.activeAgentId;
   const connected = app.providers.length > 0;
-  const covered = drawer || settings || liveOpen || providersOpen || voiceOpen || modelsOpen || agentsOpen || personalOpen || toolsOpen || memoryBoxOpen || about || network;
+  const covered = drawer || settings || liveOpen || providersOpen || voiceOpen || modelsOpen || agentsOpen || personalOpen || toolsOpen || memoryBoxOpen || about || network || remoteOpen;
   const headerTitle = app.activeConversation?.title || activeAgent?.name || 'Salcara';
   const headerModel = activeAgent && headerTitle !== activeAgent.name ? [activeAgent.name, engine].filter(Boolean).join(' · ') : engine;
 
@@ -440,12 +444,13 @@ export function ChatScreen() {
       </View>
     </Sheet>
     <ConversationDrawer visible={drawer} onClose={() => setDrawer(false)} onNewChat={newChat} onOpenSettings={() => setSettings(true)}
-      onOpenAgents={() => setAgentsOpen(true)} onStartAgent={startAgent} />
+      onOpenAgents={() => setAgentsOpen(true)} onStartAgent={startAgent} onOpenRemote={() => setRemoteOpen(true)} />
     <AppSettingsSheet visible={settings} onClose={() => setSettings(false)}
       onOpenProviders={() => setProvidersOpen(true)} onOpenModels={(tab) => { setModelsTab(tab ?? 'chat'); setModelsOpen(true); }}
       onOpenNetwork={() => setNetwork(true)} onOpenAbout={() => setAbout(true)} onCheckUpdates={() => setUpdateToken((value) => value + 1)}
       onOpenVoice={() => setVoiceOpen(true)} onOpenPersonalization={() => setPersonalOpen(true)} onOpenTools={() => setToolsOpen(true)} onOpenAgents={() => setAgentsOpen(true)}
-      onOpenMemoryBox={() => setMemoryBoxOpen(true)} />
+      onOpenMemoryBox={() => setMemoryBoxOpen(true)} onOpenRemote={() => setRemoteOpen(true)} />
+    <RemoteScreen visible={remoteOpen} onClose={() => setRemoteOpen(false)} />
     <MemoryBoxSettingsSheet visible={memoryBoxOpen} onClose={() => setMemoryBoxOpen(false)} />
     <PersonalizationSheet visible={personalOpen} onClose={() => setPersonalOpen(false)} />
     <ToolsSheet visible={toolsOpen} onClose={() => setToolsOpen(false)} />

@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+
 import type { AgentToolkit, ToolExecution } from '../api/chat-api';
 import type { ChatApi } from '../domain';
 import { createId } from '../domain-utils';
@@ -8,7 +10,7 @@ import { writeGeneratedFile } from './files';
 import { parseImageToolArguments, type ImageToolCall } from './image-tool';
 import { addMemory, memoryLabels, memoryPrompt, removeMemory } from './memory';
 import { getSearchKey, type AgentSettings } from './settings';
-import { TOOL_SPECS, type ToolCall, type ToolSpec } from './tools';
+import { phoneActionSpec, TOOL_SPECS, type ToolCall, type ToolSpec } from './tools';
 import type { AgentCapability, AgentStep, AgentTrace, CustomAgent, Memory, PlanItem, Source, StepKind } from './types';
 import { hostOf, readWebpage, webSearch, type Recency, type SearchConfig } from './web';
 
@@ -44,6 +46,8 @@ export interface ToolboxOptions {
   updateTrace: (update: (trace: AgentTrace) => AgentTrace) => void;
   /** Overrides the capabilities (chat characters); the agent prompt is then not added. */
   capabilities?: AgentCapability[];
+  /** Platform the phone actions are prepared for (default: this phone). iOS has no alarms / timers. */
+  platform?: string;
 }
 
 const OFFICIAL_SEARCH_HOSTS: Partial<Record<ChatApi, RegExp>> = { responses: /(^|\.)api\.openai\.com$/i, anthropic: /(^|\.)api\.anthropic\.com$/i };
@@ -90,6 +94,8 @@ export async function createToolbox(options: ToolboxOptions): Promise<{ toolkit:
   const imageLimit = settings.imageCheck === 'redraw' ? 2 : 1;
   const memoryOn = settings.memoryEnabled && capabilities.has('memory');
   const labels = memoryLabels(options.memories);
+  const platform = options.platform ?? Platform.OS;
+  const phoneSpec = phoneActionSpec(platform);
 
   const specs: ToolSpec[] = [];
   if (options.imageAvailable && capabilities.has('image')) specs.push(TOOL_SPECS.generate_image);
@@ -99,7 +105,7 @@ export async function createToolbox(options: ToolboxOptions): Promise<{ toolkit:
   if (memoryOn) specs.push(TOOL_SPECS.remember, ...(options.memories.length ? [TOOL_SPECS.forget] : []));
   // Past conversations are personal context: custom agents only see them when allowed to use memory.
   if (settings.historySearch && capabilities.has('memory') && !options.voice) specs.push(TOOL_SPECS.search_history);
-  if (settings.phoneActions && capabilities.has('actions') && !options.voice) specs.push(TOOL_SPECS.phone_action);
+  if (settings.phoneActions && capabilities.has('actions') && !options.voice) specs.push(phoneSpec);
   if (capabilities.has('files') && !options.voice) specs.push(TOOL_SPECS.create_file);
 
   const instructions: string[] = [];
@@ -271,11 +277,11 @@ export async function createToolbox(options: ToolboxOptions): Promise<{ toolkit:
         }
       }
       case 'phone_action': {
-        if (!specs.includes(TOOL_SPECS.phone_action)) return { content: '当前不能准备手机操作。' };
+        if (!specs.includes(phoneSpec)) return { content: '当前不能准备手机操作。' };
         const limited = overLimit('phone_action', limits.actions, '手机操作');
         if (limited) return limited;
         try {
-          const action = createPhoneAction(input);
+          const action = createPhoneAction(input, new Date(), platform);
           const id = addStep('action', `准备：${action.summary}`);
           finishStep(id, { detail: '等待你确认' });
           options.updateTrace((trace) => ({ ...trace, actions: [...(trace.actions ?? []), action] }));

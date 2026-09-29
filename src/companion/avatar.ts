@@ -1,6 +1,7 @@
 import { Directory, File, Paths } from 'expo-file-system';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
+import { Platform } from 'react-native';
 
 import { createId } from '../domain-utils';
 import { deleteLocalFile } from '../storage/files';
@@ -10,8 +11,11 @@ import { deleteLocalFile } from '../storage/files';
 const avatarDirectory = new Directory(Paths.document, 'avatars');
 
 export async function pickAvatar(source: 'library' | 'camera'): Promise<string | null> {
-  const permission = source === 'camera' ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
-  if (!permission.granted) throw new Error(source === 'camera' ? '需要相机权限才能拍头像' : '需要相册权限才能选择头像');
+  // The iOS photo picker needs no photo-library permission; the camera always does.
+  if (source === 'camera' || Platform.OS !== 'ios') {
+    const permission = source === 'camera' ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) throw new Error(source === 'camera' ? '需要相机权限才能拍头像' : '需要相册权限才能选择头像');
+  }
   const result = source === 'camera'
     ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 1 })
     : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 1 });

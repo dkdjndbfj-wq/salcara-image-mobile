@@ -5,18 +5,22 @@ import { StyleSheet, Text, View } from 'react-native';
 import { useMemories } from '../agent/memory';
 import { useAgentSettings } from '../agent/settings';
 import { useMemoryBoxSettings } from '../memorybox/settings';
+import { useRemote } from '../remote/store';
 import { useApp } from '../state/AppContext';
 import { colors, prettyModel } from '../theme';
 import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { Group, ListRow, SectionLabel, Sheet } from './ui';
 import { modelById } from '../voice/catalog';
+import { localModelsOffered } from '../voice/native';
 import { useVoiceSettings } from '../voice/settings';
 
-export function AppSettingsSheet({ visible, onClose, onOpenProviders, onOpenModels, onOpenNetwork, onOpenAbout, onCheckUpdates, onOpenVoice, onOpenPersonalization, onOpenTools, onOpenAgents, onOpenMemoryBox }: {
+export function AppSettingsSheet({ visible, onClose, onOpenProviders, onOpenModels, onOpenNetwork, onOpenAbout, onCheckUpdates, onOpenVoice, onOpenPersonalization, onOpenTools, onOpenAgents, onOpenMemoryBox, onOpenRemote }: {
   visible: boolean; onClose: () => void; onOpenProviders: () => void; onOpenModels: (tab?: 'chat' | 'image') => void; onOpenNetwork: () => void; onOpenAbout: () => void; onCheckUpdates: () => void;
-  onOpenVoice: () => void; onOpenPersonalization: () => void; onOpenTools: () => void; onOpenAgents: () => void; onOpenMemoryBox: () => void;
+  onOpenVoice: () => void; onOpenPersonalization: () => void; onOpenTools: () => void; onOpenAgents: () => void; onOpenMemoryBox: () => void; onOpenRemote: () => void;
 }) {
+  const remote = useRemote();
+  const online = remote.devices.filter((device) => device.online).length;
   const memoryBox = useMemoryBoxSettings();
   const voice = useVoiceSettings();
   const agent = useAgentSettings();
@@ -37,8 +41,14 @@ export function AppSettingsSheet({ visible, onClose, onOpenProviders, onOpenMode
       <Group>
         <ListRow first icon="chat" title="对话模型" detail="助手和聊天通用" value={prettyModel(chatProvider?.chatModel) || '未设置'} onPress={go(() => onOpenModels('chat'))} />
         <ListRow icon="palette" title="绘图" detail="模型、画幅、作图描述" value={prettyModel(imageProvider?.model) || '未设置'} onPress={go(() => onOpenModels('image'))} />
-        <ListRow icon="mic" title="语音" value={voice.inputEngine === 'local' ? (modelById(voice.localModel)?.name ?? '本地模型') : '云端识别'} onPress={go(onOpenVoice)} />
+        <ListRow icon="mic" title="语音" value={voice.inputEngine === 'local' && localModelsOffered() ? (modelById(voice.localModel)?.name ?? '本地模型') : '云端识别'} onPress={go(onOpenVoice)} />
         <ListRow icon="server" title="API 管理" detail="各平台的地址和密钥" value={providers.length ? `${providers.length} 个` : '未添加'} onPress={go(onOpenProviders)} />
+      </Group>
+
+      <SectionLabel>电脑</SectionLabel>
+      <Group>
+        <ListRow first icon="code" title="远程编程" detail="在手机上用电脑里的 Codex 和 Claude Code"
+          value={remote.phase !== 'ready' ? '未设置' : online ? `${online} 台在线` : remote.devices.length ? '电脑离线' : ''} onPress={go(onOpenRemote)} />
       </Group>
 
       <SectionLabel>个性化</SectionLabel>

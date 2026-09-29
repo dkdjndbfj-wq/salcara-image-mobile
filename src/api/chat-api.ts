@@ -3,7 +3,7 @@ import { File } from 'expo-file-system';
 
 import { IMAGE_TOOL_NAME, parseImageToolArguments, type ImageToolCall } from '../agent/image-tool';
 import {
-  extractMarkers, SUGGEST_OPEN, textToolInstructions, TOOL_SPECS, toolDefinition, visibleStreamingText,
+  extractMarkers, phoneSpecHasClock, SUGGEST_OPEN, textToolInstructions, TOOL_SPECS, toolDefinition, visibleStreamingText,
   type ToolCall, type ToolSpec,
 } from '../agent/tools';
 import type { Source } from '../agent/types';
@@ -176,7 +176,11 @@ export function agentInstructions(request: InstructionInput, specs?: ToolSpec[],
   if (has('web_search')) {
     lines.push('遇到新闻、天气、价格、日期、版本、人物近况等可能变化的事实，或你不确定的内容，先联网搜索再回答，不要凭记忆编造。回答中使用了搜索或网页资料时，在相关句子后用 [1]、[2] 这样的编号标注来源，编号对应工具结果里的来源编号。');
   }
-  if (has('phone_action')) lines.push('用户要设闹钟、倒计时、加日程、发短信/邮件、打电话、导航时调用 phone_action；它只会生成一张确认卡片，由用户点确认后才执行，所以调用后请告诉用户“点卡片上的按钮即可完成”。');
+  if (has('phone_action')) {
+    lines.push(phoneSpecHasClock(offered.find((spec) => spec.name === 'phone_action'))
+      ? '用户要设闹钟、倒计时、加日程、发短信/邮件、打电话、导航时调用 phone_action；它只会生成一张确认卡片，由用户点确认后才执行，所以调用后请告诉用户“点卡片上的按钮即可完成”。'
+      : '用户要加日程、发短信/邮件、打电话、导航时调用 phone_action；它只会生成一张确认卡片，由用户点确认后才执行，所以调用后请告诉用户“点卡片上的按钮即可完成”。这台 iPhone 不能由应用设置闹钟或倒计时，用户要求时请说明并建议在“时钟”App 里设置，或改为添加日程提醒。');
+  }
   if (has('create_file')) lines.push('用户需要导出或保存为文件时调用 create_file，文件会显示为可打开、可分享的卡片，回答里不必再重复全部内容。');
   if (has('remember')) lines.push('用户透露了以后仍有用的长期信息，或明确要求你记住时，调用 remember；用户要求忘记时调用 forget。记下后用一句话告诉用户。');
   if (request.extraInstructions?.length) lines.push(...request.extraInstructions.filter(Boolean));

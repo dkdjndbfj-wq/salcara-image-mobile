@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Image, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Animated, Easing, Image, Platform, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import type { ProviderProfile } from '../domain';
 import { colors, prettyModel, radius, shadow } from '../theme';
@@ -154,7 +154,7 @@ function Spaces() {
   return <View>
     <Title kicker="两个空间" title="一个帮你做事，一个陪你聊天" text="顶部一键切换，两个空间互不打扰。" />
     <SpaceCard icon="bot" tone={colors.primary} name="助手空间" line="像 ChatGPT 一样能干活"
-      chips={['联网搜索', '看图读文件', '一句话画图', '深度研究', '生成表格文件', '设闹钟日程']} />
+      chips={['联网搜索', '看图读文件', '一句话画图', '深度研究', '生成表格文件', Platform.OS === 'ios' ? '加日程提醒' : '设闹钟日程']} />
     <SpaceCard icon="heart" tone="#E0679F" name="聊天空间" line="创建你的专属角色，TA 会记得你"
       chips={['自定义角色和头像', '记忆匣', '聊多久都不断片', '专属 Live 语音', '拍一拍 · 表情']} />
   </View>;
@@ -176,7 +176,7 @@ function SpaceCard({ icon, tone, name, line, chips }: { icon: IconName; tone: st
 const API_ROWS: Array<{ icon: IconName; label: string; vendors: string[] }> = [
   { icon: 'chat', label: '对话', vendors: ['DeepSeek', '通义千问', 'Claude', 'Kimi', 'GPT', 'Gemini', '豆包'] },
   { icon: 'image', label: '绘图', vendors: ['GPT Image', '豆包 Seedream', '通义万相', 'Flux'] },
-  { icon: 'mic', label: '语音识别', vendors: ['阿里云百炼', '豆包语音', 'OpenAI', '本地模型'] },
+  { icon: 'mic', label: '语音识别', vendors: ['阿里云百炼', '豆包语音', 'OpenAI', Platform.OS === 'ios' ? '硅基流动' : '本地模型'] },
   { icon: 'speaker', label: '语音合成', vendors: ['OpenAI', 'MiniMax', '豆包语音', 'ElevenLabs'] },
   { icon: 'waveform', label: '实时语音', vendors: ['GPT Realtime', 'Qwen Omni', 'Gemini Live', '阶跃星辰'] },
 ];

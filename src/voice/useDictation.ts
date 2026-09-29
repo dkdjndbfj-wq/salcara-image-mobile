@@ -13,6 +13,7 @@ export type DictationState = 'idle' | 'preparing' | 'listening' | 'transcribing'
 const MAX_DICTATION_MS = 5 * 60 * 1000;
 
 export async function ensureMicPermission(): Promise<void> {
+  // iOS: the native startCapture asks for (and reports a missing) microphone permission itself.
   if (Platform.OS !== 'android') return;
   const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO, {
     title: '允许使用麦克风', message: 'Salcara 需要麦克风来听你说话。录音只用于语音输入和语音对话。', buttonPositive: '允许', buttonNegative: '不允许',

@@ -1,4 +1,5 @@
 import { requireOptionalNativeModule } from 'expo';
+import { Platform } from 'react-native';
 
 export interface NativeRecognizerOptions {
   kind: string; encoder: string; decoder: string; joiner: string; model: string; tokens: string; vad: string;
@@ -68,7 +69,7 @@ export function voiceNative(): VoiceNativeModule | null {
 
 export function requireVoiceNative(): VoiceNativeModule {
   const native = voiceNative();
-  if (!native) throw new Error('当前安装包缺少语音组件，请安装最新完整 APK');
+  if (!native) throw new Error(Platform.OS === 'ios' ? '当前安装包缺少语音组件，请安装最新版本（Expo Go 不支持）' : '当前安装包缺少语音组件，请安装最新完整 APK');
   return native;
 }
 
@@ -83,4 +84,12 @@ export function onVoiceEvent<K extends keyof VoiceEvents>(event: K, listener: (p
 /** Whether on-device recognition can run on this phone (64-bit ARM build with the engine). */
 export function localEngineAvailable(): boolean {
   try { return Boolean(voiceNative()?.engineAvailable()); } catch { return false; }
+}
+
+/**
+ * Whether the on-device (offline) recognition models are offered at all. Only the Android build ships
+ * the sherpa-onnx engine; on iOS voice typing always uses the cloud recognition service.
+ */
+export function localModelsOffered(): boolean {
+  return Platform.OS === 'android';
 }

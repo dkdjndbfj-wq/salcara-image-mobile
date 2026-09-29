@@ -1,9 +1,5 @@
 jest.mock('expo/fetch', () => ({ fetch: jest.fn() }));
-jest.mock('expo-file-system', () => ({ File: class {
-  uri: string;
-  constructor(path: string) { this.uri = path; }
-  async bytes() { return new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4]); }
-} }));
+jest.mock('expo-file-system', () => ({ File: class { async bytes() { return new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4]); } } }));
 jest.mock('../storage/files', () => ({ fileBase64: async () => 'UklGRgECAwQ=' }));
 const mockSecrets: Record<string, string> = {};
 jest.mock('../storage/secure-keys', () => ({

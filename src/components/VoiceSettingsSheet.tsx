@@ -5,7 +5,7 @@ import { useApp } from '../state/AppContext';
 import { colors, radius } from '../theme';
 import { ASR_MODELS, formatBytes, MIRRORS, modelSize, type AsrModel } from '../voice/catalog';
 import { cancelInstall, deleteModel, installModel, refreshModels, useModelStatuses, type ModelStatus } from '../voice/models';
-import { localEngineAvailable, voiceNative } from '../voice/native';
+import { localEngineAvailable, localModelsOffered, voiceNative } from '../voice/native';
 import { updateVoiceSettings, useVoiceSettings, type VoiceSettings } from '../voice/settings';
 import type { SpeechKind } from '../voice/vendors';
 import { FunctionPicker, type FunctionChoice } from './FunctionPicker';
@@ -64,8 +64,11 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
   const [confirm, setConfirm] = React.useState<AsrModel | null>(null);
   const engineReady = localEngineAvailable();
   const hasNative = Boolean(voiceNative());
-  const localUsable = Boolean(hasNative && engineReady && settings.localModel && statuses[settings.localModel]?.state === 'installed');
-  useEffect(() => { if (visible) void refreshModels().catch(() => undefined); }, [visible]);
+  // iOS has no on-device engine: no model downloads, voice typing is always cloud recognition.
+  const offerLocal = localModelsOffered();
+  const inputEngine = offerLocal ? settings.inputEngine : 'cloud';
+  const localUsable = Boolean(offerLocal && hasNative && engineReady && settings.localModel && statuses[settings.localModel]?.state === 'installed');
+  useEffect(() => { if (visible && offerLocal) void refreshModels().catch(() => undefined); }, [visible, offerLocal]);
   const set = (patch: Partial<VoiceSettings>) => void updateVoiceSettings(patch);
   const [adding, setAdding] = React.useState<SpeechKind | null>(null);
   /** Service, model and voice of one speech function, saved together. */
@@ -90,16 +93,18 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
 
       <SectionLabel>语音输入</SectionLabel>
       <Group style={styles.group}>
-        <View style={styles.chips}>
-          <Chip label="本地模型 · 离线" selected={settings.inputEngine === 'local'} onPress={() => set({ inputEngine: 'local' })} />
-          <Chip label="云端识别" selected={settings.inputEngine === 'cloud'} onPress={() => set({ inputEngine: 'cloud' })} />
-        </View>
-        <Text style={styles.note}>{settings.inputEngine === 'local'
+        {offerLocal ? <View style={styles.chips}>
+          <Chip label="本地模型 · 离线" selected={inputEngine === 'local'} onPress={() => set({ inputEngine: 'local' })} />
+          <Chip label="云端识别" selected={inputEngine === 'cloud'} onPress={() => set({ inputEngine: 'cloud' })} />
+        </View> : null}
+        <Text style={styles.note}>{inputEngine === 'local'
           ? '声音只在手机上识别，不联网、不产生费用。下载一次即可离线使用。'
-          : '录音发送给你选择的识别服务转成文字，按该服务商的价格计费。'}</Text>
+          : offerLocal
+            ? '录音发送给你选择的识别服务转成文字，按该服务商的价格计费。'
+            : 'iPhone 版使用云端识别：录音发送给你选择的识别服务转成文字，按该服务商的价格计费。'}</Text>
       </Group>
 
-      {settings.inputEngine === 'local' ? <>
+      {inputEngine === 'local' ? <>
         {!hasNative || !engineReady ? <View style={styles.warning}>
           <Icon name="alert" size={18} color={colors.warningText} />
           <Text style={styles.warningText}>{hasNative ? '这台手机不是 64 位 ARM 处理器，无法运行本地模型，请使用云端识别。' : '当前安装包没有语音组件，请安装最新完整 APK。'}</Text>
@@ -115,8 +120,8 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
           <Text style={styles.note}>国内网络建议用“国内镜像”；下载中断后重试会从已完成的文件继续。</Text>
         </Group>
       </> : null}
-      {settings.inputEngine === 'cloud' || !localUsable ? <Group style={[styles.group, { marginTop: settings.inputEngine === 'local' ? 10 : 0 }]}>
-        {settings.inputEngine === 'local' ? <Text style={styles.note}>本地模型暂不可用，会用这里选择的云端识别。</Text> : null}
+      {inputEngine === 'cloud' || !localUsable ? <Group style={[styles.group, { marginTop: inputEngine === 'local' ? 10 : 0 }]}>
+        {inputEngine === 'local' ? <Text style={styles.note}>本地模型暂不可用，会用这里选择的云端识别。</Text> : null}
         <FunctionPicker kind="stt" value={stt} followChat onChange={(choice) => pick('stt', choice)} onAddService={() => setAdding('stt')} />
         <View style={styles.field}>
           <Text style={styles.fieldLabel}>识别语言</Text>
@@ -160,7 +165,7 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
 
       <View style={styles.privacy}>
         <Icon name="lock" size={14} color={colors.subtle} />
-        <Text style={styles.privacyText}>本地模型在手机上处理声音；使用云端时，录音和文字只发送给你为该功能选择的服务商。</Text>
+        <Text style={styles.privacyText}>{offerLocal ? '本地模型在手机上处理声音；使用云端时，录音和文字只发送给你为该功能选择的服务商。' : '录音和文字只发送给你为该功能选择的服务商。'}</Text>
       </View>
     </View>
     <ProviderManager visible={Boolean(adding)} kind={adding} onClose={() => setAdding(null)} />

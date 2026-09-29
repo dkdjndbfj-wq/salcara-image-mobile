@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Easing, Image, LayoutAnimation, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Animated, Easing, Image, LayoutAnimation, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { ACTION_ICONS, ACTION_VERBS } from '../agent/actions';
 import { extensionOf } from '../agent/files';
@@ -200,7 +200,9 @@ export function ActionCards({ actions, disabled, onRun, onDismiss }: {
             </View>}
       </View>;
     })}
-    <Text style={styles.actionHint}>确认后会打开系统应用：闹钟和倒计时会直接设好，短信、邮件、日程和电话仍需你在那里发送或保存。</Text>
+    <Text style={styles.actionHint}>{Platform.OS === 'ios'
+      ? '确认后日程会直接添加到系统日历；短信、邮件和电话会打开系统应用，仍需你在那里发送或拨出。'
+      : '确认后会打开系统应用：闹钟和倒计时会直接设好，短信、邮件、日程和电话仍需你在那里发送或保存。'}</Text>
   </View>;
 }
 

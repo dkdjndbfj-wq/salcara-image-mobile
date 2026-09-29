@@ -1,6 +1,8 @@
 jest.mock('expo/fetch', () => ({ fetch: (...args: Parameters<typeof fetch>) => global.fetch(...args) }));
 
-import { apkDownloadCandidates, compareVersions, fetchLatestRelease, formatBytes, normalizeVersion, parseReleaseManifest } from '../update';
+import {
+  apkDownloadCandidates, autoUpdateCheckEnabled, compareVersions, fetchLatestRelease, formatBytes, IOS_UPDATE_URL, normalizeVersion, parseReleaseManifest, updateInstallMode,
+} from '../update';
 
 const released = {
   version: '1.2.3', tagName: 'v1.2.3', title: 'Salcara Image v1.2.3', notes: 'Published',
@@ -84,5 +86,20 @@ describe('app updates', () => {
     expect(apkDownloadCandidates(withMirror).map((item) => item.label)).toEqual([
       'Salcara 更新镜像', 'GitHub API 资源', 'GitHub 发布资源',
     ]);
+  });
+
+  test('installs the APK only on Android; iOS goes to the App Store / TestFlight or just shows notes', () => {
+    expect(updateInstallMode('android')).toBe('apk');
+    expect(updateInstallMode('android', 'https://apps.apple.com/app/id1')).toBe('apk');
+    expect(updateInstallMode('ios', '')).toBe('notes');
+    expect(updateInstallMode('ios', '   ')).toBe('notes');
+    expect(updateInstallMode('ios', 'itms-apps://apps.apple.com/app/id1')).toBe('notes');
+    expect(updateInstallMode('ios', 'https://testflight.apple.com/join/AbCdEf')).toBe('store');
+    expect(updateInstallMode('ios', 'https://apps.apple.com/cn/app/id1234567890')).toBe('store');
+    // The shipped constant drives the default: no link → notes only and no silent checks.
+    expect(updateInstallMode('ios')).toBe(IOS_UPDATE_URL ? 'store' : 'notes');
+    expect(autoUpdateCheckEnabled('ios', '')).toBe(false);
+    expect(autoUpdateCheckEnabled('ios', 'https://apps.apple.com/app/id1')).toBe(true);
+    expect(autoUpdateCheckEnabled('android')).toBe(true);
   });
 });

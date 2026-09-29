@@ -14,6 +14,14 @@ const RELEASE_MANIFEST_URLS = [
 ] as const;
 const FIRST_PARTY_APK_BASE_URL = 'https://salcara.top/downloads';
 
+/**
+ * Where iPhone users get updates: the App Store page or a public TestFlight link
+ * (https://testflight.apple.com/join/…). Empty = no iOS distribution link yet;
+ * the update check then only shows what is new, with no install button.
+ * iOS can never install the Android APK, so it is never downloaded there.
+ */
+export const IOS_UPDATE_URL: string = '';
+
 type GitHubAsset = {
   name?: string;
   url?: string;
@@ -228,6 +236,27 @@ async function withEndpointTimeout<T>(
 
 export function latestReleasePageUrl(): string {
   return RELEASE_PAGE_URL;
+}
+
+/**
+ * How this platform installs a newer release:
+ * - 'apk': Android downloads, verifies and installs the signed APK in the app;
+ * - 'store': iOS opens the App Store / TestFlight link;
+ * - 'notes': iOS without a link, only the release notes are shown.
+ */
+export type UpdateInstallMode = 'apk' | 'store' | 'notes';
+
+export function updateInstallMode(os: string, iosUrl: string = IOS_UPDATE_URL): UpdateInstallMode {
+  if (os === 'android') return 'apk';
+  return /^https:\/\/\S+$/i.test(iosUrl.trim()) ? 'store' : 'notes';
+}
+
+/**
+ * Whether the silent check on launch / resume runs. It always does on Android; on iOS only
+ * when there is somewhere to update from (otherwise every Android release would nag iPhone users).
+ */
+export function autoUpdateCheckEnabled(os: string, iosUrl: string = IOS_UPDATE_URL): boolean {
+  return updateInstallMode(os, iosUrl) !== 'notes';
 }
 
 export function formatBytes(bytes: number): string {

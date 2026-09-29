@@ -28,7 +28,7 @@ const draw = jest.fn();
 function options(patch: Partial<ToolboxOptions> = {}, settings: Partial<AgentSettings> = {}): ToolboxOptions {
   return {
     api: 'chat-completions', baseUrl: 'https://relay.example/v1', settings: { ...DEFAULT_AGENT_SETTINGS, ...settings }, conversationId: 'c1',
-    imageAvailable: true, voice: false, research: false, agent: null, memories: [],
+    imageAvailable: true, voice: false, research: false, agent: null, memories: [], platform: 'android',
     drawImage: (...args) => draw(...args), updateTrace: (update) => { trace = update(trace); }, ...patch,
   };
 }
@@ -146,4 +146,15 @@ test('text before non-image tools becomes a note on the next step; native search
   toolkit.onModelStep?.({ step: 1, text: '', calls: [], searches: ['天气'], sources: [{ title: 'W', url: 'https://w.example' }] });
   expect(trace.steps[1]).toMatchObject({ kind: 'search', status: 'done', title: '搜索：天气' });
   expect(trace.sources).toEqual([{ title: 'W', url: 'https://w.example' }]);
+});
+
+test('iOS toolbox offers phone actions without alarms and refuses alarm cards', async () => {
+  const { toolkit } = await createToolbox(options({ platform: 'ios' }));
+  const spec = toolkit.specs.find((item) => item.name === 'phone_action');
+  expect(spec).toBeDefined();
+  expect(JSON.stringify(spec?.parameters)).not.toContain('"alarm"');
+  expect((await toolkit.execute(call('phone_action', { action: 'alarm', time: '6:40' }), { step: 0, mode: 'native' })).content).toContain('参数有误');
+  expect(trace.actions ?? []).toEqual([]);
+  expect((await toolkit.execute(call('phone_action', { action: 'calendar', title: '开会', start: '2026-10-08T10:00' }), { step: 0, mode: 'native' })).content).toContain('确认卡片');
+  expect(trace.actions?.[0]).toMatchObject({ kind: 'calendar', status: 'ready' });
 });

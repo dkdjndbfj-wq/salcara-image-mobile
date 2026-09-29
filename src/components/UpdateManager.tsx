@@ -1,12 +1,13 @@
 import * as Application from 'expo-application';
 import * as FileSystem from 'expo-file-system/legacy';
 import { File, Paths } from 'expo-file-system';
-import * as IntentLauncher from 'expo-intent-launcher';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, spacing } from '../theme';
-import { apkDownloadCandidates, type AppRelease, compareVersions, fetchLatestRelease, formatBytes } from '../update';
+import {
+  apkDownloadCandidates, type AppRelease, autoUpdateCheckEnabled, compareVersions, fetchLatestRelease, formatBytes, IOS_UPDATE_URL, updateInstallMode,
+} from '../update';
 import { AppDialog, type DialogAction } from './ui';
 import { networkFailureMessage } from '../api/network';
 import { verifyDownloadedApk } from '../apk-download';
@@ -17,8 +18,15 @@ const INSTALL_MIME = 'application/vnd.android.package-archive';
 const FLAG_GRANT_READ_URI_PERMISSION = 1;
 const FLAG_ACTIVITY_NEW_TASK = 0x10000000;
 
+/** expo-intent-launcher is Android-only: load it only where it exists, never at import time on iOS. */
+async function intentLauncher() {
+  return import('expo-intent-launcher');
+}
+
 export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }) {
   const currentVersion = Application.nativeApplicationVersion ?? '0.0.0';
+  /** Android installs the APK in-app; iOS can only point to the App Store / TestFlight (or just show the notes). */
+  const installMode = updateInstallMode(Platform.OS);
   const [phase, setPhase] = useState<Phase>('idle');
   const [release, setRelease] = useState<AppRelease | null>(null);
   const [message, setMessage] = useState('');
@@ -72,6 +80,8 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
   }, [currentVersion]);
 
   useEffect(() => {
+    // iOS without a store link: no silent checks (an Android-only release must not nag iPhone users).
+    if (!autoUpdateCheckEnabled(Platform.OS)) return () => { downloadRef.current?.abort(); };
     const timer = setTimeout(() => void check(false), 1_200);
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active' && Date.now() - lastCheckAtRef.current >= nextAutoCheckDelayRef.current) void check(false);
@@ -87,7 +97,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
 
   const launchInstaller = useCallback(async (uri: string) => {
     if (Platform.OS !== 'android') {
-      if (release) await Linking.openURL(release.pageUrl);
+      if (IOS_UPDATE_URL) await Linking.openURL(IOS_UPDATE_URL);
       return;
     }
     const contentUri = uri.startsWith('content://')
@@ -101,6 +111,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
       type: INSTALL_MIME,
       flags: FLAG_GRANT_READ_URI_PERMISSION | FLAG_ACTIVITY_NEW_TASK,
     };
+    const IntentLauncher = await intentLauncher();
     // ACTION_INSTALL_PACKAGE is the Android-specific action intended for APKs.
     // A few older/OEM package installers only register ACTION_VIEW, so retain
     // that as a local fallback without sending the file to a browser.
@@ -115,8 +126,19 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     }
   }, [release]);
 
+  const openStore = async () => {
+    setPhase('idle');
+    try {
+      await Linking.openURL(IOS_UPDATE_URL);
+    } catch {
+      setMessage('无法打开 App Store / TestFlight，请稍后在 App Store 或 TestFlight 中手动更新。');
+      setPhase('error');
+    }
+  };
+
   const downloadAndInstall = async () => {
-    if (!release || downloadRef.current) return;
+    // The APK is Android-only; never download it on iOS.
+    if (!release || downloadRef.current || installMode !== 'apk') return;
     const finalFile = new File(Paths.cache, `salcara-image-update-${release.version}.apk`);
     const temporaryFile = new File(Paths.cache, `salcara-image-update-${release.version}.apk.part`);
     const controller = new AbortController();
@@ -205,6 +227,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
       return;
     }
     try {
+      const IntentLauncher = await intentLauncher();
       await IntentLauncher.startActivityAsync(IntentLauncher.ActivityAction.MANAGE_UNKNOWN_APP_SOURCES, {
         data: `package:${Application.applicationId ?? 'top.salcara.image'}`,
       });
@@ -228,6 +251,14 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     description = '正在连接 Salcara 更新站与官方版本清单。';
     actions = [{ label: '请稍候', disabled: true }];
     dismissible = false;
+  } else if (phase === 'available' && release && installMode !== 'apk') {
+    title = `有新版本 ${release.tagName}`;
+    description = installMode === 'store'
+      ? `当前版本 ${currentVersion}\n\n${release.notes.slice(0, 420)}`
+      : `当前版本 ${currentVersion}\n\n${release.notes.slice(0, 420)}\n\niPhone 版会通过 App Store / TestFlight 更新，上架后即可在那里获取新版本。`;
+    actions = installMode === 'store'
+      ? [{ label: '稍后', tone: 'secondary', onPress: close }, { label: '前往更新', tone: 'primary', onPress: () => void openStore() }]
+      : [{ label: '知道了', tone: 'primary', onPress: close }];
   } else if (phase === 'available' && release) {
     title = `发现新版本 ${release.tagName}`;
     description = `当前版本 ${currentVersion} · 安装包 ${formatBytes(release.apk.size)}\n\n${release.notes.slice(0, 420)}`;
@@ -257,9 +288,12 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     title = '更新没有完成';
     description = message;
     icon = 'alert-circle-outline';
-    actions = [
+    actions = installMode === 'apk' ? [
       { label: '关闭', tone: 'secondary', onPress: close },
       { label: '再次下载', tone: 'secondary', onPress: () => void downloadAndInstall() },
+      { label: '重新检查', tone: 'primary', onPress: () => void check(true) },
+    ] : [
+      { label: '关闭', tone: 'secondary', onPress: close },
       { label: '重新检查', tone: 'primary', onPress: () => void check(true) },
     ];
   }
@@ -273,7 +307,7 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
           <Text style={styles.progressText}>{progress > 0 ? `${Math.round(progress * 100)}%` : '正在准备下载…'}</Text>
         </View>
       )}
-      {phase === 'available' && release?.apk.digest && <Text style={styles.digest} numberOfLines={2}>官方校验：{release.apk.digest}</Text>}
+      {phase === 'available' && installMode === 'apk' && release?.apk.digest && <Text style={styles.digest} numberOfLines={2}>官方校验：{release.apk.digest}</Text>}
     </AppDialog>
   );
 }

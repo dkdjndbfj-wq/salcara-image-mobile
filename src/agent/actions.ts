@@ -1,5 +1,5 @@
 import { requireOptionalNativeModule } from 'expo';
-import { Linking, Share } from 'react-native';
+import { Linking, Platform, Share } from 'react-native';
 
 import { createId } from '../domain-utils';
 import type { PhoneAction, PhoneActionKind } from './types';
@@ -7,7 +7,9 @@ import type { PhoneAction, PhoneActionKind } from './types';
 /**
  * Phone actions are never executed by the model. The tool only prepares a
  * validated card; the user taps it, and even then the system Clock, Calendar,
- * Messages, Mail, Phone or Maps app opens for a final confirmation.
+ * Messages, Mail, Phone or Maps app opens for a final confirmation. On iOS the
+ * confirmed calendar card is written straight to the default calendar
+ * (EventKit), and alarms / timers are not offered (no public iOS API).
  */
 
 interface ActionsNative {
@@ -27,6 +29,15 @@ export class ActionInputError extends Error {
 }
 
 const KINDS: PhoneActionKind[] = ['alarm', 'timer', 'calendar', 'sms', 'email', 'call', 'map', 'open_url', 'share_text'];
+
+/** iOS gives other apps no way to create Clock alarms or timers, so those two kinds exist on Android only. */
+export function phoneActionKinds(os: string = Platform.OS): PhoneActionKind[] {
+  return os === 'ios' ? KINDS.filter((kind) => kind !== 'alarm' && kind !== 'timer') : [...KINDS];
+}
+
+export function phoneActionsSupportClock(os: string = Platform.OS): boolean {
+  return os !== 'ios';
+}
 const DAY_NAMES = ['', '一', '二', '三', '四', '五', '六', '日'];
 const WEEK = ['日', '一', '二', '三', '四', '五', '六'];
 
@@ -100,9 +111,12 @@ function phone(value: unknown): string {
 }
 
 /** Validates the model's arguments and builds a card. Throws ActionInputError with a message for the model. */
-export function createPhoneAction(input: Record<string, unknown>, now = new Date()): PhoneAction {
+export function createPhoneAction(input: Record<string, unknown>, now = new Date(), os: string = Platform.OS): PhoneAction {
   const kind = str(input.action, 20) as PhoneActionKind;
   if (!KINDS.includes(kind)) throw new ActionInputError(`不支持的操作：${kind || '未填写'}`);
+  if (!phoneActionKinds(os).includes(kind)) {
+    throw new ActionInputError('iPhone 不允许其他应用设置闹钟或倒计时。请告诉用户在“时钟”App 里手动设置；需要提醒时可以改用 calendar 添加日程');
+  }
   const base = { id: createId(), kind, status: 'ready' as const };
   switch (kind) {
     case 'alarm': {
@@ -177,6 +191,18 @@ export function createPhoneAction(input: Record<string, unknown>, now = new Date
 
 const text = (value: unknown) => (typeof value === 'string' ? value : '');
 
+/** sms: link for the platform's Messages app (iOS separates the body with “&”, Android uses a query). */
+export function smsUrl(to: string, body: string, os: string = Platform.OS): string {
+  if (os === 'ios') return `sms:${encodeURIComponent(to)}${body ? `&body=${encodeURIComponent(body)}` : ''}`;
+  return `smsto:${encodeURIComponent(to)}${body ? `?body=${encodeURIComponent(body)}` : ''}`;
+}
+
+/** Maps search link: Apple Maps on iOS, the geo: intent (any maps app) on Android. */
+export function mapUrl(destination: string, os: string = Platform.OS): string {
+  if (os === 'ios') return `https://maps.apple.com/?q=${encodeURIComponent(destination)}`;
+  return `geo:0,0?q=${encodeURIComponent(destination)}`;
+}
+
 /** Runs a confirmed action by opening the matching system app. */
 export async function runPhoneAction(action: PhoneAction): Promise<void> {
   const p = action.params;
@@ -191,7 +217,7 @@ export async function runPhoneAction(action: PhoneAction): Promise<void> {
       await native().insertEvent(text(p.title), Number(p.begin), Number(p.end), p.allDay === true, text(p.location), text(p.notes));
       return;
     case 'sms':
-      await open(`smsto:${encodeURIComponent(text(p.to))}${p.body ? `?body=${encodeURIComponent(text(p.body))}` : ''}`, '没有找到短信应用');
+      await open(smsUrl(text(p.to), text(p.body)), '没有找到短信应用');
       return;
     case 'email': {
       const query = [p.subject && `subject=${encodeURIComponent(text(p.subject))}`, p.body && `body=${encodeURIComponent(text(p.body))}`].filter(Boolean).join('&');
@@ -199,11 +225,11 @@ export async function runPhoneAction(action: PhoneAction): Promise<void> {
       return;
     }
     case 'call':
-      // ACTION_DIAL: the dialer opens with the number filled in; the user presses call.
+      // Android ACTION_DIAL / iOS call prompt: the number is filled in; the user presses call.
       await open(`tel:${encodeURIComponent(text(p.to))}`, '没有找到拨号应用');
       return;
     case 'map':
-      await open(`geo:0,0?q=${encodeURIComponent(text(p.destination))}`, '没有找到地图应用');
+      await open(mapUrl(text(p.destination)), '没有找到地图应用');
       return;
     case 'open_url':
       await open(text(p.url), '没有可以打开网址的应用');

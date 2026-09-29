@@ -84,7 +84,7 @@ test('realtime: URL, GA session shape and event mapping (GA + beta names)', () =
   expect(() => realtimeUrl('http://10.0.0.2:8080/v1', 'm')).toThrow('HTTPS');
   const update = sessionUpdate({ baseUrl: '', apiKey: '', model: 'gpt-realtime-2.1', voice: 'cedar', instructions: '简短' });
   expect(update.session.audio?.output).toEqual({ format: { type: 'audio/pcm', rate: 24000 }, voice: 'cedar' });
-  expect(update.session.audio?.input?.turn_detection).toMatchObject({ interrupt_response: true });
+  expect(update.session.audio?.input.turn_detection).toMatchObject({ interrupt_response: true });
   const seen: string[] = [];
   const handlers = {
     onAudio: (b: string) => seen.push(`audio:${b}`), onAssistantText: (t: string) => seen.push(`say:${t}`),
