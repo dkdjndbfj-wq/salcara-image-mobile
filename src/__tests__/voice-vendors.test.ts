@@ -17,7 +17,7 @@ jest.mock('../storage/database', () => ({ getSetting: async (key: string) => moc
 import { maxRecordingMs, openRealtime, resolveTarget, setSpeechFetchForTesting, speechLanguage, synthesize, transcribe, type SpeechTarget } from '../voice/engines';
 import { decodeBase64, decodeHex, PcmSink, resamplePcm16 } from '../voice/pcm';
 import { handleRealtimeEvent, sessionUpdate } from '../voice/realtime';
-import { defaultModel, modelsFor, speechBaseFor, supports, vendorForService } from '../api/vendors';
+import { defaultModel, modelsFor, speechBaseFor, supports, vendorForService, voicesFor } from '../api/vendors';
 import type { ProviderProfile } from '../domain';
 import { encodeBase64 } from '../voice/speech-api';
 import { VENDORS } from '../voice/vendors';
@@ -198,4 +198,19 @@ test('realtime sessions use each vendor’s dialect and sample rate', () => {
   const audio: string[] = [];
   handleRealtimeEvent({ type: 'response.audio.delta', delta: 'QUJD' }, { onAudio: (data) => audio.push(data) });
   expect(audio).toEqual(['QUJD']);
+});
+
+test('voices follow the vendor and the model', async () => {
+  const openai = vendorForService(service({ vendor: 'openai', baseUrl: 'https://api.openai.com/v1' }));
+  expect(voicesFor(openai.tts, 'tts-1').map((voice) => voice.id)).not.toContain('marin');
+  expect(voicesFor(openai.tts, 'gpt-4o-mini-tts').map((voice) => voice.id)).toContain('marin');
+  expect(voicesFor(openai.realtime, 'gpt-realtime').map((voice) => voice.id)).not.toContain('nova');
+  const ali = vendorForService(service({ vendor: 'dashscope' }));
+  expect(voicesFor(ali.realtime, 'qwen3.8-omni-flash-realtime')[0].id).toBe('Tina');
+  expect(voicesFor(ali.realtime, 'qwen3-omni-flash-realtime')[0].id).toBe('Cherry');
+  // A saved voice from another model is swapped when resolving; a typed (cloned) voice id is kept.
+  mockSecrets.oa = 'oa-key';
+  const oa = service({ id: 'oa', vendor: 'openai', baseUrl: 'https://api.openai.com/v1' });
+  expect(await resolveTarget('tts', 'oa', 'tts-1', 'marin', [oa], null)).toMatchObject({ voice: 'coral' });
+  expect(await resolveTarget('tts', 'oa', 'gpt-4o-mini-tts', 'my-clone', [oa], null)).toMatchObject({ voice: 'my-clone' });
 });

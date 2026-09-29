@@ -22,7 +22,12 @@ export interface VendorField {
   help?: string;
 }
 
-export interface VoiceOption { id: string; label: string }
+export interface VoiceOption {
+  id: string;
+  label: string;
+  /** Only for these models (tested against the model name); absent = every model of this function. */
+  models?: RegExp;
+}
 
 export interface Capability<P extends string> {
   protocol: P;
@@ -66,18 +71,45 @@ export interface Vendor {
   realtime?: Capability<RealtimeProtocol>;
 }
 
-const OPENAI_VOICES: VoiceOption[] = [
+// OpenAI: marin / cedar / ballad / verse need the gpt-4o voice models; tts-1 has the classic nine.
+const NOT_TTS1 = /^(?!tts-1)/;
+const OPENAI_TTS_VOICES: VoiceOption[] = [
+  { id: 'marin', label: 'Marin · 温柔自然', models: NOT_TTS1 }, { id: 'cedar', label: 'Cedar · 沉稳低音', models: NOT_TTS1 },
+  { id: 'coral', label: 'Coral · 明亮活泼' }, { id: 'sage', label: 'Sage · 平和知性' }, { id: 'alloy', label: 'Alloy · 中性清晰' },
+  { id: 'shimmer', label: 'Shimmer · 轻柔' }, { id: 'ash', label: 'Ash · 低沉' }, { id: 'echo', label: 'Echo · 温和男声' },
+  { id: 'nova', label: 'Nova · 活力女声' }, { id: 'onyx', label: 'Onyx · 深沉男声' }, { id: 'fable', label: 'Fable · 叙事感' },
+  { id: 'ballad', label: 'Ballad · 抒情', models: NOT_TTS1 }, { id: 'verse', label: 'Verse · 富有表现力', models: NOT_TTS1 },
+];
+// Realtime models have their own set (no fable / nova / onyx).
+const OPENAI_REALTIME_VOICES: VoiceOption[] = [
   { id: 'marin', label: 'Marin · 温柔自然' }, { id: 'cedar', label: 'Cedar · 沉稳低音' }, { id: 'coral', label: 'Coral · 明亮活泼' },
   { id: 'sage', label: 'Sage · 平和知性' }, { id: 'verse', label: 'Verse · 富有表现力' }, { id: 'alloy', label: 'Alloy · 中性清晰' },
-  { id: 'shimmer', label: 'Shimmer · 轻柔' }, { id: 'ash', label: 'Ash · 低沉' },
+  { id: 'shimmer', label: 'Shimmer · 轻柔' }, { id: 'ash', label: 'Ash · 低沉' }, { id: 'ballad', label: 'Ballad · 抒情' }, { id: 'echo', label: 'Echo · 温和男声' },
 ];
 const GEMINI_VOICES: VoiceOption[] = [
   { id: 'Kore', label: 'Kore · 坚定' }, { id: 'Aoede', label: 'Aoede · 轻快' }, { id: 'Leda', label: 'Leda · 年轻' }, { id: 'Zephyr', label: 'Zephyr · 明亮' },
   { id: 'Puck', label: 'Puck · 欢快' }, { id: 'Charon', label: 'Charon · 知性' }, { id: 'Fenrir', label: 'Fenrir · 激昂' }, { id: 'Callirrhoe', label: 'Callirrhoe · 随和' },
 ];
-const QWEN_VOICES: VoiceOption[] = [
-  { id: 'Cherry', label: 'Cherry · 芊悦' }, { id: 'Serena', label: 'Serena · 苏瑶' }, { id: 'Ethan', label: 'Ethan · 晨煦' }, { id: 'Chelsie', label: 'Chelsie · 千雪' },
+// 通义 TTS: qwen3-tts adds dialect and character voices; qwen-tts keeps the first seven.
+const QWEN3_TTS = /qwen3-tts/;
+const OLD_QWEN_TTS = /^qwen-tts/;
+const QWEN_TTS_VOICES: VoiceOption[] = [
+  { id: 'Cherry', label: 'Cherry · 芊悦' }, { id: 'Ethan', label: 'Ethan · 晨煦' },
+  { id: 'Serena', label: 'Serena · 苏瑶', models: OLD_QWEN_TTS }, { id: 'Chelsie', label: 'Chelsie · 千雪', models: OLD_QWEN_TTS },
+  { id: 'Nofish', label: 'Nofish · 不吃鱼', models: QWEN3_TTS }, { id: 'Jennifer', label: 'Jennifer · 詹妮弗', models: QWEN3_TTS },
+  { id: 'Ryan', label: 'Ryan · 甜茶', models: QWEN3_TTS }, { id: 'Katerina', label: 'Katerina · 卡捷琳娜', models: QWEN3_TTS },
   { id: 'Dylan', label: 'Dylan · 北京话' }, { id: 'Jada', label: 'Jada · 上海话' }, { id: 'Sunny', label: 'Sunny · 四川话' },
+  { id: 'Rocky', label: 'Rocky · 粤语', models: QWEN3_TTS }, { id: 'Li', label: 'Li · 南京话', models: QWEN3_TTS }, { id: 'Marcus', label: 'Marcus · 陕西话', models: QWEN3_TTS },
+];
+// 通义实时（Omni）：3.5 / 3.8 换了一套新音色；老的 qwen3-omni 用 Cherry 等。
+const NEW_OMNI = /qwen3\.[5-9]/;
+const QWEN_REALTIME_VOICES: VoiceOption[] = [
+  { id: 'Tina', label: 'Tina · 甜甜', models: NEW_OMNI }, { id: 'Cindy', label: 'Cindy · 林欣宜', models: NEW_OMNI }, { id: 'Mia', label: 'Mia · 舒然', models: NEW_OMNI },
+  { id: 'Maia', label: 'Maia · 四月', models: NEW_OMNI }, { id: 'Serena', label: 'Serena · 苏瑶', models: NEW_OMNI }, { id: 'Katerina', label: 'Katerina · 卡捷琳娜', models: NEW_OMNI },
+  { id: 'Raymond', label: 'Raymond · 林川野', models: NEW_OMNI }, { id: 'Zane', label: 'Zane · 泽恩', models: NEW_OMNI }, { id: 'Ryan', label: 'Ryan · 甜茶', models: NEW_OMNI },
+  { id: 'Evan', label: 'Evan · 江晨', models: NEW_OMNI }, { id: 'Sunnybobi', label: 'Sunnybobi · 知芝', models: /qwen3\.5/ }, { id: 'Harvey', label: 'Harvey · 厚', models: /qwen3\.5/ },
+  { id: 'Cherry', label: 'Cherry · 芊悦', models: /^qwen3-omni/ }, { id: 'Ethan', label: 'Ethan · 晨煦', models: /^qwen3-omni|qwen3\.5/ },
+  { id: 'Chelsie', label: 'Chelsie · 千雪', models: /^qwen3-omni/ },
 ];
 
 export const VENDORS: Vendor[] = [
@@ -89,8 +121,8 @@ export const VENDORS: Vendor[] = [
     prefer: /^qwen-plus$|^qwen3/, preferImage: /qwen-image|wan/, keyUrl: 'https://bailian.console.aliyun.com/?tab=model#/api-key',
     fields: [{ key: 'realtimeUrl', label: '实时地址', optional: true, placeholder: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', help: '只有使用业务空间专属地址时才需要填写' }],
     stt: { protocol: 'dashscope', models: ['qwen3-asr-flash'] },
-    tts: { protocol: 'dashscope', models: ['qwen3-tts-flash', 'qwen-tts'], voices: QWEN_VOICES, customVoice: true },
-    realtime: { protocol: 'qwen', models: ['qwen3.8-omni-flash-realtime', 'qwen3.5-omni-plus-realtime', 'qwen3.5-omni-flash-realtime', 'qwen3-omni-flash-realtime'], voices: QWEN_VOICES, customVoice: true },
+    tts: { protocol: 'dashscope', models: ['qwen3-tts-flash', 'qwen-tts'], voices: QWEN_TTS_VOICES, customVoice: true },
+    realtime: { protocol: 'qwen', models: ['qwen3.8-omni-flash-realtime', 'qwen3.5-omni-plus-realtime', 'qwen3.5-omni-flash-realtime', 'qwen3-omni-flash-realtime'], voices: QWEN_REALTIME_VOICES, customVoice: true },
   },
   { id: 'doubao', name: '豆包 · 火山方舟', region: 'cn', blurb: '对话、绘图（Seedream）', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', chatApi: 'chat-completions', lists: true, image: true, prefer: /doubao/, preferImage: /seedream/, keyUrl: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey' },
   {
@@ -100,9 +132,11 @@ export const VENDORS: Vendor[] = [
     tts: {
       protocol: 'volcengine', models: ['自动（按音色）', 'seed-tts-2.0', 'seed-tts-1.0', 'seed-icl-2.0'], customVoice: true, note: '音色 ID 可在控制台“音色列表”查看，复刻音色以 S_ 开头',
       voices: [
-        { id: 'zh_female_vv_uranus_bigtts', label: 'Vivi 2.0' }, { id: 'zh_female_cancan_mars_bigtts', label: '灿灿' },
-        { id: 'zh_female_shuangkuaisisi_moon_bigtts', label: '爽快思思' }, { id: 'zh_male_wennuanahu_moon_bigtts', label: '温暖阿虎' },
-        { id: 'zh_male_beijingxiaoye_moon_bigtts', label: '北京小爷' }, { id: 'zh_female_wanwanxiaohe_moon_bigtts', label: '湾湾小何' },
+        // 2.0 voices (uranus / saturn) need seed-tts-2.0; the classic ones (moon / mars) are 1.0.
+        { id: 'zh_female_vv_uranus_bigtts', label: 'Vivi 2.0', models: /2\.0|自动/ },
+        { id: 'zh_female_cancan_mars_bigtts', label: '灿灿', models: /1\.0|自动/ },
+        { id: 'zh_female_shuangkuaisisi_moon_bigtts', label: '爽快思思', models: /1\.0|自动/ }, { id: 'zh_male_wennuanahu_moon_bigtts', label: '温暖阿虎', models: /1\.0|自动/ },
+        { id: 'zh_male_beijingxiaoye_moon_bigtts', label: '北京小爷', models: /1\.0|自动/ }, { id: 'zh_female_wanwanxiaohe_moon_bigtts', label: '湾湾小何', models: /1\.0|自动/ },
       ],
     },
   },
@@ -163,8 +197,8 @@ export const VENDORS: Vendor[] = [
     id: 'openai', name: 'OpenAI', region: 'global', blurb: '对话、绘图、语音识别 / 合成、实时语音', baseUrl: 'https://api.openai.com/v1', chatApi: 'responses', lists: true, image: true,
     prefer: /^gpt-/, preferImage: /gpt-image/, keyUrl: 'https://platform.openai.com/api-keys',
     stt: { protocol: 'openai', models: ['gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'whisper-1'] },
-    tts: { protocol: 'openai', models: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'], voices: OPENAI_VOICES, customVoice: true },
-    realtime: { protocol: 'openai', models: ['gpt-realtime-2.1', 'gpt-realtime', 'gpt-realtime-mini'], voices: OPENAI_VOICES, customVoice: true },
+    tts: { protocol: 'openai', models: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'], voices: OPENAI_TTS_VOICES, customVoice: true },
+    realtime: { protocol: 'openai', models: ['gpt-realtime-2.1', 'gpt-realtime', 'gpt-realtime-mini'], voices: OPENAI_REALTIME_VOICES, customVoice: true },
   },
   { id: 'anthropic', name: 'Claude', region: 'global', blurb: '对话', baseUrl: 'https://api.anthropic.com/v1', chatApi: 'anthropic', lists: true, prefer: /sonnet/, keyUrl: 'https://console.anthropic.com/settings/keys' },
   {
@@ -187,8 +221,8 @@ export const VENDORS: Vendor[] = [
     id: 'azure-openai', name: 'Azure OpenAI', region: 'global', blurb: 'Azure 上部署的 GPT 语音模型', addressLabel: '终结点', addressPlaceholder: 'https://xxx.openai.azure.com', keyLabel: '密钥',
     keyUrl: 'https://portal.azure.com',
     stt: { protocol: 'openai', models: ['gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'whisper'], note: '模型处填部署名称' },
-    tts: { protocol: 'openai', models: ['gpt-4o-mini-tts', 'tts'], voices: OPENAI_VOICES, note: '模型处填部署名称' },
-    realtime: { protocol: 'openai', models: ['gpt-realtime', 'gpt-realtime-mini'], voices: OPENAI_VOICES, note: '模型处填部署名称' },
+    tts: { protocol: 'openai', models: ['gpt-4o-mini-tts', 'tts'], voices: OPENAI_TTS_VOICES, note: '模型处填部署名称' },
+    realtime: { protocol: 'openai', models: ['gpt-realtime', 'gpt-realtime-mini'], voices: OPENAI_REALTIME_VOICES, note: '模型处填部署名称' },
   },
   {
     id: 'azure-speech', name: 'Azure AI 语音', region: 'global', blurb: '微软语音识别与神经网络语音', keyLabel: '密钥',
@@ -225,8 +259,8 @@ export const VENDORS: Vendor[] = [
     id: 'custom', name: '其他 · OpenAI 兼容', region: 'global', blurb: '中转站、自建服务，对话 / 绘图 / 语音都可用', baseUrl: '', chatApi: 'chat-completions', lists: true, image: true,
     addressPlaceholder: 'https://example.com/v1',
     stt: { protocol: 'openai', models: ['gpt-4o-mini-transcribe', 'whisper-1'] },
-    tts: { protocol: 'openai', models: ['gpt-4o-mini-tts', 'tts-1'], voices: OPENAI_VOICES, customVoice: true },
-    realtime: { protocol: 'openai', models: ['gpt-realtime-2.1', 'gpt-realtime'], voices: OPENAI_VOICES, customVoice: true },
+    tts: { protocol: 'openai', models: ['gpt-4o-mini-tts', 'tts-1'], voices: OPENAI_TTS_VOICES, customVoice: true },
+    realtime: { protocol: 'openai', models: ['gpt-realtime-2.1', 'gpt-realtime'], voices: OPENAI_REALTIME_VOICES, customVoice: true },
   },
 ];
 
@@ -255,6 +289,13 @@ export function vendorForService(service: { vendor?: string | null; baseUrl: str
 
 export function capabilityOf(vendor: Vendor, kind: SpeechKind): Capability<string> | undefined {
   return vendor[kind] as Capability<string> | undefined;
+}
+
+/** The voices a model can use (a vendor's voices often differ between its models). */
+export function voicesFor(capability: Capability<string> | undefined, model: string): VoiceOption[] {
+  const all = capability?.voices ?? [];
+  const fitting = all.filter((voice) => !voice.models || voice.models.test(model));
+  return fitting.length ? fitting : all;
 }
 
 export function supports(vendor: Vendor, kind: ServiceKind): boolean {

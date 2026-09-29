@@ -10,7 +10,7 @@ import { serviceValues } from '../api/services';
 import { GeminiLiveSession, realtimeInputRate, realtimeUrl, RealtimeSession, type LiveSession, type RealtimeHandlers } from './realtime';
 import { SpeechApiError, streamSpeech, transcribeAudio } from './speech-api';
 import { getProviderKey } from '../storage/secure-keys';
-import { capabilityOf, speechBaseFor, vendorForService, type RealtimeProtocol, type SpeechKind, type SttProtocol, type TtsProtocol } from './vendors';
+import { capabilityOf, speechBaseFor, vendorForService, voicesFor, type RealtimeProtocol, type SpeechKind, type SttProtocol, type TtsProtocol } from './vendors';
 
 /**
  * One entry point per speech function. A target is whatever the user picked for that function —
@@ -52,10 +52,14 @@ export async function resolveTarget(kind: SpeechKind, ref: string | null, model:
     : speechBaseFor(vendor, service.baseUrl);
   // Following the chat service: its vendor's defaults (a saved model/voice may belong to another vendor).
   const chosen = preferred ? model.trim() : '';
-  const chosenVoice = preferred ? voice.trim() : '';
+  const chosenModel = chosen || capability.models[0] || '';
+  const fitting = voicesFor(capability, chosenModel);
+  // A listed voice of another model (e.g. marin on tts-1) is swapped for this model's first voice; typed ids are kept.
+  const listedElsewhere = (capability.voices ?? []).some((item) => item.id === voice.trim()) && !fitting.some((item) => item.id === voice.trim());
+  const chosenVoice = preferred && !listedElsewhere ? voice.trim() : '';
   return {
     kind, protocol: capability.protocol, vendor: vendor.id, label: service.name || vendor.name, values, baseUrl,
-    model: chosen || capability.models[0] || '', voice: chosenVoice || capability.voices?.[0]?.id || '', extra: capability.extra,
+    model: chosenModel, voice: chosenVoice || fitting[0]?.id || '', extra: capability.extra,
   };
 }
 

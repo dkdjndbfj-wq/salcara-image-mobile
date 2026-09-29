@@ -2,7 +2,7 @@
   "expo": {
     "name": "Salcara AI",
     "slug": "salcara-image-mobile",
-    "version": "1.6.1",
+    "version": "1.6.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -11,7 +11,7 @@
     },
     "android": {
       "package": "top.salcara.image",
-      "versionCode": 18,
+      "versionCode": 19,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.CAMERA",

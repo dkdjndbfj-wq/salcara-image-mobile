@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { refreshServiceModels, useServiceModels } from '../api/services';
-import { capabilityOf, defaultModel, KIND_TITLE, modelsFor, supports, vendorForService, type ServiceKind, type Vendor } from '../api/vendors';
+import { capabilityOf, defaultModel, KIND_TITLE, modelsFor, supports, vendorForService, voicesFor, type ServiceKind, type Vendor } from '../api/vendors';
 import type { ProviderProfile } from '../domain';
 import { useApp } from '../state/AppContext';
 import { colors, prettyModel, radius } from '../theme';
@@ -44,7 +44,8 @@ export function servicesFor(kind: ServiceKind, providers: ProviderProfile[]): Pr
 export function choiceFor(kind: ServiceKind, service: ProviderProfile, listed: string[]): FunctionChoice {
   const vendor = vendorForService(service);
   const capability = kind === 'chat' || kind === 'image' ? undefined : capabilityOf(vendor, kind);
-  return { serviceId: service.id, model: defaultModel(vendor, kind, listed), voice: capability?.voices?.[0]?.id ?? '' };
+  const model = defaultModel(vendor, kind, listed);
+  return { serviceId: service.id, model, voice: voicesFor(capability, model)[0]?.id ?? '' };
 }
 
 export function FunctionPicker({ kind, value, onChange, onAddService, offLabel, followChat = false, hideLabel = false }: {
@@ -69,13 +70,21 @@ export function FunctionPicker({ kind, value, onChange, onAddService, offLabel, 
   const [error, setError] = useState<string | null>(null);
   const capability = vendor && kind !== 'chat' && kind !== 'image' ? capabilityOf(vendor, kind) : undefined;
   const models = vendor ? modelsFor(vendor, kind, listed) : [];
-  const voices = capability?.voices ?? [];
+  const allVoices = capability?.voices ?? [];
   const wantsVoice = (kind === 'tts' || kind === 'realtime') && Boolean(service);
   const languageModel = vendor && (vendor.id === 'azure-speech' || vendor.id === 'google-cloud') && kind === 'stt';
   // Following the chat service, or nothing chosen yet: what will actually be used is the vendor's default.
   const following = !value.serviceId;
   const shownModel = (!following && value.model) || (vendor ? defaultModel(vendor, kind, listed) : '');
+  // Voices follow the model: each vendor (and often each model) has its own set.
+  const voices = voicesFor(capability, shownModel);
   const shownVoice = (!following && value.voice) || voices[0]?.id || '';
+  /** Keeps a typed / cloned voice; a listed voice the new model doesn't have is swapped for its first one. */
+  const voiceFor = (model: string) => {
+    const next = voicesFor(capability, model);
+    const listed = allVoices.some((voice) => voice.id === shownVoice);
+    return !listed || next.some((voice) => voice.id === shownVoice) ? shownVoice : next[0]?.id ?? '';
+  };
 
   const refresh = async () => {
     if (!service) return;
@@ -123,7 +132,7 @@ export function FunctionPicker({ kind, value, onChange, onAddService, offLabel, 
     <ModelSelect visible={picking} title={`${KIND_TITLE[kind]} · ${service?.name ?? ''}`} value={shownModel} models={models} loading={loading}
       error={error ?? (vendor && !vendor.lists ? `${vendor.name} 没有模型列表接口，下面是它支持的${languageModel ? '语言' : '模型'}，也可以手动填写。` : null)}
       onClose={() => setPicking(false)} onRefresh={() => void refresh()}
-      onSelect={(model) => service && onChange({ serviceId: service.id, model, voice: shownVoice })} />
+      onSelect={(model) => service && onChange({ serviceId: service.id, model, voice: voiceFor(model) })} />
   </View>;
 }
 
