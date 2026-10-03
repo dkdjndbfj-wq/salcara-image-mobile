@@ -11,12 +11,9 @@ import {
 import { AppDialog, type DialogAction } from './ui';
 import { networkFailureMessage } from '../api/network';
 import { verifyDownloadedApk, withApkDownloadDeadline } from '../apk-download';
+import { launchVerifiedApkInstaller } from '../apk-installer';
 
 type Phase = 'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'permission' | 'error' | 'test-build';
-
-const INSTALL_MIME = 'application/vnd.android.package-archive';
-const FLAG_GRANT_READ_URI_PERMISSION = 1;
-const FLAG_ACTIVITY_NEW_TASK = 0x10000000;
 
 /** expo-intent-launcher is Android-only: load it only where it exists, never at import time on iOS. */
 async function intentLauncher() {
@@ -101,35 +98,21 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
     void check(true);
   }, [manualCheckToken, check]);
 
-  const launchInstaller = useCallback(async (uri: string) => {
+  const launchInstaller = useCallback(async (uri: string, signal?: AbortSignal) => {
     if (Platform.OS !== 'android') {
       if (IOS_UPDATE_URL) await Linking.openURL(IOS_UPDATE_URL);
       return;
     }
-    const contentUri = uri.startsWith('content://')
+    const resolveContentUri = async () => uri.startsWith('content://')
       ? uri
       : (() => {
         try { return new File(uri).contentUri; }
         catch { return undefined; }
       })() ?? await FileSystem.getContentUriAsync(uri);
-    const params = {
-      data: contentUri,
-      type: INSTALL_MIME,
-      flags: FLAG_GRANT_READ_URI_PERMISSION | FLAG_ACTIVITY_NEW_TASK,
-    };
-    const IntentLauncher = await intentLauncher();
     // ACTION_INSTALL_PACKAGE is the Android-specific action intended for APKs.
     // A few older/OEM package installers only register ACTION_VIEW, so retain
     // that as a local fallback without sending the file to a browser.
-    try {
-      await IntentLauncher.startActivityAsync('android.intent.action.INSTALL_PACKAGE', params);
-    } catch (firstError) {
-      try {
-        await IntentLauncher.startActivityAsync('android.intent.action.VIEW', params);
-      } catch {
-        throw firstError;
-      }
-    }
+    await launchVerifiedApkInstaller(resolveContentUri, intentLauncher, signal);
   }, [release]);
 
   const openStore = async () => {
@@ -200,8 +183,9 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
       downloadedUriRef.current = installedFile.uri;
       setPhase('idle');
       try {
-        await launchInstaller(installedFile.uri);
-      } catch {
+        await launchInstaller(installedFile.uri, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
         setMessage('Android 阻止了安装请求。请先允许 Salcara AI“安装未知应用”，返回后会继续打开安装界面。');
         setPhase('permission');
       }
