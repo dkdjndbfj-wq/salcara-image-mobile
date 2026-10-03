@@ -1,0 +1,9 @@
+{
+  "platforms": ["android", "ios"],
+  "android": {
+    "modules": ["expo.modules.salcaranotify.SalcaraNotifyModule"]
+  },
+  "ios": {
+    "modules": ["SalcaraNotifyModule"]
+  }
+}

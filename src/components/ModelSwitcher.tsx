@@ -9,7 +9,7 @@ import type { AspectRatio, ProviderProfile, Quality, ResolutionTier } from '../d
 import { qualitiesForModel } from '../domain-utils';
 import { normalizeRatio, RATIO_PRESETS, ratioValue, sizeNote, supportsAutoSize, supportsClarity } from '../image-sizes';
 import { useApp } from '../state/AppContext';
-import { colors, prettyModel, radius } from '../theme';
+import { colors, prettyModel, radius, themed } from '../theme';
 import { Icon } from './Icon';
 import { serviceLabel, servicesFor, VendorBadge } from './FunctionPicker';
 import { MotionPressable } from './MotionPressable';
@@ -26,6 +26,7 @@ type Tab = 'chat' | 'image';
  * Chat models are shared by the assistant and the chat space.
  */
 export function ModelSwitcher({ visible, onClose, onManageProviders, initialTab = 'chat' }: { visible: boolean; onClose: () => void; onManageProviders: () => void; initialTab?: Tab }) {
+  const styles = useStyles();
   const { providers, chatProvider, imageProvider, selectChatProvider, selectImageProvider } = useApp();
   const agent = useAgentSettings();
   const [tab, setTab] = useState<Tab>(initialTab);
@@ -153,6 +154,7 @@ export function ModelSwitcher({ visible, onClose, onManageProviders, initialTab 
 
 /** Step ②: the service's models, inline — search, tap to use, refresh, or type an ID. */
 function ModelList({ kind, service, value, onSelect }: { kind: Tab; service: ProviderProfile; value: string; onSelect: (model: string) => void }) {
+  const styles = useStyles();
   const vendor = vendorForService(service);
   const listed = useServiceModels(service.id);
   const [loading, setLoading] = useState(false);
@@ -206,6 +208,7 @@ function ModelList({ kind, service, value, onSelect }: { kind: Tab; service: Pro
 
 /** A ratio chip with a small frame drawn to that shape. */
 function RatioTile({ value, label, hint, selected, onPress }: { value: AspectRatio | null; label: string; hint?: string; selected: boolean; onPress: () => void }) {
+  const styles = useStyles();
   const ratio = value && value !== 'auto' ? ratioValue(value) : 1;
   const box = 22;
   const width = value === null ? 18 : ratio >= 1 ? box : Math.max(8, box * ratio);
@@ -236,7 +239,7 @@ const IMAGE_CHECKS: Array<{ id: ImageCheck; title: string; detail: string }> = [
 const TIER_LABEL: Record<ResolutionTier, string> = { '1K': '1K 标准', '2K': '2K 高清', '4K': '4K 超清' };
 const QUALITY_LABEL: Record<string, string> = { auto: '自动', low: '快速', medium: '标准', high: '精细', xhigh: '超精细', max: '极致' };
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 12 },
   manage: { color: colors.primary, fontSize: 13.5, fontWeight: '600', marginTop: 22, marginLeft: 8, alignSelf: 'flex-start' },
   segment: { flexDirection: 'row', padding: 4, borderRadius: radius.pill, backgroundColor: colors.surfaceStrong, gap: 4, marginTop: 4 },
@@ -295,4 +298,4 @@ const styles = StyleSheet.create({
   promptDetail: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginTop: 3 },
   tip: { flexDirection: 'row', gap: 8, marginTop: 24, marginHorizontal: 8 },
   note: { flex: 1, color: colors.textMuted, fontSize: 12.5, lineHeight: 19 },
-});
+}));

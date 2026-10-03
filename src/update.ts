@@ -6,7 +6,7 @@ const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/lat
 const RELEASE_PAGE_URL = `https://github.com/${REPOSITORY}/releases/latest`;
 const RELEASE_MANIFEST_URLS = [
   // This is the first-party front door. It is optional today, but keeping the
-  // URL in the client lets Salcara serve the same signed manifest from its own
+  // URL in the client lets Salcara serve the same published manifest from its own
   // domain when a user's network cannot reach GitHub at all.
   'https://salcara.top/app/latest.json',
   `https://cdn.jsdelivr.net/gh/${REPOSITORY}@updates/latest.json`,
@@ -21,6 +21,13 @@ const FIRST_PARTY_APK_BASE_URL = 'https://salcara.top/downloads';
  * iOS can never install the Android APK, so it is never downloaded there.
  */
 export const IOS_UPDATE_URL: string = '';
+
+/** A separate native applicationId prevents the test APK from replacing production data. */
+export const REMOTE_TEST_APPLICATION_ID = 'top.salcara.image.remotetest';
+
+export function productionUpdateCheckEnabled(applicationId: string | null | undefined): boolean {
+  return applicationId !== REMOTE_TEST_APPLICATION_ID;
+}
 
 type GitHubAsset = {
   name?: string;
@@ -90,8 +97,8 @@ async function fetchGitHubRelease(signal?: AbortSignal): Promise<AppRelease> {
   const release = (await response.json()) as GitHubRelease;
   if (release.draft || release.prerelease) throw new Error('最新发布版本不可用于正式更新');
 
-  const asset = release.assets?.find((item) => item.name?.toLowerCase().endsWith('.apk'));
   const tagName = release.tag_name?.trim();
+  const asset = release.assets?.find((item) => item.name === `salcara-image-android-${tagName}.apk`);
   if (!tagName || !asset?.name || !asset.browser_download_url) {
     throw new Error('最新版本没有可安装的 Android APK');
   }
@@ -156,6 +163,7 @@ function isFirstPartyMirrorUrl(value: unknown, name: string): value is string {
   try {
     const url = new URL(value);
     return url.protocol === 'https:'
+      && url.username === '' && url.password === ''
       && (url.hostname === 'salcara.top' || url.hostname.endsWith('.salcara.top'))
       && url.search === '' && url.hash === ''
       && decodeURIComponent(url.pathname.split('/').pop() ?? '') === name;
@@ -200,6 +208,12 @@ export async function fetchLatestRelease(signal?: AbortSignal): Promise<AppRelea
     ...RELEASE_MANIFEST_URLS.map((url) =>
       withEndpointTimeout((endpointSignal) => fetchReleaseManifest(url, endpointSignal), signal)),
   ]);
+  // A late successful mirror response must not revive a cancelled check.
+  if (signal?.aborted) {
+    const aborted = new Error('连接更新服务器超时，请切换网络后重试。');
+    aborted.name = 'AbortError';
+    throw aborted;
+  }
   const releases = results
     .filter((result): result is PromiseFulfilledResult<AppRelease> => result.status === 'fulfilled')
     .map((result) => result.value);
@@ -208,11 +222,6 @@ export async function fetchLatestRelease(signal?: AbortSignal): Promise<AppRelea
     // of trusting whichever network happens to answer first.
     return releases.reduce((latest, candidate) =>
       compareVersions(candidate.version, latest.version) > 0 ? candidate : latest);
-  }
-  if (signal?.aborted) {
-    const aborted = new Error('连接更新服务器超时，请切换网络后重试。');
-    aborted.name = 'AbortError';
-    throw aborted;
   }
   throw new Error('GitHub 与备用更新入口均无法连接，请检查网络或稍后重试。');
 }

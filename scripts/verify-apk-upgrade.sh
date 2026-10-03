@@ -8,7 +8,7 @@ apksigner="$build_tools/apksigner"
 aapt="$build_tools/aapt"
 
 read_badging() {
-  "$aapt" dump badging "$1" | head -n 1
+  "$aapt" dump badging "$1" | sed -n '1p'
 }
 
 read_value() {
@@ -20,7 +20,7 @@ read_value() {
 read_cert() {
   local output
   output="$("$apksigner" verify --print-certs "$1")"
-  sed -nE 's/.*SHA-256[^:]*:[[:space:]]*([0-9A-Fa-f]+).*/\1/p' <<<"$output" | head -n 1
+  sed -nE 's/.*SHA-256[^:]*:[[:space:]]*([0-9A-Fa-f]+).*/\1/p' <<<"$output" | sed -n '1p' | tr '[:upper:]' '[:lower:]'
 }
 
 current_badging="$(read_badging "$current_apk")"

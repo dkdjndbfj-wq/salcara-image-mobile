@@ -135,10 +135,13 @@ export async function updateCharacter(id: string, patch: Partial<Character>): Pr
 export async function deleteCharacterRecords(id: string): Promise<string | null> {
   const db = await database();
   const character = (await loadCharacters()).find((item) => item.id === id);
-  await db.runAsync('DELETE FROM mem_links WHERE owner = ?', id);
-  await db.runAsync('DELETE FROM mem_notes WHERE owner = ?', id);
-  await db.runAsync('DELETE FROM characters WHERE id = ?', id);
-  if (character?.conversationId) await db.runAsync('DELETE FROM reactions WHERE conversation_id = ?', character.conversationId);
+  // All or nothing: a crash midway must not leave a character without its notes (or notes without a character).
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('DELETE FROM mem_links WHERE owner = ?', id);
+    await db.runAsync('DELETE FROM mem_notes WHERE owner = ?', id);
+    await db.runAsync('DELETE FROM characters WHERE id = ?', id);
+    if (character?.conversationId) await db.runAsync('DELETE FROM reactions WHERE conversation_id = ?', character.conversationId);
+  });
   characters = characters.filter((item) => item.id !== id);
   notesCache.delete(id);
   notifyCharacters();
@@ -153,6 +156,12 @@ const notesCache = new Map<string, Box>();
 const noteListeners = new Map<string, Set<() => void>>();
 function notifyNotes(owner: string) { noteListeners.get(owner)?.forEach((listener) => listener()); }
 const EMPTY: Box = { notes: [], links: [] };
+
+/** After a backup was restored: characters and every memory box shown so far are read again. */
+export async function reloadMemoryStore(): Promise<void> {
+  await loadCharacters(true);
+  for (const owner of [...notesCache.keys()]) await loadBox(owner, true);
+}
 
 export async function loadBox(owner: string, force = false): Promise<Box> {
   const cached = notesCache.get(owner);
@@ -279,6 +288,33 @@ export async function deleteNote(owner: string, id: string): Promise<void> {
     notes: box.notes.filter((note) => note.id !== id).map((note) => (note.supersededBy === id ? { ...note, supersededBy: null } : note)),
     links: box.links.filter((link) => link.source !== id && link.target !== id),
   });
+}
+
+/**
+ * Forgets what memory took from a conversation since a moment (a regenerated or edited turn):
+ * notes extracted from then on (except pinned ones), their links, and summaries reaching past it.
+ * Returns the time memory should re-read from: the last kept extraction from this conversation.
+ */
+export async function forgetNotesSince(owner: string, conversationId: string, since: number): Promise<number> {
+  const db = await database();
+  const box = await loadBox(owner, true);
+  const gone = new Set(box.notes.filter((note) => !note.pinned && note.sourceConversationId === conversationId
+    && (note.level === 0 ? note.validFrom >= since : (note.rangeEnd ?? 0) >= since)).map((note) => note.id));
+  if (gone.size) {
+    const ids = [...gone];
+    const marks = ids.map(() => '?').join(',');
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(`DELETE FROM mem_links WHERE source IN (${marks}) OR target IN (${marks})`, ...ids, ...ids);
+      await db.runAsync(`UPDATE mem_notes SET superseded_by = NULL WHERE superseded_by IN (${marks})`, ...ids);
+      await db.runAsync(`DELETE FROM mem_notes WHERE id IN (${marks})`, ...ids);
+    });
+    setBox(owner, {
+      notes: box.notes.filter((note) => !gone.has(note.id)).map((note) => (note.supersededBy && gone.has(note.supersededBy) ? { ...note, supersededBy: null } : note)),
+      links: box.links.filter((link) => !gone.has(link.source) && !gone.has(link.target)),
+    });
+  }
+  const kept = box.notes.filter((note) => !gone.has(note.id) && note.level === 0 && note.sourceConversationId === conversationId && note.validFrom < since);
+  return kept.reduce((latest, note) => Math.max(latest, note.validFrom), 0);
 }
 
 export async function addLinks(owner: string, links: Array<Pick<MemLink, 'source' | 'target' | 'relation'> & { weight?: number }>): Promise<void> {

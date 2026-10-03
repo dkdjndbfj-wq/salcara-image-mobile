@@ -472,6 +472,30 @@ export async function deleteConversationRecord(conversationId: string): Promise<
   return messages;
 }
 
+/** Deletes the given messages of one conversation (one transaction); returns the rows removed. */
+export async function deleteMessageRecords(conversationId: string, ids: string[]): Promise<ChatMessage[]> {
+  if (!ids.length) return [];
+  const db = await getDatabase();
+  const marks = ids.map(() => '?').join(',');
+  let removed: ChatMessage[] = [];
+  await db.withTransactionAsync(async () => {
+    removed = (await db.getAllAsync<MessageRow>(`SELECT * FROM messages WHERE conversation_id = ? AND id IN (${marks})`, conversationId, ...ids)).map(mapMessage);
+    await db.runAsync(`DELETE FROM messages WHERE conversation_id = ? AND id IN (${marks})`, conversationId, ...ids);
+  });
+  return removed;
+}
+
+/** Deletes a message and everything after it in its conversation (editing an earlier message). */
+export async function deleteMessagesFrom(conversationId: string, createdAt: number): Promise<ChatMessage[]> {
+  const db = await getDatabase();
+  let removed: ChatMessage[] = [];
+  await db.withTransactionAsync(async () => {
+    removed = (await db.getAllAsync<MessageRow>('SELECT * FROM messages WHERE conversation_id = ? AND created_at >= ? ORDER BY created_at ASC', conversationId, createdAt)).map(mapMessage);
+    await db.runAsync('DELETE FROM messages WHERE conversation_id = ? AND created_at >= ?', conversationId, createdAt);
+  });
+  return removed;
+}
+
 export async function listMessages(conversationId: string): Promise<ChatMessage[]> {
   const rows = await (await getDatabase()).getAllAsync<MessageRow>(
     'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC',

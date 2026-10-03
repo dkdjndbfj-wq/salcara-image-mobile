@@ -20,6 +20,7 @@ import type { LiveSession } from './realtime';
 import { loadVoiceSettings, type VoiceSettings } from './settings';
 import { takeSentences, toSpeakable } from './speech-text';
 
+import { liveText, useLiveVersion } from '../state/live-text';
 export type LivePhase = 'connecting' | 'listening' | 'hearing' | 'thinking' | 'speaking' | 'error';
 export type LiveEngine = 'cascade' | 'realtime';
 
@@ -84,6 +85,7 @@ const CAPTION_INTERVAL_MS = 100;
 
 export function useVoiceConversation(active: boolean) {
   const app = useApp();
+  const liveVersion = useLiveVersion();
   const appRef = useRef(app);
   appRef.current = app;
 
@@ -286,7 +288,8 @@ export function useVoiceConversation(active: boolean) {
     if (!turn || engine !== 'cascade') return;
     const reply = [...app.messages].reverse().find((message) => message.role === 'assistant' && message.createdAt >= turn.since);
     if (!reply) return;
-    const raw = reply.text ?? '';
+    // The reply being written lives in live-text.ts between list updates.
+    const raw = liveText(reply.id) ?? reply.text ?? '';
     const imageJob = Boolean(reply.preparedPrompt);
     turn.imageJob = imageJob;
     const final = reply.status !== 'pending' || imageJob;
@@ -297,7 +300,7 @@ export function useVoiceConversation(active: boolean) {
     if (final && imageJob && !turn.final) sentences.push('图片正在生成，完成后会出现在对话里。');
     if (sentences.length && !turn.ttsFailed) { queue.current.push(...sentences); void pump(); }
     if (final && !turn.final) { turn.final = true; finishIfDone(); }
-  }, [app.messages, engine, finishIfDone, pump]);
+  }, [app.messages, liveVersion, engine, finishIfDone, pump]);
 
   const teardown = useCallback(() => {
     generation.current += 1;

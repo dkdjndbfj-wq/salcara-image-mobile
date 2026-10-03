@@ -14,6 +14,7 @@ import { savePositions, useBox, useCharacters } from '../memorybox/store';
 import { NOTE_TYPE_META, NOTE_TYPES, type MemNote, type NoteType } from '../memorybox/types';
 import { NoteSheet } from './NoteSheet';
 import { warm } from './theme';
+import { themed } from '../theme';
 
 type View3 = 'graph' | 'timeline' | 'list';
 const MARGIN = 140;
@@ -30,6 +31,7 @@ function radiusOf(note: MemNote) { return 7 + note.importance * 1.3 + (note.type
 export function MemoryCanvas({ visible, characterId, trail, onClose, onOpenConversation }: {
   visible: boolean; characterId: string | null; trail: string[] | null; onClose: () => void; onOpenConversation?: () => void;
 }) {
+  const styles = useStyles();
   const box = useBox(visible ? characterId : null);
   const character = useCharacters().find((item) => item.id === characterId) ?? null;
   const status = usePipelineStatus(characterId);
@@ -96,6 +98,7 @@ export function MemoryCanvas({ visible, characterId, trail, onClose, onOpenConve
 function Graph({ notes, links, owner, trail, selected, onSelect }: {
   notes: MemNote[]; links: { source: string; target: string; relation: string }[]; owner: string; trail: Set<string>; selected: string | null; onSelect: (id: string) => void;
 }) {
+  const styles = useStyles();
   const [stage, setStage] = useState({ width: 0, height: 0 });
   const [allLabels, setAllLabels] = useState(false);
   const shown = useMemo(() => {
@@ -269,6 +272,7 @@ function dayLabel(time: number) {
 }
 
 function NoteCard({ note, lit, onPress }: { note: MemNote; lit: boolean; onPress: () => void }) {
+  const styles = useStyles();
   const meta = NOTE_TYPE_META[note.type];
   return <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.card, lit && styles.cardLit, pressed && { opacity: 0.85 }, note.validTo !== null && { opacity: 0.55 }]}>
     <View style={styles.cardHead}>
@@ -283,6 +287,7 @@ function NoteCard({ note, lit, onPress }: { note: MemNote; lit: boolean; onPress
 }
 
 function Timeline({ notes, trail, onSelect }: { notes: MemNote[]; trail: Set<string>; onSelect: (id: string) => void }) {
+  const styles = useStyles();
   const sections = useMemo(() => {
     const groups = new Map<string, MemNote[]>();
     const sorted = [...notes].filter((note) => !note.rolledUp).sort((a, b) => (b.rangeEnd ?? b.validFrom ?? b.createdAt) - (a.rangeEnd ?? a.validFrom ?? a.createdAt));
@@ -299,6 +304,7 @@ function Timeline({ notes, trail, onSelect }: { notes: MemNote[]; trail: Set<str
 }
 
 function NoteList({ notes, trail, onSelect }: { notes: MemNote[]; trail: Set<string>; onSelect: (id: string) => void }) {
+  const styles = useStyles();
   const [query, setQuery] = useState('');
   const [type, setType] = useState<NoteType | null>(null);
   const items = useMemo(() => {
@@ -322,7 +328,7 @@ function NoteList({ notes, trail, onSelect }: { notes: MemNote[]; trail: Set<str
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   root: { flex: 1 },
   headerButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   tabs: { flexDirection: 'row', alignSelf: 'center', gap: 4, padding: 3, borderRadius: 18, backgroundColor: warm.surfaceStrong, marginVertical: 8 },
@@ -335,7 +341,7 @@ const styles = StyleSheet.create({
   control: { width: 38, height: 38, borderRadius: 19, backgroundColor: warm.card, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderColor: warm.border },
   legendRow: { position: 'absolute', left: 0, right: 0, bottom: 8, flexGrow: 0 },
   legend: { gap: 12, paddingHorizontal: 16 },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: 'rgba(255,255,255,0.85)', paddingHorizontal: 8, height: 24, borderRadius: 12 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: c.glass, paddingHorizontal: 8, height: 24, borderRadius: 12 },
   legendText: { color: warm.textSecondary, fontSize: 11.5 },
   dot: { width: 8, height: 8, borderRadius: 4 },
   trail: { paddingTop: 10, paddingBottom: 12, borderTopWidth: StyleSheet.hairlineWidth, borderColor: warm.border, backgroundColor: warm.card },
@@ -362,4 +368,4 @@ const styles = StyleSheet.create({
   filters: { gap: 8, paddingHorizontal: 16, paddingVertical: 10 },
   noResult: { color: warm.muted, textAlign: 'center', marginTop: 40 },
   menuText: { color: warm.muted, fontSize: 13.5, lineHeight: 20 },
-});
+}));

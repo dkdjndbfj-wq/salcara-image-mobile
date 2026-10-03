@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { Animated, Easing, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { useApp } from '../state/AppContext';
-import { colors, radius } from '../theme';
+import { colors, radius, themed } from '../theme';
 import { ASR_MODELS, formatBytes, MIRRORS, modelSize, type AsrModel } from '../voice/catalog';
 import { cancelInstall, deleteModel, installModel, refreshModels, useModelStatuses, type ModelStatus } from '../voice/models';
 import { localEngineAvailable, localModelsOffered, voiceNative } from '../voice/native';
@@ -14,9 +14,10 @@ import { MotionPressable } from './MotionPressable';
 import { ProviderManager } from './ProviderManager';
 import { AppDialog, Chip, Group, SectionLabel, Sheet } from './ui';
 
-const TIER_COLORS: Record<AsrModel['tier'], string> = { 极速: '#12A150', 均衡: colors.primary, 精准: '#8B5CF6' };
+const tierColor = (tier: AsrModel['tier']): string => ({ 极速: '#12A150', 均衡: colors.primary, 精准: '#8B5CF6' })[tier];
 
 function Progress({ fraction }: { fraction: number }) {
+  const styles = useStyles();
   const value = useRef(new Animated.Value(fraction)).current;
   useEffect(() => { Animated.timing(value, { toValue: fraction, duration: 300, easing: Easing.out(Easing.quad), useNativeDriver: false }).start(); }, [fraction, value]);
   return <View style={styles.track}>
@@ -28,8 +29,9 @@ function ModelCard({ model, status, selected, onUse, onDownload, onCancel, onDel
   model: AsrModel; status: ModelStatus; selected: boolean;
   onUse: () => void; onDownload: () => void; onCancel: () => void; onDelete: () => void;
 }) {
+  const styles = useStyles();
   const installed = status.state === 'installed';
-  const tint = TIER_COLORS[model.tier];
+  const tint = tierColor(model.tier);
   return <MotionPressable accessibilityRole="button" accessibilityLabel={model.name} accessibilityState={{ selected }} scaleTo={0.985}
     disabled={!installed} onPress={onUse} style={[styles.model, selected && styles.modelSelected]}>
     <View style={styles.modelHead}>
@@ -59,6 +61,7 @@ function ModelCard({ model, status, selected, onUse, onDownload, onCancel, onDel
 }
 
 export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  const styles = useStyles();
   const settings = useVoiceSettings();
   const statuses = useModelStatuses();
   const [confirm, setConfirm] = React.useState<AsrModel | null>(null);
@@ -182,7 +185,7 @@ export function VoiceSettingsSheet({ visible, onClose }: { visible: boolean; onC
   </Sheet>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 28 },
   lead: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginBottom: 10, marginHorizontal: 4 },
   group: { padding: 14, gap: 10 },
@@ -216,4 +219,4 @@ const styles = StyleSheet.create({
   input: { height: 42, borderRadius: 12, paddingHorizontal: 12, backgroundColor: colors.surface, color: colors.text, fontSize: 14.5 },
   privacy: { flexDirection: 'row', alignItems: 'center', gap: 6, justifyContent: 'center', marginTop: 24, paddingHorizontal: 12 },
   privacyText: { flexShrink: 1, color: colors.subtle, fontSize: 12.5, textAlign: 'center' },
-});
+}));

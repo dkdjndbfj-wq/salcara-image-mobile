@@ -3,6 +3,7 @@ import { Animated, Easing, Image, Pressable, StyleSheet, useWindowDimensions, Vi
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Ellipse, LinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
 
+import { themed } from '../theme';
 /**
  * The Live entrance, staged like a film title over the starfield of the key visual:
  * a light blooms up from the bottom edge (the Gemini-style handshake), the camera dollies through the stars
@@ -120,6 +121,7 @@ export type BackdropPhase = 'connecting' | 'listening' | 'hearing' | 'thinking' 
 function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy }: {
   mode: IntroMode; onReveal: () => void; onDone?: () => void; phase?: BackdropPhase; energy?: Animated.Value;
 }) {
+  const styles = useStyles();
   const { width: W, height: H } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [posterGone, setPosterGone] = useState(mode === 'none');
@@ -442,6 +444,6 @@ function LiveBackdropView({ mode, onReveal, onDone, phase = 'listening', energy 
 // Live re-renders on every caption and phase change; the backdrop only cares about its own props.
 export const LiveBackdrop = React.memo(LiveBackdropView);
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   fill: { width: '100%', height: '100%' },
-});
+}));

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { Animated, Easing, Platform, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import Svg, { Defs, LinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
 
 import { Icon, type IconName } from '../components/Icon';
@@ -7,6 +7,7 @@ import { useReducedMotion } from '../components/MotionPressable';
 import type { Space } from '../state/AppContext';
 import { switchOrigin } from './SpaceSwitch';
 import { SPACE_GRADIENTS } from './theme';
+import { themed } from '../theme';
 
 /**
  * Full-screen change between the two spaces. A gradient bloom grows from the switch while a burst of
@@ -20,7 +21,8 @@ type Particle = { icon: IconName; angle: number; distance: number; size: number;
 function makeParticles(space: Space, seed: number): Particle[] {
   let state = seed;
   const random = () => { state = (state * 1664525 + 1013904223) % 4294967296; return state / 4294967296; };
-  const icons: IconName[] = space === 'companion' ? ['heartFill', 'chat', 'sparkle', 'heartFill', 'smile', 'star'] : ['sparkle', 'sparkles', 'star', 'sparkle', 'bolt'];
+  const icons: IconName[] = space === 'companion' ? ['heartFill', 'chat', 'sparkle', 'heartFill', 'smile', 'star']
+    : space === 'remote' ? ['code', 'terminal', 'laptop', 'bolt', 'code', 'sparkle'] : ['sparkle', 'sparkles', 'star', 'sparkle', 'bolt'];
   return Array.from({ length: 16 }, (_, index) => ({
     icon: icons[index % icons.length],
     angle: (index / 16) * Math.PI * 2 + random() * 0.5,
@@ -52,6 +54,7 @@ function Burst({ particle, progress, x, y }: { particle: Particle; progress: Ani
 
 /** Centre glyph: a speech bubble whose dots type (chat), or a spark that spins (assistant). */
 function Greeting({ space, pop, fade }: { space: Space; pop: Animated.Value; fade: Animated.Value }) {
+  const styles = useStyles();
   const dots = useRef([0, 1, 2].map(() => new Animated.Value(0))).current;
   useEffect(() => {
     const loop = Animated.loop(Animated.stagger(120, dots.map((dot) => Animated.sequence([
@@ -65,10 +68,14 @@ function Greeting({ space, pop, fade }: { space: Space; pop: Animated.Value; fad
     opacity: fade,
     transform: [
       { scale: Animated.add(pop.interpolate({ inputRange: [0, 1], outputRange: [0.2, 1] }), fade.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0] })) },
-      { rotate: pop.interpolate({ inputRange: [0, 1], outputRange: [space === 'companion' ? '-12deg' : '-90deg', '0deg'] }) },
+      { rotate: pop.interpolate({ inputRange: [0, 1], outputRange: [space === 'companion' ? '-12deg' : space === 'remote' ? '8deg' : '-90deg', '0deg'] }) },
     ],
   };
   if (space === 'assistant') return <Animated.View style={[styles.glyph, style]}><Icon name="sparkle" size={64} color="#FFFFFF" /></Animated.View>;
+  if (space === 'remote') return <Animated.View style={[styles.terminal, style]}>
+    <Text style={styles.prompt}>{'>'}</Text>
+    <Animated.View style={[styles.cursor, { opacity: dots[1].interpolate({ inputRange: [0, 1], outputRange: [1, 0.15] }) }]} />
+  </Animated.View>;
   return <Animated.View style={[styles.bubble, style]}>
     {dots.map((dot, index) => <Animated.View key={index} style={[styles.dot, { transform: [{ translateY: dot.interpolate({ inputRange: [0, 1], outputRange: [0, -7] }) }] }]} />)}
     <View style={styles.tail} />
@@ -76,6 +83,7 @@ function Greeting({ space, pop, fade }: { space: Space; pop: Animated.Value; fad
 }
 
 export function SpaceTransition({ space, children }: { space: Space; children: (shown: Space) => React.ReactNode }) {
+  const styles = useStyles();
   const [shown, setShown] = useState(space);
   const [cover, setCover] = useState<Space | null>(null);
   const [runId, setRunId] = useState(0);
@@ -139,11 +147,14 @@ export function SpaceTransition({ space, children }: { space: Space; children: (
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   root: { flex: 1 },
   center: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center' },
   glyph: { width: 96, height: 96, alignItems: 'center', justifyContent: 'center' },
   bubble: { width: 104, height: 66, borderRadius: 33, backgroundColor: 'rgba(255,255,255,0.95)', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, shadowColor: '#2B2F7A', shadowOpacity: 0.25, shadowRadius: 20, shadowOffset: { width: 0, height: 8 }, elevation: 8 },
+  terminal: { width: 112, height: 72, borderRadius: 20, backgroundColor: 'rgba(14,21,40,0.92)', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, shadowColor: '#0B1430', shadowOpacity: 0.3, shadowRadius: 20, shadowOffset: { width: 0, height: 8 }, elevation: 8 },
+  prompt: { color: '#7CE0C8', fontSize: 30, fontWeight: '700', fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }) },
+  cursor: { width: 16, height: 30, borderRadius: 3, backgroundColor: '#7CE0C8' },
   dot: { width: 11, height: 11, borderRadius: 6, backgroundColor: '#7B6CF6' },
   tail: { position: 'absolute', left: 18, bottom: -6, width: 18, height: 18, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.95)', transform: [{ rotate: '45deg' }] },
-});
+}));

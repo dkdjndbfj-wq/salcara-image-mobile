@@ -3,7 +3,7 @@ import { ActivityIndicator, Animated, Easing, Image, Pressable, ScrollView, Styl
 import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
 
 import type { DocumentAttachment, ReferenceImage } from '../domain';
-import { brandGradient, colors, shadow } from '../theme';
+import { brandGradient, colors, shadow, themed } from '../theme';
 import { Icon } from './Icon';
 import { FileCard } from './MessageBubble';
 import { MotionPressable, useReducedMotion } from './MotionPressable';
@@ -17,7 +17,7 @@ export interface DictationControls {
   onCancel: () => void;
 }
 
-export function Composer({ value, onChangeText, images, documents, hasMask, busy, onSend, onStop, onOpenAttach, onRemoveImage, onRemoveDocument, onEditMask, inputRef, placeholder, dictation, onOpenLive, research = false, onClearResearch, tone = 'cool' }: {
+export function Composer({ editing, value, onChangeText, images, documents, hasMask, busy, onSend, onStop, onOpenAttach, onRemoveImage, onRemoveDocument, onEditMask, inputRef, placeholder, dictation, onOpenLive, research = false, onClearResearch, tone = 'cool' }: {
   value: string; onChangeText: (value: string) => void;
   dictation?: DictationControls; onOpenLive?: () => void;
   /** Deep research is on for the next message. */
@@ -28,7 +28,10 @@ export function Composer({ value, onChangeText, images, documents, hasMask, busy
   onSend: () => void; onStop: () => void; onOpenAttach: () => void;
   onRemoveImage: (id: string) => void; onRemoveDocument: (id: string) => void; onEditMask: () => void;
   inputRef?: React.RefObject<TextInput | null>; placeholder?: string;
+  /** Editing a sent message: a banner above the input, and a way back out. */
+  editing?: { onCancel: () => void } | null;
 }) {
+  const styles = useStyles();
   const [focused, setFocused] = useState(false);
   const ready = Boolean(value.trim() || images.length || documents.length);
   const active = ready || busy;
@@ -43,7 +46,12 @@ export function Composer({ value, onChangeText, images, documents, hasMask, busy
   const gradient = warmTone ? WARM_GRADIENT : undefined;
 
   return <View style={styles.wrap}>
-    <Animated.View style={[styles.card, warmTone && { backgroundColor: '#FFFFFF', shadowColor: '#2B2F7A' }, { borderColor: focusAnim.interpolate({ inputRange: [0, 1], outputRange: warmTone ? ['#DCE2F6', '#B9B6FA'] : [colors.border, colors.glow] }) }]}>
+    <Animated.View style={[styles.card, warmTone && { backgroundColor: colors.card, shadowColor: '#2B2F7A' }, { borderColor: focusAnim.interpolate({ inputRange: [0, 1], outputRange: warmTone ? ['#DCE2F6', '#B9B6FA'] : [colors.border, colors.glow] }) }]}>
+      {editing ? <View style={styles.editBar}>
+        <Icon name="edit" size={13} color={colors.primaryDeep} strokeWidth={1.9} />
+        <Text style={styles.editText} numberOfLines={2}>正在编辑 · 发送后替换这条和之后的回复</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="取消编辑" hitSlop={8} onPress={editing.onCancel}><Text style={styles.editCancel}>取消</Text></Pressable>
+      </View> : null}
       {hasTray && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tray} keyboardShouldPersistTaps="handled">
         {images.map((image, index) => <View key={image.id} style={styles.thumbWrap}>
           <Image source={{ uri: image.uri }} style={styles.thumb} />
@@ -64,7 +72,7 @@ export function Composer({ value, onChangeText, images, documents, hasMask, busy
       </View> : null}
       {dictating && dictation ? <DictationBar dictation={dictation} gradient={gradient} /> : null}
       <View style={[styles.row, dictating && { display: 'none' }]}>
-        <MotionPressable accessibilityRole="button" accessibilityLabel="添加图片或文件" scaleTo={0.88} hitSlop={5} onPress={onOpenAttach} style={[styles.plus, warmTone && { backgroundColor: '#E9E8FF' }]}>
+        <MotionPressable accessibilityRole="button" accessibilityLabel="添加图片或文件" scaleTo={0.88} hitSlop={5} onPress={onOpenAttach} style={[styles.plus, warmTone && { backgroundColor: colors.blueSurface }]}>
           <Icon name="plus" size={21} color={colors.text} strokeWidth={1.8} />
         </MotionPressable>
         <TextInput
@@ -77,7 +85,7 @@ export function Composer({ value, onChangeText, images, documents, hasMask, busy
           placeholder={placeholder ?? '想聊点什么，或画点什么？'}
           placeholderTextColor={colors.subtle}
           multiline
-          maxLength={8000}
+          maxLength={MAX_INPUT}
           textAlignVertical="center"
           style={styles.input}
         />
@@ -99,14 +107,19 @@ export function Composer({ value, onChangeText, images, documents, hasMask, busy
           </View>
         </MotionPressable>}
       </View>
+      {value.length >= MAX_INPUT ? <Text accessibilityRole="alert" style={styles.limit}>已到 {MAX_INPUT} 字上限，超出的部分没有输入。更长的内容可以作为文件发送。</Text> : null}
     </Animated.View>
   </View>;
 }
+
+/** One message's text limit; a longer paste is cut here, so the composer says so. */
+export const MAX_INPUT = 8000;
 
 const BARS = 26;
 
 /** Live waveform: bars follow the microphone level with a gentle travelling shimmer. */
 function LevelBars({ level, dim }: { level: Animated.Value; dim: boolean }) {
+  const styles = useStyles();
   const reduced = useReducedMotion();
   const wave = useRef(new Animated.Value(0)).current;
   const smooth = useRef(new Animated.Value(0)).current;
@@ -138,13 +151,15 @@ function LevelBars({ level, dim }: { level: Animated.Value; dim: boolean }) {
 }
 
 function Elapsed({ since }: { since: number }) {
+  const styles = useStyles();
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 500); return () => clearInterval(timer); }, []);
   const seconds = since ? Math.max(0, Math.floor((now - since) / 1000)) : 0;
   return <Text style={styles.elapsed}>{Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}</Text>;
 }
 
-function DictationBar({ dictation, gradient }: { dictation: DictationControls; gradient?: readonly string[] }) {
+export function DictationBar({ dictation, gradient }: { dictation: DictationControls; gradient?: readonly string[] }) {
+  const styles = useStyles();
   const busy = dictation.state === 'transcribing' || dictation.state === 'preparing';
   const label = dictation.state === 'preparing' ? '正在加载语音模型…' : dictation.state === 'transcribing' ? '正在转成文字…' : null;
   return <View style={styles.row}>
@@ -182,14 +197,18 @@ function SendGradient({ colors: stops = brandGradient }: { colors?: readonly str
   </Svg>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
+  editBar: { flexDirection: 'row', alignItems: 'center', gap: 7, marginHorizontal: 12, marginTop: 10, marginBottom: 2, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 12, backgroundColor: c.blueSurface },
+  editText: { flex: 1, fontSize: 12.5, lineHeight: 17, color: c.primaryDeep },
+  editCancel: { fontSize: 13, fontWeight: '600', color: c.textSecondary },
+  limit: { fontSize: 11.5, lineHeight: 16, color: c.warningText, paddingHorizontal: 16, paddingBottom: 8 },
   wrap: { paddingHorizontal: 12, paddingTop: 6, paddingBottom: 8 },
   card: { backgroundColor: colors.card, borderRadius: 28, borderWidth: 1, ...shadow.soft },
   tray: { paddingHorizontal: 12, paddingTop: 12, gap: 8, alignItems: 'center' },
   thumbWrap: { width: 64, height: 64, borderRadius: 16, overflow: 'hidden', backgroundColor: colors.surface },
   thumb: { width: 64, height: 64 },
   remove: { position: 'absolute', top: 5, right: 5, width: 20, height: 20, borderRadius: 10, backgroundColor: 'rgba(11,18,32,0.6)', alignItems: 'center', justifyContent: 'center' },
-  maskButton: { position: 'absolute', left: 5, bottom: 5, flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, height: 20, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.94)' },
+  maskButton: { position: 'absolute', left: 5, bottom: 5, flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, height: 20, borderRadius: 10, backgroundColor: c.card },
   maskActive: { backgroundColor: colors.primary },
   maskText: { fontSize: 10, fontWeight: '600', color: colors.text },
   row: { flexDirection: 'row', alignItems: 'flex-end', gap: 6, paddingHorizontal: 8, paddingVertical: 8 },
@@ -208,4 +227,4 @@ const styles = StyleSheet.create({
   bars: { flex: 1, height: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   bar: { width: 3, height: 30, borderRadius: 1.5, backgroundColor: colors.primary },
   elapsed: { color: colors.textMuted, fontSize: 13, fontVariant: ['tabular-nums'], minWidth: 34, textAlign: 'right' },
-});
+}));

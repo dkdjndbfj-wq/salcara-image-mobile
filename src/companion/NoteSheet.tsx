@@ -7,6 +7,7 @@ import { neighbours } from '../memorybox/search';
 import { deleteNote, updateNote } from '../memorybox/store';
 import { NOTE_TYPE_META, NOTE_TYPES, type MemLink, type MemNote, type NoteType } from '../memorybox/types';
 import { warm } from './theme';
+import { themed } from '../theme';
 
 function when(time: number | null | undefined) {
   if (!time) return '';
@@ -18,6 +19,7 @@ function when(time: number | null | undefined) {
 export function NoteSheet({ note, owner, notes, links, onClose, onSelect, onOpenConversation }: {
   note: MemNote | null; owner: string | null; notes: MemNote[]; links: MemLink[]; onClose: () => void; onSelect: (id: string) => void; onOpenConversation?: () => void;
 }) {
+  const styles = useStyles();
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -102,13 +104,14 @@ export function NoteSheet({ note, owner, notes, links, onClose, onSelect, onOpen
 }
 
 function Action({ icon, label, onPress, danger = false }: { icon: 'edit' | 'bookmark' | 'history' | 'chat' | 'trash'; label: string; onPress: () => void; danger?: boolean }) {
+  const styles = useStyles();
   return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({ pressed }) => [styles.action, pressed && { opacity: 0.7 }]}>
     <View style={[styles.actionIcon, danger && { backgroundColor: warm.accentSoft }]}><Icon name={icon} size={18} color={danger ? warm.accentDeep : warm.textSecondary} /></View>
     <Text style={[styles.actionLabel, danger && { color: warm.accentDeep }]}>{label}</Text>
   </Pressable>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 20, paddingBottom: 24, gap: 10 },
   head: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   type: { paddingHorizontal: 10, height: 24, borderRadius: 12, justifyContent: 'center' },
@@ -138,4 +141,4 @@ const styles = StyleSheet.create({
   button: { minWidth: 76, height: 40, borderRadius: 20, paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: warm.surfaceStrong },
   primary: { backgroundColor: warm.accent },
   buttonText: { color: warm.text, fontSize: 14.5, fontWeight: '600' },
-});
+}));

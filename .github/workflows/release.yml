@@ -8,9 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v5
@@ -23,13 +28,22 @@ jobs:
           java-version: 21
       - run: npm ci --legacy-peer-deps
       - run: node scripts/verify-release-version.mjs
+      - name: Resolve artifact version (manual builds do not publish)
+        id: version
+        run: echo "tag=v$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_OUTPUT"
       - run: npm run typecheck
       - run: npm test
-      - run: npx expo prebuild --platform android --no-install
+      - run: node --test scripts/update-manifest-core.test.mjs
+      - run: npx expo prebuild --platform android --clean --no-install
       - name: Restore release keystore
         env:
           SALCARA_KEYSTORE_BASE64: ${{ secrets.SALCARA_KEYSTORE_BASE64 }}
-        run: echo "$SALCARA_KEYSTORE_BASE64" | base64 --decode > android/app/salcara-release.jks
+        shell: bash
+        run: |
+          test -n "$SALCARA_KEYSTORE_BASE64"
+          umask 077
+          printf '%s' "$SALCARA_KEYSTORE_BASE64" | base64 --decode > android/app/salcara-release.jks
+          test -s android/app/salcara-release.jks
       - name: Configure release signing
         env:
           SALCARA_KEYSTORE_FILE: salcara-release.jks
@@ -44,7 +58,7 @@ jobs:
           SALCARA_KEYSTORE_PASSWORD: ${{ secrets.SALCARA_KEYSTORE_PASSWORD }}
           SALCARA_KEY_ALIAS: ${{ secrets.SALCARA_KEY_ALIAS }}
           SALCARA_KEY_PASSWORD: ${{ secrets.SALCARA_KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
       - name: Download previous signed APK
         env:
           GH_TOKEN: ${{ github.token }}
@@ -69,7 +83,7 @@ jobs:
       - name: Name APK and checksum
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME:-manual}"
+          VERSION="${{ steps.version.outputs.tag }}"
           cp android/app/build/outputs/apk/release/app-release.apk "salcara-image-android-${VERSION}.apk"
           sha256sum "salcara-image-android-${VERSION}.apk" > "salcara-image-android-${VERSION}.apk.sha256"
       - uses: actions/upload-artifact@v4
@@ -96,3 +110,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SALCARA_APK_MIRROR_BASE_URL: ${{ vars.SALCARA_APK_MIRROR_BASE_URL }}
         run: node scripts/publish-update-manifest.mjs
+      - name: Remove ephemeral signing identity
+        if: always()
+        run: rm -f android/app/salcara-release.jks

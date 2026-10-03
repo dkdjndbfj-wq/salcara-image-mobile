@@ -6,7 +6,7 @@ import { networkFailureMessage, networkHost } from '../api/network';
 import type { ChatApi } from '../domain';
 import { imageEndpoint } from '../domain-utils';
 import { getProviderKey } from '../storage/secure-keys';
-import { colors, radius, spacing } from '../theme';
+import { colors, radius, spacing, themed } from '../theme';
 import { PrimaryButton, Sheet } from './ui';
 
 type Probe = { label: string; host: string; reachable: boolean; message: string; elapsedMs: number };
@@ -17,6 +17,7 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
   /** Optional second capability host, used by automatic chat + image routing. */
   secondaryProviderId?: string; secondaryBaseUrl?: string; secondaryApi?: ChatApi;
 }) {
+  const styles = useStyles();
   const [results, setResults] = useState<Probe[]>([]);
   const [busy, setBusy] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
@@ -116,7 +117,7 @@ export function NetworkDiagnostics({ visible, onClose, providerId, baseUrl, imag
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { padding: spacing.lg, gap: spacing.md },
   intro: { color: colors.text, fontSize: 14, lineHeight: 22 },
   note: { backgroundColor: colors.blueSurface, borderRadius: radius.md, padding: spacing.md },
@@ -125,4 +126,4 @@ const styles = StyleSheet.create({
   label: { color: colors.text, fontSize: 14, fontWeight: '700' },
   detail: { color: colors.textMuted, fontSize: 13, lineHeight: 21 },
   time: { color: colors.textMuted, fontSize: 12 },
-});
+}));

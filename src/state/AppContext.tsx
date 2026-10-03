@@ -17,105 +17,43 @@ import { deleteServiceSecrets, migrateSpeechServices } from '../api/services';
 import { loadVoiceSettings, updateVoiceSettings } from '../voice/settings';
 import { buildCompanionContext, personaPrompt } from '../memorybox/context';
 import { normalizeCharacter, type CharacterDraft } from '../memorybox/characters';
-import { catchUpAll, configureMemoryPipeline, scheduleMemoryWork } from '../memorybox/pipeline';
+import { catchUpAll, configureMemoryPipeline, forgetTurnsFrom, scheduleMemoryWork } from '../memorybox/pipeline';
 import { retrieve } from '../memorybox/search';
 import { embeddingModelOf, embeddingProvider, embedTexts, loadMemoryBoxSettings } from '../memorybox/settings';
-import { deleteCharacterRecords, listAboutUserNotes, loadBox, loadCharacters, saveCharacter, touchNotes, updateCharacter } from '../memorybox/store';
+import { deleteCharacterRecords, listAboutUserNotes, loadBox, loadCharacters, reloadMemoryStore, saveCharacter, touchNotes, updateCharacter } from '../memorybox/store';
+import type { BackupProgress } from '../storage/backup';
 import { createCompanionToolbox } from '../memorybox/tools';
-import type { Character } from '../memorybox/types';
 import { tagErrorStage, withStagePrefix } from '../api/error-stage';
 import { editImage, generateImage, IMAGE_TASK_FAILED, normalizeError, type ImageTaskRef } from '../api/image-api';
 import { validateAttachments } from '../document-inputs';
-import type { AspectRatio, ChatMessage, Conversation, DocumentAttachment, ProviderProfile, Quality, ReferenceImage, ResolutionTier } from '../domain';
+import type { AspectRatio, ChatMessage, Conversation, ProviderProfile, Quality, ReferenceImage, ResolutionTier } from '../domain';
 import { createConversationTitle, createId, sizeFor } from '../domain-utils';
 import { createReferenceFromGenerated, previewDataUrl } from '../image-inputs';
 import {
-  deleteConversationRecord, deleteEmptyConversations, deleteProviderRecord, getActiveProviderId, getSetting, listReferencedFileNames,
+  deleteConversationRecord, deleteEmptyConversations, deleteMessageRecords, deleteMessagesFrom, deleteProviderRecord, getActiveProviderId, getSetting, listReferencedFileNames,
   initializeDatabase, insertConversation, insertMessage, listConversations, listMessages, listProviders, listRecentMessages,
   reassignConversations, setSetting, updateConversation, updateMessage, upsertProvider,
 } from '../storage/database';
 import { deleteLocalFile, downloadPng, RemoteImageDownloadError, sweepUnreferencedFiles } from '../storage/files';
 import { deleteProviderKey, getProviderKey } from '../storage/secure-keys';
+import { clearLiveText, setLiveText } from './live-text';
+import { describeImageDefaults, faithfulPrompt, deleteMessageFiles, pickChat, pickImage } from './app-helpers';
+import type { AppContextValue, ProviderPatch, RequestPhase, SendInput, Space } from './app-types';
+
+// The types and helpers live in their own modules; existing imports from here keep working.
+export type { AppContextValue, ProviderPatch, RequestPhase, SendInput, Space } from './app-types';
+export { describeImageDefaults, faithfulPrompt } from './app-helpers';
 
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const KEEP_AWAKE_TAG = 'salcara-generation';
 const CHAT_PROVIDER_KEY = 'chat_provider_id';
 const IMAGE_PROVIDER_KEY = 'image_provider_id';
 
-export type ProviderPatch = Partial<Pick<ProviderProfile, 'model' | 'quality' | 'aspectRatio' | 'resolutionTier' | 'chatModel' | 'chatApi' | 'name' | 'baseUrl'>>;
-export type RequestPhase = 'idle' | 'thinking' | 'writing' | 'drawing' | 'downloading';
-
-export interface SendInput {
-  text: string;
-  images?: ReferenceImage[];
-  documents?: DocumentAttachment[];
-  maskUri?: string | null;
-  /** Sent from voice conversation: the reply is spoken, so the model answers briefly without Markdown. */
-  voice?: boolean;
-  /** Deep research: plan, many searches and a cited report. */
-  research?: boolean;
-}
-
 interface TurnOptions { voice?: boolean; research?: boolean; agentId?: string | null; characterId?: string | null }
 
-/** The two halves of the app: the tool-using assistant, and chat with characters. */
-export type Space = 'assistant' | 'companion';
 const SPACE_KEY = 'space';
 /** Chat-space threads are endless: only the newest page is kept in memory. */
 const PAGE_SIZE = 60;
-
-interface AppContextValue {
-  ready: boolean;
-  providers: ProviderProfile[];
-  /** Provider + model used for conversation, vision, files and deciding when to draw. */
-  chatProvider: ProviderProfile | null;
-  /** Provider + model + defaults used when the assistant draws. */
-  imageProvider: ProviderProfile | null;
-  conversations: Conversation[];
-  /** null means an unsaved new chat. It only becomes a row after the first message. */
-  activeConversationId: string | null;
-  activeConversation: Conversation | null;
-  messages: ChatMessage[];
-  /** The open conversation has a reply in progress. */
-  busy: boolean;
-  /** Any conversation has a reply in progress (drawing can continue in the background). */
-  anyBusy: boolean;
-  /** Conversations with a reply in progress, for the drawer indicator. */
-  runningConversationIds: string[];
-  phase: RequestPhase;
-  /** Custom agent of the open conversation (or of the new-chat draft). */
-  activeAgentId: string | null;
-  space: Space;
-  switchSpace: (space: Space) => void;
-  /** Chat space: the open character (null = the character list). */
-  activeCharacterId: string | null;
-  openCharacter: (characterId: string) => Promise<void>;
-  closeCharacter: () => void;
-  createCharacter: (draft: CharacterDraft) => Promise<Character>;
-  editCharacter: (id: string, draft: CharacterDraft) => Promise<void>;
-  deleteCharacter: (id: string) => Promise<void>;
-  /** Long threads load older messages on demand. */
-  hasOlderMessages: boolean;
-  loadOlderMessages: () => Promise<void>;
-  reloadProviders: () => Promise<void>;
-  selectChatProvider: (providerId: string, model?: string) => Promise<void>;
-  selectImageProvider: (providerId: string, patch?: ProviderPatch) => Promise<void>;
-  updateProvider: (providerId: string, patch: ProviderPatch) => Promise<void>;
-  removeProvider: (providerId: string) => Promise<void>;
-  /** Starts a blank draft, optionally talking to a custom agent. */
-  newChat: (agentId?: string | null) => void;
-  openConversation: (conversationId: string) => Promise<void>;
-  deleteConversation: (conversationId: string) => Promise<void>;
-  renameConversation: (conversationId: string, title: string) => Promise<void>;
-  send: (input: SendInput) => Promise<void>;
-  stop: () => void;
-  retry: (message: ChatMessage) => Promise<void>;
-  /** Saves a finished spoken exchange (realtime voice model) into the open conversation. */
-  recordVoiceExchange: (userText: string, assistantText: string) => Promise<void>;
-  /** Runs a phone action the assistant prepared, after the user tapped its card. */
-  runAction: (message: ChatMessage, actionId: string) => Promise<void>;
-  dismissAction: (message: ChatMessage, actionId: string) => Promise<void>;
-}
 
 interface RunInfo { phase: RequestPhase; startedAt: number }
 interface RunHandle {
@@ -130,35 +68,6 @@ const AppContext = createContext<AppContextValue | null>(null);
 /** Ticks every second during a reply; kept separate so the whole app doesn't re-render each second. */
 const ElapsedContext = createContext(0);
 
-function pickChat(providers: ProviderProfile[], id: string | null): ProviderProfile | null {
-  return providers.find((item) => item.id === id && item.chatModel) ?? providers.find((item) => item.chatModel) ?? null;
-}
-function pickImage(providers: ProviderProfile[], id: string | null): ProviderProfile | null {
-  return providers.find((item) => item.id === id && item.model) ?? providers.find((item) => item.model) ?? null;
-}
-
-/**
- * “用我的原话”: the image model gets the user's own words, so a model that reasons by itself (GPT Image)
- * isn't steered by a rewritten prompt. The chat model's version is only used when the words lean on
- * earlier context (“按刚才的方案”“再来一张”“按附件”) or say nothing drawable (“好”“画吧”).
- */
-export function faithfulPrompt(userText: string, modelPrompt: string): string {
-  const own = userText.trim();
-  const drafted = modelPrompt.trim();
-  if (!own) return drafted;
-  const leansOnContext = /刚才|上面|前面|之前|上一张|上张|那张|这个方案|那个方案|方案|同样|一样的|照着|按照|根据|参考|这段|那段|文案|附件|文件|文档|再来|再画|重画|再生成|继续|按这个|就这样|上述/.test(own);
-  const saysNothing = own.replace(/[\s，。！？、,.!?~～]/g, '').length < 5 || /^(好|好的|可以|行|画吧|画一下|开始|生成吧|来吧|嗯|ok)$/i.test(own.replace(/[\s，。！？、,.!?~～]/g, ''));
-  if (!drafted || (!leansOnContext && !saysNothing)) return own;
-  if (saysNothing) return drafted;
-  // Context was needed: the user's words stay first and unchanged, the gathered context follows.
-  return drafted.includes(own) ? drafted : `${own}\n\n补充（来自前面的对话）：${drafted}`;
-}
-
-export function describeImageDefaults(provider: ProviderProfile | null): string {
-  if (!provider) return '';
-  return [`模型 ${provider.model}`, provider.aspectRatio && `比例 ${provider.aspectRatio === 'auto' ? '自动' : provider.aspectRatio}`, provider.resolutionTier && `清晰度 ${provider.resolutionTier}`, provider.quality && `画质 ${provider.quality}`].filter(Boolean).join('，');
-}
-
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [providers, setProviders] = useState<ProviderProfile[]>([]);
@@ -170,7 +79,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [space, setSpace] = useState<Space>('assistant');
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   /** Where each space was, so switching back returns to the same place. */
-  const spacePlaces = useRef<Record<Space, string | null>>({ assistant: null, companion: null });
+  const spacePlaces = useRef<Record<Space, string | null>>({ assistant: null, companion: null, remote: null });
   const spaceRef = useRef<Space>('assistant');
   spaceRef.current = space;
   const draftAgentRef = useRef<string | null>(null);
@@ -185,6 +94,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const liveRef = useRef(new Map<string, ChatMessage>());
   const messagesRef = useRef<ChatMessage[]>([]);
   messagesRef.current = messages;
+  const hasOlderRef = useRef(false);
+  hasOlderRef.current = hasOlderMessages;
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeConversationId;
 
@@ -207,6 +118,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setConversations(next);
     return next;
   }, []);
+
+  const restoreBackup = useCallback(async (onProgress?: (progress: BackupProgress) => void) => {
+    // Loaded on first use: the picker and zip code are only needed here.
+    const { pickAndRestoreBackup } = require('../storage/backup') as typeof import('../storage/backup');
+    const result = await pickAndRestoreBackup(onProgress);
+    if (!result) return null;
+    await refreshConversations();
+    await Promise.all([loadAgents(true), loadMemories(true), reloadMemoryStore()]).catch(() => undefined);
+    return result;
+  }, [refreshConversations]);
 
   const reloadProviders = useCallback(async () => {
     setProviders(await listProviders());
@@ -241,7 +162,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setChatProviderId(chat?.id ?? null);
       setImageProviderId(image?.id ?? null);
       const savedSpace = await getSetting(SPACE_KEY).catch(() => null);
-      if (savedSpace === 'companion') { setSpace('companion'); spaceRef.current = 'companion'; }
+      if (savedSpace === 'companion' || savedSpace === 'remote') { setSpace(savedSpace); spaceRef.current = savedSpace; }
       setReady(true);
       // Memory work interrupted by a closed app continues in the background.
       void catchUpAll().catch(() => undefined);
@@ -325,7 +246,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     messagesRef.current = [];
   }, []);
 
-  const openConversation = useCallback(async (conversationId: string, paged = false) => {
+  // Every conversation opens with its newest page; older messages load while scrolling up.
+  // Sending and regenerating still give the model the whole history (fullHistory below).
+  const openConversation = useCallback(async (conversationId: string, paged = true) => {
     // Load first, then switch: a message sent in between must see the full history.
     // A reply still running in that conversation shows its live (unsaved) text.
     const rows = paged ? await listRecentMessages(conversationId, PAGE_SIZE + 1) : await listMessages(conversationId);
@@ -336,6 +259,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setHasOlderMessages(older);
     setActiveConversationId(conversationId);
     activeIdRef.current = conversationId;
+  }, []);
+
+  const [jumpRequest, setJumpRequest] = useState<{ messageId: string; seq: number } | null>(null);
+  const openMessage = useCallback(async (conversationId: string, messageId: string) => {
+    const shown = activeIdRef.current === conversationId && messagesRef.current.some((item) => item.id === messageId);
+    if (!shown) {
+      // Loads from a few messages before the hit to the end; anything older loads while scrolling up as usual.
+      const rows = await listMessages(conversationId);
+      const index = rows.findIndex((item) => item.id === messageId);
+      if (index < 0) { await openConversation(conversationId); return; }
+      const start = Math.max(0, Math.min(index - 4, rows.length - PAGE_SIZE));
+      const loaded = rows.slice(start).map((item) => liveRef.current.get(item.id) ?? item);
+      setMessages(loaded);
+      messagesRef.current = loaded;
+      setHasOlderMessages(start > 0);
+      hasOlderRef.current = start > 0;
+      setActiveConversationId(conversationId);
+      activeIdRef.current = conversationId;
+    }
+    setJumpRequest((current) => ({ messageId, seq: (current?.seq ?? 0) + 1 }));
+  }, [openConversation]);
+
+  /** The open conversation's whole history when only its newest page is loaded (null: the page already is everything). */
+  const fullHistory = useCallback(async (conversationId: string, before?: number): Promise<ChatMessage[] | null> => {
+    if (!hasOlderRef.current || activeIdRef.current !== conversationId) return null;
+    const rows = (await listMessages(conversationId)).map((item) => liveRef.current.get(item.id) ?? item);
+    return before === undefined ? rows : rows.filter((item) => item.createdAt < before);
   }, []);
 
   const loadOlderMessages = useCallback(async () => {
@@ -369,7 +319,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     spaceRef.current = next;
     void setSetting(SPACE_KEY, next).catch(() => undefined);
     const target = spacePlaces.current[next];
-    if (next === 'assistant') { setActiveCharacterId(null); activeCharacterRef.current = null; void showConversation(target, false); }
+    // Remote coding keeps its own state in the remote store; the assistant thread stays where it was.
+    if (next === 'remote') return;
+    if (next === 'assistant') { setActiveCharacterId(null); activeCharacterRef.current = null; void showConversation(target, true); }
     else void (async () => {
       const character = target ? (await loadCharacters()).find((item) => item.conversationId === target) : null;
       setActiveCharacterId(character?.id ?? null);
@@ -458,6 +410,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
     const removed = await deleteConversationRecord(conversationId);
     void deleteConversationSummary(conversationId);
+    void setSetting(`draft.assistant.${conversationId}`, null).catch(() => undefined);
     removed.forEach((message) => liveRef.current.delete(message.id));
     for (const message of removed) {
       traceFileUris(message.agent).forEach((uri) => { deleteGeneratedFile(uri); deleteLocalFile(uri); });
@@ -511,6 +464,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // Kept for the session (not deleted on completion) so a conversation opened
     // while this write is in flight still sees the newest version.
     liveRef.current.set(message.id, message);
+    // The list now carries this text; the bubble stops reading the typewriter's copy.
+    clearLiveText(message.id);
     // Show first, then save: a slow write must never put an older version back on screen.
     if (message.conversationId === activeIdRef.current) {
       setMessages((current) => {
@@ -650,10 +605,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const code = target.charCodeAt(shown - 1);
           if (code >= 0xd800 && code <= 0xdbff && shown < target.length) shown += 1; // keep emoji whole
           working = { ...working, text: target.slice(0, shown) };
-          // Save progress now and then, so a killed app keeps what was already written.
-          const persist = Date.now() - lastPersist > 1500;
-          if (persist) lastPersist = Date.now();
-          void commit(working, persist);
+          // Each step only re-renders the bubble being written (live-text.ts). The message
+          // list and the saved copy follow now and then, so a killed app keeps what was written.
+          if (Date.now() - lastPersist > 1200) { lastPersist = Date.now(); void commit(working, true); }
+          else setLiveText(working.id, working.text ?? null);
         };
         const updateTrace = (update: (trace: AgentTrace) => AgentTrace) => {
           if (controller.signal.aborted) return;
@@ -923,6 +878,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (existing) await updateConversation({ ...existing, updatedAt: now });
       }
       await refreshConversations();
+      const turnHistory = isDraft ? history : (await fullHistory(conversationId)) ?? history;
       // A custom agent or a chat character may prefer its own chat provider and model.
       const agent = agentId ? (await loadAgents().catch(() => [])).find((item) => item.id === agentId) ?? null : null;
       const character = characterId ? (await loadCharacters().catch(() => [])).find((item) => item.id === characterId) ?? null : null;
@@ -961,12 +917,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (activeIdRef.current === conversationId) {
         setMessages((current) => { const next = [...current, userMessage, assistant]; messagesRef.current = next; return next; });
       }
-      await runTurn(run, assistant, userMessage, history, mode, { voice, research, agentId, characterId });
+      await runTurn(run, assistant, userMessage, turnHistory, mode, { voice, research, agentId, characterId });
       if (characterId) void scheduleMemoryWork(characterId).catch(() => undefined);
     } finally {
       endRun(conversationId, run);
     }
-  }, [chatProvider, imageProvider, providers, beginRun, endRun, prepareImageJob, refreshConversations, runTurn]);
+  }, [chatProvider, imageProvider, providers, beginRun, endRun, fullHistory, prepareImageJob, refreshConversations, runTurn]);
 
   const recordVoiceExchange = useCallback(async (userText: string, assistantText: string) => {
     const prompt = userText.trim();
@@ -1028,7 +984,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       let current: { chat: ProviderProfile | null; chatModel?: string | null } | null = null;
       if (!imageJob) {
         const agent = conversation?.agentId ? (await loadAgents().catch(() => [])).find((item) => item.id === conversation.agentId) ?? null : null;
-        const character = characterId ? (await loadCharacters().catch(() => [])).find((item) => item.id === characterId) ?? null : null;
         current = chatFor(agent);
       }
       const reset: ChatMessage = {
@@ -1041,7 +996,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       };
       await commit(reset);
       // A saved image job is repeated as-is: no second charge for the conversation step.
-      await runTurn(run, reset, userMessage, all.slice(0, index - 1), imageJob ? 'image-retry' : 'agent', { research, agentId: conversation?.agentId ?? null, characterId });
+      const earlier = (await fullHistory(conversationId, userMessage.createdAt)) ?? all.slice(0, index - 1);
+      await runTurn(run, reset, userMessage, earlier, imageJob ? 'image-retry' : 'agent', { research, agentId: conversation?.agentId ?? null, characterId });
       if (characterId) void scheduleMemoryWork(characterId).catch(() => undefined);
       // A regenerated result replaces the old one: delete files nothing refers to any more.
       const latest = liveRef.current.get(message.id) ?? messagesRef.current.find((item) => item.id === message.id);
@@ -1060,7 +1016,59 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     } finally {
       endRun(conversationId, run);
     }
-  }, [beginRun, chatFor, chatProvider, commit, endRun, runTurn]);
+  }, [beginRun, chatFor, chatProvider, commit, endRun, fullHistory, runTurn]);
+
+  /** Files that belonged to removed messages, except ones still in use (`keep`). */
+
+  /** Removed turns that a rolling summary or a character's memory already took in are forgotten there too. */
+  const forgetRemoved = useCallback(async (conversationId: string, since: number) => {
+    const summary = await loadConversationSummary(conversationId).catch(() => null);
+    if (summary && summary.until >= since) await deleteConversationSummary(conversationId).catch(() => undefined);
+    const conversation = (await listConversations()).find((item) => item.id === conversationId);
+    if (conversation?.kind === 'companion' && conversation.characterId) await forgetTurnsFrom(conversation.characterId, conversationId, since).catch(() => undefined);
+  }, []);
+
+  const editAndResend = useCallback(async (messageId: string, input: SendInput) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId) throw new Error('这条消息已不在当前对话里');
+    if (runsRef.current.has(conversationId)) throw new Error('请先等待或停止当前回复');
+    const target = messagesRef.current.find((item) => item.id === messageId);
+    if (!target || target.role !== 'user') throw new Error('只能编辑自己发出的消息');
+    if (!input.text.trim() && !input.images?.length && !input.documents?.length) throw new Error('请输入内容，或添加图片 / 文件');
+    if (!chatProvider && !imageProvider) throw new Error('还没有添加 API，请先在“设置 → API 管理”里添加');
+    // The edited message and every turn after it go; the new message then sees exactly the history before it.
+    const removed = await deleteMessagesFrom(conversationId, target.createdAt);
+    removed.forEach((item) => liveRef.current.delete(item.id));
+    if (activeIdRef.current === conversationId) {
+      const kept = messagesRef.current.filter((item) => item.createdAt < target.createdAt);
+      setMessages(kept); messagesRef.current = kept;
+    }
+    await forgetRemoved(conversationId, target.createdAt);
+    // Attachments carried over into the edited message stay; everything else of the removed turns is deleted.
+    const keep = new Set<string | null | undefined>([...(input.images ?? []).map((item) => item.uri), ...(input.documents ?? []).map((item) => item.uri), input.maskUri]);
+    try { await send(input); } finally { deleteMessageFiles(removed, keep); }
+  }, [chatProvider, imageProvider, forgetRemoved, send]);
+
+  const deleteMessage = useCallback(async (messageId: string) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId) return;
+    const all = messagesRef.current;
+    const index = all.findIndex((item) => item.id === messageId);
+    if (index < 0) return;
+    const target = all[index];
+    // A question goes together with its answer, so the model never sees an answer without its question.
+    const answer = target.role === 'user' && all[index + 1]?.role === 'assistant' ? all[index + 1] : null;
+    if (runsRef.current.has(conversationId) && (target.status === 'pending' || answer?.status === 'pending')) throw new Error('这条回复还在进行中，请先停止');
+    const removed = await deleteMessageRecords(conversationId, [target.id, ...(answer ? [answer.id] : [])]);
+    removed.forEach((item) => liveRef.current.delete(item.id));
+    const gone = new Set(removed.map((item) => item.id));
+    if (activeIdRef.current === conversationId) {
+      const kept = messagesRef.current.filter((item) => !gone.has(item.id));
+      setMessages(kept); messagesRef.current = kept;
+    }
+    await forgetRemoved(conversationId, target.createdAt);
+    deleteMessageFiles(removed);
+  }, [forgetRemoved]);
 
   /** Changes one phone action card on a finished message. */
   const updateAction = useCallback(async (message: ChatMessage, actionId: string, patch: Partial<PhoneAction>) => {
@@ -1106,11 +1114,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AppContextValue>(() => ({
     ready, providers, chatProvider, imageProvider, conversations, activeConversationId, activeConversation, messages,
     busy, anyBusy, runningConversationIds, phase, activeAgentId, reloadProviders, selectChatProvider, selectImageProvider, updateProvider, removeProvider,
-    newChat, openConversation, deleteConversation, renameConversation, send, stop, retry, recordVoiceExchange, runAction, dismissAction,
+    newChat, openConversation, openMessage, jumpRequest, restoreBackup, deleteConversation, renameConversation, send, stop, retry, editAndResend, deleteMessage, recordVoiceExchange, runAction, dismissAction,
     space, switchSpace, activeCharacterId, openCharacter, closeCharacter, createCharacter, editCharacter, deleteCharacter, hasOlderMessages, loadOlderMessages,
   }), [ready, providers, chatProvider, imageProvider, conversations, activeConversationId, activeConversation, messages,
     busy, anyBusy, runningConversationIds, phase, activeAgentId, reloadProviders, selectChatProvider, selectImageProvider, updateProvider, removeProvider,
-    newChat, openConversation, deleteConversation, renameConversation, send, stop, retry, recordVoiceExchange, runAction, dismissAction,
+    newChat, openConversation, openMessage, jumpRequest, restoreBackup, deleteConversation, renameConversation, send, stop, retry, editAndResend, deleteMessage, recordVoiceExchange, runAction, dismissAction,
     space, switchSpace, activeCharacterId, openCharacter, closeCharacter, createCharacter, editCharacter, deleteCharacter, hasOlderMessages, loadOlderMessages]);
 
   return <AppContext.Provider value={value}><ElapsedContext.Provider value={elapsedSeconds}>{children}</ElapsedContext.Provider></AppContext.Provider>;

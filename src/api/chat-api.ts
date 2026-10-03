@@ -419,8 +419,37 @@ function clip(content: string): string {
   return content.length > MAX_TOOL_RESULT_CHARACTERS ? `${content.slice(0, MAX_TOOL_RESULT_CHARACTERS)}\n…（内容过长，已截断）` : content;
 }
 
+/** Before the first streamed event a model may think silently for a long time. */
+const FIRST_DATA_MS = 5 * 60_000;
+/** Once events flow, this long without any is a dropped connection. */
+const STALL_MS = 90_000;
+
+/** HTTP statuses where nothing was generated (and nothing charged), so one quiet retry is safe. */
+function transient(error: unknown): boolean {
+  if (!(error instanceof ChatApiError) || (error as { stalled?: boolean }).stalled) return false;
+  return error.status === undefined || error.status === 502 || error.status === 503 || error.status === 504;
+}
+
 async function requestStep(
   request: ChatRequest, mode: ToolMode, context: ContextMessage[], turns: TranscriptTurn[], finalStep: boolean, show: (text: string) => void,
+): Promise<StepOutput> {
+  // A network failure or a 502/503/504 before the provider answered is retried once, quietly.
+  // Once the provider has started answering, nothing is resent (it may already be generating).
+  for (let attempt = 0; ; attempt += 1) {
+    const progress = { answered: false };
+    try {
+      return await requestStepOnce(request, mode, context, turns, finalStep, show, progress);
+    } catch (error) {
+      if (attempt > 0 || progress.answered || request.signal?.aborted || !transient(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      throwIfAborted(request.signal);
+    }
+  }
+}
+
+async function requestStepOnce(
+  request: ChatRequest, mode: ToolMode, context: ContextMessage[], turns: TranscriptTurn[], finalStep: boolean, show: (text: string) => void,
+  progress: { answered: boolean },
 ): Promise<StepOutput> {
   const body = buildStepBody(request, mode, context, turns, finalStep);
   const serialized = serializeChatBody(body);
@@ -430,6 +459,17 @@ async function requestStep(
   const onAbort = () => controller.abort();
   request.signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 10 * 60_000);
+  // Watchdog: a connection that silently stops delivering data is ended with a clear message
+  // instead of sitting on “正在思考” until the 10-minute limit.
+  let lastData = Date.now();
+  let streaming = false;
+  let stalled = false;
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastData > (streaming ? STALL_MS : FIRST_DATA_MS)) { stalled = true; controller.abort(); }
+  }, 5000);
+  const stallError = () => Object.assign(new ChatApiError(streaming
+    ? `连接中断：${Math.round(STALL_MS / 1000)} 秒没有收到服务商的数据，可能是网络断开。已写出的内容已保留，可以点“重新生成”重试`
+    : `服务商 ${Math.round(FIRST_DATA_MS / 60_000)} 分钟没有开始回答，可能是网络断开或服务繁忙，请稍后重试`), { stalled: true });
   const api = request.api ?? 'chat-completions';
   try {
     const endpoint = api === 'anthropic' ? 'messages' : api === 'responses' ? 'responses' : 'chat/completions';
@@ -441,8 +481,12 @@ async function requestStep(
       redirect: 'error', credentials: 'omit',
     });
     if (!response.ok) await parseResponse(response);
+    progress.answered = true;
+    lastData = Date.now();
     const accumulator = createAccumulator(api);
     const result = await readSse(response, (event) => {
+      lastData = Date.now();
+      streaming = true;
       if (event.data === '[DONE]') return;
       let payload: unknown;
       try { payload = JSON.parse(event.data); } catch { return; }
@@ -456,6 +500,7 @@ async function requestStep(
     throwIfAborted(request.signal);
     // A timeout cancels the stream, which can look like a normal end; never return that as an answer.
     if (timedOut) throw new ChatApiError('对话等待超过 10 分钟，已停止等待。请稍后手动重试');
+    if (stalled) throw stallError();
     if (result.kind === 'json') {
       let payload: unknown;
       try { payload = JSON.parse(result.text); } catch { throw new ChatApiError('服务商返回了无效的响应'); }
@@ -471,9 +516,11 @@ async function requestStep(
   } catch (error) {
     if (request.signal?.aborted) throw abortError();
     if (timedOut) throw new ChatApiError('对话等待超过 10 分钟，已停止等待。请稍后手动重试');
+    if (stalled) throw stallError();
     throw tagErrorStage(normalizeChatError(error, request.apiKey), 'chat');
   } finally {
     clearTimeout(timer);
+    clearInterval(watchdog);
     request.signal?.removeEventListener('abort', onAbort);
     // Stop the connection if parsing threw mid-stream, so generation isn't left running (and billing).
     controller.abort();

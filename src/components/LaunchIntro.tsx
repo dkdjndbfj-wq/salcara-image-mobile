@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, StyleSheet, useWindowDimensions } from 'react-native';
 import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg';
 
-import { colors } from '../theme';
+import { colors, themed } from '../theme';
 import { LogoArt, RIBBON_DIRECTION, RIBBON_ORDER } from './Logo';
 import { useReducedMotion } from './MotionPressable';
 
@@ -92,6 +92,7 @@ const inOut = Easing.inOut(Easing.cubic);
 const soft = Easing.inOut(Easing.quad);
 
 export function LaunchIntro({ ready, onDone, onFirstFrame }: { ready: boolean; onDone: () => void; onFirstFrame?: () => void }) {
+  const styles = useStyles();
   const clock = useRef(new Animated.Value(0)).current;
   const reduced = useReducedMotion();
   const { width, height } = useWindowDimensions();
@@ -184,9 +185,9 @@ export function LaunchIntro({ ready, onDone, onFirstFrame }: { ready: boolean; o
   </Animated.View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   root: { backgroundColor: colors.background, zIndex: 100, elevation: 100 },
   center: { position: 'absolute', left: '50%', top: '50%' },
   wordRow: { position: 'absolute', left: 0, right: 0, flexDirection: 'row', justifyContent: 'center' },
   letter: { color: colors.text, fontSize: 30, lineHeight: 38, fontWeight: '600', letterSpacing: -0.4 },
-});
+}));

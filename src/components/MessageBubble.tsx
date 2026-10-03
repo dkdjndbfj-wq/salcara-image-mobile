@@ -7,7 +7,7 @@ import type { GeneratedFile, PhoneAction } from '../agent/types';
 import type { ChatMessage } from '../domain';
 import { attachmentKind } from '../document-inputs';
 import type { RequestPhase } from '../state/AppContext';
-import { colors } from '../theme';
+import { colors, themed } from '../theme';
 import { ActionCards, AgentActivity, DraftStrip, FileCards, PlanCard, SourcesRow, SuggestionList } from './AgentTrace';
 import { LivingMark } from './Brand';
 import { Icon, type IconName } from './Icon';
@@ -15,6 +15,7 @@ import { MessageContent } from './MessageContent';
 import { Appear, MotionPressable, useReducedMotion } from './MotionPressable';
 import { showToast } from './ui';
 
+import { useLiveText } from '../state/live-text';
 type Props = {
   message: ChatMessage;
   phase: RequestPhase;
@@ -32,6 +33,8 @@ type Props = {
   onRunAction?: (message: ChatMessage, action: PhoneAction) => void;
   onDismissAction?: (message: ChatMessage, action: PhoneAction) => void;
   onOpenFile?: (file: GeneratedFile) => void;
+  /** Deletes this answer (the screen asks first). */
+  onDelete?: (message: ChatMessage) => void;
 };
 
 /** One-tap ways to keep going after an image, like the big assistants offer. */
@@ -47,6 +50,7 @@ export const MessageBubble = memo(function MessageBubble(props: Props) {
 });
 
 function UserMessage({ message, onPreview, onUserMessageAction }: Props) {
+  const styles = useStyles();
   const docs = message.documents ?? [];
   const single = message.references.length === 1;
   return <View style={styles.userWrap}>
@@ -66,6 +70,7 @@ function UserMessage({ message, onPreview, onUserMessageAction }: Props) {
 }
 
 export function FileCard({ name, mimeType, size, onRemove }: { name: string; mimeType: string; size: number; onRemove?: () => void }) {
+  const styles = useStyles();
   const kind = attachmentKind(name, mimeType);
   const tint = kind === 'pdf' ? '#F2555A' : kind === 'office' ? colors.primary : kind === 'text' ? '#12A150' : '#8A94A6';
   return <View style={styles.fileCard}>
@@ -78,12 +83,13 @@ export function FileCard({ name, mimeType, size, onRemove }: { name: string; mim
   </View>;
 }
 
-function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare, onFollowUp, onRunAction, onDismissAction, onOpenFile }: Props) {
+function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare, onFollowUp, onRunAction, onDismissAction, onOpenFile, onDelete }: Props) {
+  const styles = useStyles();
   const onRetry = () => retryMessage(message);
   const pending = message.status === 'pending';
   const imageJob = Boolean(message.preparedPrompt) && (message.mode === 'generate' || message.mode === 'edit');
   const drawing = imageJob && pending && !message.imageUri;
-  const text = message.text?.trim() ?? '';
+  const text = useLiveText(message.id, message.text)?.trim() ?? '';
   const streaming = pending && !drawing && Boolean(text);
   const failed = message.status === 'error' || message.status === 'interrupted';
   const stopped = message.status === 'cancelled';
@@ -108,7 +114,7 @@ function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRe
       <Pressable accessibilityRole="button" onPress={onRetry} hitSlop={8} style={styles.retry}><Text style={styles.retryText}>{message.remoteImageUrl ? '重新下载' : imageJob ? '重新绘制' : '重试'}</Text></Pressable>
     </View>}
     {stopped && <View style={styles.stoppedRow}><Text style={styles.stoppedText}>已停止</Text><Pressable accessibilityRole="button" onPress={onRetry} hitSlop={8}><Text style={styles.retryText}>重新生成</Text></Pressable></View>}
-    {!pending && !failed && !stopped && <Actions message={message} text={text} emphasized={isLast} onRetry={onRetry} onSave={onSave} onShare={onShare} />}
+    {!pending && !failed && !stopped && <Actions message={message} text={text} emphasized={isLast} onRetry={onRetry} onSave={onSave} onShare={onShare} onDelete={onDelete ? () => onDelete(message) : undefined} />}
     {isLast && !pending && !failed && !stopped && onFollowUp
       ? suggestions.length ? <SuggestionList items={suggestions} onPick={onFollowUp} /> : message.imageUri ? <FollowUps onPick={onFollowUp} /> : null
       : null}
@@ -116,6 +122,7 @@ function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRe
 }
 
 function FollowUps({ onPick }: { onPick: (text: string) => void }) {
+  const styles = useStyles();
   return <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.followUps} style={styles.followUpRow}>
     {IMAGE_FOLLOW_UPS.map((item, index) => <Appear key={item.label} delay={420 + index * 60} distance={6}>
       <MotionPressable accessibilityRole="button" accessibilityLabel={item.label} scaleTo={0.94} onPress={() => onPick(item.prompt)} style={styles.followUp}>
@@ -126,17 +133,20 @@ function FollowUps({ onPick }: { onPick: (text: string) => void }) {
   </ScrollView>;
 }
 
-function Actions({ message, text, emphasized, onRetry, onSave, onShare }: { message: ChatMessage; text: string; emphasized: boolean; onRetry: () => void; onSave: (uri: string) => void; onShare: (uri: string) => void }) {
+function Actions({ message, text, emphasized, onRetry, onSave, onShare, onDelete }: { message: ChatMessage; text: string; emphasized: boolean; onRetry: () => void; onSave: (uri: string) => void; onShare: (uri: string) => void; onDelete?: () => void }) {
+  const styles = useStyles();
   const copy = () => void Clipboard.setStringAsync(text || message.preparedPrompt || '').then(() => showToast(text ? '已复制' : '已复制作图描述'));
   return <View style={[styles.actions, !emphasized && { opacity: 0.6 }]}>
     {message.imageUri ? <ActionIcon icon="download" label="保存到相册" onPress={() => onSave(message.imageUri!)} /> : null}
     {message.imageUri ? <ActionIcon icon="share" label="分享" onPress={() => onShare(message.imageUri!)} /> : null}
     {(text || message.preparedPrompt) ? <ActionIcon icon="copy" label="复制" onPress={copy} /> : null}
     <ActionIcon icon="regenerate" label="重新生成" onPress={onRetry} />
+    {onDelete ? <ActionIcon icon="trash" label="删除这条回答" onPress={onDelete} /> : null}
   </View>;
 }
 
 function ActionIcon({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
+  const styles = useStyles();
   return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} hitSlop={6} style={({ pressed }) => [styles.actionIcon, pressed && { backgroundColor: colors.surfaceStrong }]}>
     <Icon name={icon} size={18} color={colors.textMuted} />
   </Pressable>;
@@ -144,6 +154,7 @@ function ActionIcon({ icon, label, onPress }: { icon: IconName; label: string; o
 
 /** Living brand mark plus a softly pulsing label. */
 export function Thinking({ label }: { label: string }) {
+  const styles = useStyles();
   const reduced = useReducedMotion();
   const pulse = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -163,6 +174,7 @@ export function Thinking({ label }: { label: string }) {
 
 /** Aurora placeholder: soft colour fields drifting while the image is drawn. */
 export function DrawingCanvas({ message, seconds, onStop, downloading }: { message: ChatMessage; seconds: number; onStop: () => void; downloading: boolean }) {
+  const styles = useStyles();
   const { width } = useWindowDimensions();
   const reduced = useReducedMotion();
   const drift = useRef(new Animated.Value(0)).current;
@@ -220,6 +232,7 @@ function SoftOrb({ color, size }: { color: string; size: number }) {
  * with one soft light sweep. Older images just fade in quickly.
  */
 export function ImageResult({ message, fresh, onPreview }: { message: ChatMessage; fresh: boolean; onPreview: (uri: string) => void }) {
+  const styles = useStyles();
   const { width } = useWindowDimensions();
   const reduced = useReducedMotion();
   const [ratio, setRatio] = useState(() => ratioFromSize(message.size));
@@ -293,7 +306,7 @@ export function docIcon(name: string, mimeType: string): IconName {
   return kind === 'archive' ? 'archive' : kind === 'text' ? 'code' : 'file';
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   userWrap: { alignItems: 'flex-end', gap: 8, paddingLeft: 52 },
   userBubble: { maxWidth: '100%', backgroundColor: colors.userBubble, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 22 },
   userText: { color: colors.text, fontSize: 16, lineHeight: 24 },
@@ -311,7 +324,7 @@ const styles = StyleSheet.create({
   assistantWrap: { gap: 12, alignItems: 'flex-start' },
   thinking: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 28 },
   thinkingText: { color: colors.textMuted, fontSize: 15 },
-  canvas: { borderRadius: 22, overflow: 'hidden', backgroundColor: '#F3F2FF' },
+  canvas: { borderRadius: 22, overflow: 'hidden', backgroundColor: c.blueSurface },
   canvasGlass: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(255,255,255,0.18)' },
   drawingCaption: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   drawingText: { color: colors.textSecondary, fontSize: 14.5, fontWeight: '500' },
@@ -331,4 +344,4 @@ const styles = StyleSheet.create({
   stoppedText: { color: colors.subtle, fontSize: 14 },
   actions: { flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: -7, marginTop: -2 },
   actionIcon: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-});
+}));

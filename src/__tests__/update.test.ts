@@ -1,7 +1,7 @@
 jest.mock('expo/fetch', () => ({ fetch: (...args: Parameters<typeof fetch>) => global.fetch(...args) }));
 
 import {
-  apkDownloadCandidates, autoUpdateCheckEnabled, compareVersions, fetchLatestRelease, formatBytes, IOS_UPDATE_URL, normalizeVersion, parseReleaseManifest, updateInstallMode,
+  apkDownloadCandidates, autoUpdateCheckEnabled, compareVersions, fetchLatestRelease, formatBytes, IOS_UPDATE_URL, normalizeVersion, parseReleaseManifest, productionUpdateCheckEnabled, REMOTE_TEST_APPLICATION_ID, updateInstallMode,
 } from '../update';
 
 const released = {
@@ -16,6 +16,13 @@ const released = {
 };
 
 describe('app updates', () => {
+  test('isolates the remote test APK from every production update entry point', () => {
+    expect(productionUpdateCheckEnabled(REMOTE_TEST_APPLICATION_ID)).toBe(false);
+    expect(productionUpdateCheckEnabled('top.salcara.image')).toBe(true);
+    expect(productionUpdateCheckEnabled(null)).toBe(true);
+    expect(productionUpdateCheckEnabled(undefined)).toBe(true);
+  });
+
   test('normalizes release tags', () => {
     expect(normalizeVersion('v1.2.3')).toBe('1.2.3');
     expect(normalizeVersion('1.2.3+12')).toBe('1.2.3');
@@ -57,6 +64,31 @@ describe('app updates', () => {
     expect(() => parseReleaseManifest({ expo: { version: '9.9.9' } })).toThrow('更新清单');
     expect(() => parseReleaseManifest({ ...released, publishedAt: null })).toThrow('更新清单');
     expect(() => parseReleaseManifest({ ...released, apk: { ...released.apk, size: 0 } })).toThrow('更新清单');
+  });
+
+  test('ignores other APKs and selects the exact production asset', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      if (!String(input).includes('api.github.com')) throw new Error('offline mirror');
+      return { ok: true, json: async () => ({
+        tag_name: released.tagName, published_at: released.publishedAt,
+        assets: [
+          { name: 'debug-test.apk', browser_download_url: 'https://example.com/test.apk' },
+          { name: released.apk.name, browser_download_url: released.apk.url, size: released.apk.size, digest: released.apk.digest },
+        ],
+      }) } as Response;
+    });
+    try { await expect(fetchLatestRelease()).resolves.toMatchObject({ apk: { name: released.apk.name } }); }
+    finally { fetchMock.mockRestore(); }
+  });
+
+  test('a cancelled check cannot return a late valid manifest', async () => {
+    const controller = new AbortController();
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      controller.abort();
+      return { ok: true, json: async () => released } as Response;
+    });
+    try { await expect(fetchLatestRelease(controller.signal)).rejects.toMatchObject({ name: 'AbortError' }); }
+    finally { fetchMock.mockRestore(); }
   });
 
   test.each([

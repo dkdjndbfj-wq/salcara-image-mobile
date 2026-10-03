@@ -3,7 +3,7 @@ import * as Clipboard from 'expo-clipboard';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { colors } from '../theme';
+import { colors, themed } from '../theme';
 import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { Group, ListRow, Sheet, showToast } from './ui';
@@ -11,6 +11,7 @@ import { Group, ListRow, Sheet, showToast } from './ui';
 const QQ_GROUP = '881490534';
 
 export function AboutSheet({ visible, onClose, onCheckUpdates }: { visible: boolean; onClose: () => void; onCheckUpdates: () => void }) {
+  const styles = useStyles();
   const version = Application.nativeApplicationVersion ?? '开发版';
   const build = Application.nativeBuildVersion;
   const copyQQ = () => void Clipboard.setStringAsync(QQ_GROUP).then(() => showToast('QQ 群号已复制，打开 QQ 搜索即可加入'));
@@ -35,7 +36,7 @@ export function AboutSheet({ visible, onClose, onCheckUpdates }: { visible: bool
   </Sheet>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 24 },
   hero: { alignItems: 'center', paddingTop: 28, paddingBottom: 30, gap: 6 },
   halo: { width: 96, height: 96, marginBottom: 14 },
@@ -45,4 +46,4 @@ const styles = StyleSheet.create({
   note: { color: colors.subtle, fontSize: 12.5, lineHeight: 19, marginTop: 14, marginHorizontal: 16 },
   privacy: { flexDirection: 'row', alignItems: 'center', gap: 6, justifyContent: 'center', marginTop: 30, paddingHorizontal: 16 },
   privacyText: { flex: 1, color: colors.subtle, fontSize: 12.5, lineHeight: 18 },
-});
+}));

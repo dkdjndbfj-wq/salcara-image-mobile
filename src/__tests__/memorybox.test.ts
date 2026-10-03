@@ -5,6 +5,11 @@ jest.mock('expo-sqlite', () => ({
     runAsync: async (sql: string, ...args: unknown[]) => mockNativeDb.prepare(sql).run(...args),
     getAllAsync: async (sql: string, ...args: unknown[]) => mockNativeDb.prepare(sql).all(...args),
     getFirstAsync: async (sql: string, ...args: unknown[]) => mockNativeDb.prepare(sql).get(...args) ?? null,
+    withTransactionAsync: async (task: () => Promise<void>) => {
+      mockNativeDb.exec('BEGIN');
+      try { await task(); mockNativeDb.exec('COMMIT'); }
+      catch (error) { mockNativeDb.exec('ROLLBACK'); throw error; }
+    },
   }),
 }));
 const mockReplies: Array<Record<string, unknown>> = [];

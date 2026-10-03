@@ -6,7 +6,7 @@ import Svg, { Defs, Mask, Path, Rect } from 'react-native-svg';
 
 import type { ReferenceImage } from '../domain';
 import { saveBase64Png } from '../storage/files';
-import { colors, radius, spacing } from '../theme';
+import { colors, radius, spacing, themed } from '../theme';
 import { AppDialog } from './ui';
 import { Icon, type IconName } from './Icon';
 
@@ -28,6 +28,7 @@ export function MaskEditor({
   onCancel: () => void;
   onConfirm: (maskUri: string | null) => void;
 }) {
+  const styles = useStyles();
   const window = useWindowDimensions();
   const [sourceSize, setSourceSize] = useState({ width: 1, height: 1 });
   const [strokes, setStrokes] = useState<Stroke[]>([]);
@@ -238,6 +239,7 @@ export function MaskEditor({
 }
 
 function Tool({ icon, label, active, disabled, onPress }: { icon: IconName; label: string; active?: boolean; disabled?: boolean; onPress: () => void }) {
+  const styles = useStyles();
   return (
     <Pressable disabled={disabled} onPress={onPress} style={[styles.tool, active && styles.activeTool, disabled && styles.disabled]}>
       <Icon name={icon} size={22} color={active ? colors.primary : colors.textSecondary} />
@@ -257,7 +259,7 @@ function validPoint(x: number, y: number, width: number, height: number): Point 
   return { x: Math.max(0, Math.min(width, x)), y: Math.max(0, Math.min(height, y)) };
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
   header: { minHeight: 68, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderColor: colors.border, paddingHorizontal: spacing.sm },
   headerButton: { minWidth: 64, height: 48, alignItems: 'center', justifyContent: 'center' },
@@ -280,4 +282,4 @@ const styles = StyleSheet.create({
   sliderLabel: { color: colors.text, fontWeight: '700', fontSize: 13 },
   slider: { flex: 1, height: 36 },
   brushPreview: { backgroundColor: colors.mask, borderWidth: 1, borderColor: colors.primary },
-});
+}));

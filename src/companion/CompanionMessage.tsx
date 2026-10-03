@@ -1,9 +1,11 @@
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Image, Pressable, StyleSheet, Text, View, type GestureResponderEvent } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
+import { Animated, Easing, Image, Pressable, StyleSheet, Text, View, type AccessibilityActionEvent, type AccessibilityActionInfo, type GestureResponderEvent } from 'react-native';
 
 import type { ChatMessage } from '../domain';
 import { AgentActivity } from '../components/AgentTrace';
 import { Icon } from '../components/Icon';
+import { showToast } from '../components/ui';
 import { DrawingCanvas, ImageResult } from '../components/MessageBubble';
 import { MessageContent } from '../components/MessageContent';
 import { useReducedMotion } from '../components/MotionPressable';
@@ -12,7 +14,9 @@ import type { Character } from '../memorybox/types';
 import { CharacterAvatar } from './CharacterAvatar';
 import { isPoke } from './reactions';
 import { warm } from './theme';
+import { themed } from '../theme';
 
+import { useLiveText } from '../state/live-text';
 type Props = {
   message: ChatMessage;
   character: Character;
@@ -57,6 +61,7 @@ export function useTaps(onDouble: () => void, onSingle?: () => void) {
 
 /** One message in a character's thread: starlight bubbles, avatar, reactions, “想起了 N 件事”. */
 export const CompanionMessage = memo(function CompanionMessage(props: Props) {
+  const styles = useStyles();
   const { message, timeLabel } = props;
   if (message.role === 'user' && isPoke(message.prompt)) return <PokeLine {...props} />;
   return <Entrance fresh={props.fresh} side={message.role === 'user' ? 'right' : 'left'}>
@@ -86,6 +91,7 @@ function Entrance({ fresh, side, children }: { fresh: boolean; side: 'left' | 'r
 }
 
 function PokeLine({ message, fresh, character }: Props) {
+  const styles = useStyles();
   const value = useRef(new Animated.Value(fresh ? 0 : 1)).current;
   useEffect(() => { if (fresh) Animated.spring(value, { toValue: 1, damping: 9, stiffness: 200, useNativeDriver: true }).start(); }, [fresh, value]);
   return <Animated.View style={[styles.poke, { opacity: value, transform: [{ scale: value.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }) }] }]}>
@@ -96,6 +102,7 @@ function PokeLine({ message, fresh, character }: Props) {
 
 /** The little emoji badge under a bubble; pops when it changes. */
 function ReactionBadge({ emoji, align, onPress }: { emoji: string; align: 'left' | 'right'; onPress: () => void }) {
+  const styles = useStyles();
   const pop = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     pop.setValue(0);
@@ -110,6 +117,7 @@ function ReactionBadge({ emoji, align, onPress }: { emoji: string; align: 'left'
 
 /** Hearts bursting out of a double-tapped bubble. */
 function HeartBurst({ onDone }: { onDone: () => void }) {
+  const styles = useStyles();
   const value = useRef(new Animated.Value(0)).current;
   // onDone is a new function on every render of the row; a ref keeps re-renders from restarting the burst.
   const done = useRef(onDone);
@@ -137,23 +145,43 @@ function HeartBurst({ onDone }: { onDone: () => void }) {
 }
 
 /** Double tap = ❤️ (again to remove), long press = reactions and actions. */
-function useBubbleGestures(props: Props) {
-  const { message, reaction, onReact, onLongPress } = props;
+function useBubbleGestures(props: Props, body: string) {
+  const { message, reaction, onReact, onLongPress, onRetry } = props;
   const [burst, setBurst] = useState(0);
-  const tap = useTaps(() => {
+  const like = () => {
     if (reaction === '❤️') { onReact(message, null); return; }
     onReact(message, '❤️');
     setBurst((value) => value + 1);
-  });
+  };
+  const tap = useTaps(like);
+  // Screen readers: a double tap is the reader's own "activate", so the gestures are offered as actions.
+  const actions: AccessibilityActionInfo[] = [
+    { name: 'like', label: reaction === '❤️' ? '取消点赞' : '点赞' },
+    { name: 'copy', label: '复制' },
+    ...(message.role === 'assistant' && message.status !== 'pending' ? [{ name: 'regenerate', label: '重新回复' }] : []),
+    { name: 'longpress', label: '更多操作' },
+  ];
+  const onAccessibilityAction = (event: AccessibilityActionEvent) => {
+    switch (event.nativeEvent.actionName) {
+      case 'like': like(); break;
+      case 'copy': void Clipboard.setStringAsync(body).then(() => showToast('已复制')); break;
+      case 'regenerate': onRetry(message); break;
+      case 'longpress': onLongPress(message, 320); break;
+    }
+  };
   return {
     burst, clearBurst: () => setBurst(0),
-    handlers: { onPress: tap, delayLongPress: 320, onLongPress: (event: GestureResponderEvent) => onLongPress(message, event.nativeEvent.pageY) },
+    handlers: {
+      onPress: tap, delayLongPress: 320, onLongPress: (event: GestureResponderEvent) => onLongPress(message, event.nativeEvent.pageY),
+      accessibilityRole: 'text' as const, accessibilityHint: '可以在操作菜单里点赞、复制或查看更多', accessibilityActions: actions, onAccessibilityAction,
+    },
   };
 }
 
 function UserRow(props: Props) {
+  const styles = useStyles();
   const { message, onPreview, reaction, onReact } = props;
-  const { burst, clearBurst, handlers } = useBubbleGestures(props);
+  const { burst, clearBurst, handlers } = useBubbleGestures(props, message.prompt);
   return <View style={styles.userWrap}>
     {message.references.length > 0 && <View style={styles.images}>
       {message.references.map((reference) => <Pressable key={reference.id} accessibilityLabel="查看图片" onPress={() => onPreview(reference.uri)} style={styles.imageFrame}>
@@ -200,12 +228,13 @@ function TalkingAvatar({ character, typing, onPoke }: { character: Character; ty
 }
 
 function CharacterRow(props: Props) {
+  const styles = useStyles();
   const { message, character, phase, elapsedSeconds, isLast, reaction, onStop, onRetry, onPreview, onReact, onPoke, onOpenTrail } = props;
-  const { burst, clearBurst, handlers } = useBubbleGestures(props);
   const pending = message.status === 'pending';
   const imageJob = Boolean(message.preparedPrompt) && (message.mode === 'generate' || message.mode === 'edit');
   const drawing = imageJob && pending && !message.imageUri;
-  const text = message.text?.trim() ?? '';
+  const text = useLiveText(message.id, message.text)?.trim() ?? '';
+  const { burst, clearBurst, handlers } = useBubbleGestures(props, text);
   const failed = message.status === 'error' || message.status === 'interrupted';
   const stopped = message.status === 'cancelled';
   const trace = message.agent;
@@ -243,6 +272,7 @@ function CharacterRow(props: Props) {
 
 /** “对方正在输入” dots, in the character's colour. */
 function TypingDots({ color }: { color: string }) {
+  const styles = useStyles();
   const reduced = useReducedMotion();
   const values = useRef([0, 1, 2].map(() => new Animated.Value(0.3))).current;
   useEffect(() => {
@@ -261,7 +291,7 @@ function TypingDots({ color }: { color: string }) {
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   time: { alignSelf: 'center', color: warm.faint, fontSize: 12, marginBottom: 10, marginTop: 4 },
   userWrap: { alignItems: 'flex-end', gap: 6, paddingLeft: 56 },
   images: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 },
@@ -298,4 +328,4 @@ const styles = StyleSheet.create({
   recallText: { color: warm.accentDeep, fontSize: 12, fontWeight: '500' },
   dots: { flexDirection: 'row', gap: 5, height: 22, alignItems: 'center', paddingHorizontal: 4 },
   dot: { width: 7, height: 7, borderRadius: 4 },
-});
+}));

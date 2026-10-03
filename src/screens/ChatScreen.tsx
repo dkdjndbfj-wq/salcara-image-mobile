@@ -1,8 +1,9 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, BackHandler, FlatList, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
+  ActivityIndicator, BackHandler, FlatList, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
 } from 'react-native';
+import { KeyboardSafeView } from '../components/KeyboardSafeView';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAgents } from '../agent/agents';
@@ -23,8 +24,6 @@ import { useDictation } from '../voice/useDictation';
 import { Icon } from '../components/Icon';
 import { Composer } from '../components/Composer';
 import { ConversationDrawer } from '../components/ConversationDrawer';
-import { RemoteScreen } from '../remote/RemoteScreen';
-import { useRemoteLink } from '../remote/useRemoteLink';
 import { ImagePreview } from '../components/ImagePreview';
 import { MaskEditor } from '../components/MaskEditor';
 import { MessageBubble } from '../components/MessageBubble';
@@ -36,13 +35,24 @@ import { Appear, AppDialog, IconButton, MotionPressable, PrimaryButton, Sheet, s
 import { UpdateManager } from '../components/UpdateManager';
 import { isImageAttachment, pickAnyFiles, validateAttachments } from '../document-inputs';
 import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
-import { pickFromFiles, pickFromGallery, prepareReferenceForMask, prepareReferenceFromAttachment, takePhoto } from '../image-inputs';
+import { pickFromGallery, prepareReferenceForMask, prepareReferenceFromAttachment, takePhoto } from '../image-inputs';
 import { useApp, useElapsedSeconds } from '../state/AppContext';
 import { getSetting, setSetting } from '../storage/database';
 import { useVoiceSettings } from '../voice/settings';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
-import { colors, prettyModel, radius, shadow } from '../theme';
+import { colors, prettyModel, radius, shadow, themed } from '../theme';
 
+type ComposerDraft = { prompt: string; images: ReferenceImage[]; documents: DocumentAttachment[]; maskUri: string | null; research: boolean };
+const draftSettingKey = (conversationId: string) => `draft.assistant.${conversationId}`;
+function ownedByEdit(message: ChatMessage | undefined, uri: string | null | undefined): boolean {
+  if (!message || !uri) return false;
+  return message.maskUri === uri || message.references.some((item) => item.uri === uri) || Boolean(message.documents?.some((item) => item.uri === uri));
+}
+/** Leaving an edit unsent: files added during it are deleted; the message's own files stay with it. */
+function dropEditFiles(message: ChatMessage, composer: ComposerDraft) {
+  [...composer.images.map((item) => item.uri), ...composer.documents.map((item) => item.uri), composer.maskUri]
+    .forEach((uri) => { if (!ownedByEdit(message, uri)) deleteLocalFile(uri); });
+}
 type Dialog = { title: string; message: string; actions?: DialogAction[]; icon?: IconName };
 
 /** Quick tools under the inspiration grid. */
@@ -57,6 +67,7 @@ const SUGGESTIONS: { icon: IconName; title: string; hint: string; prompt?: strin
 const ONBOARDING_KEY = 'onboarding_done';
 
 export function ChatScreen() {
+  const styles = useStyles();
   const app = useApp();
   const revealed = useLaunchRevealed();
   // First install only: decided once when the app is ready (upgrades with services already set up skip it).
@@ -77,6 +88,7 @@ export function ChatScreen() {
   /** After switching conversations, jump to the end instantly instead of animating through history. */
   const instantScrollRef = useRef(true);
   const lastFollowRef = useRef(0);
+  const loadingOlderRef = useRef(false);
   const elapsedSeconds = useElapsedSeconds();
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ReferenceImage[]>([]);
@@ -104,8 +116,10 @@ export function ChatScreen() {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [previewFile, setPreviewFile] = useState<GeneratedFile | null>(null);
   const [memoryBoxOpen, setMemoryBoxOpen] = useState(false);
-  const [remoteOpen, setRemoteOpen] = useState(false);
-  useRemoteLink(() => setRemoteOpen(true));
+  /** Editing a sent message: the composer holds a copy of it; `stash` is the unsent draft it replaced. */
+  const [editing, setEditing] = useState<{ message: ChatMessage; stash: ComposerDraft } | null>(null);
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   const agents = useAgents();
   const activeAgent = agents.find((agent) => agent.id === app.activeAgentId) ?? null;
 
@@ -130,13 +144,35 @@ export function ChatScreen() {
     setShowJump(false);
     void sendMessage({ text }).catch((error) => report('没有发送出去', error));
   }, [sendMessage, report]);
+  const { deleteMessage: removeMessage } = app;
+  const confirmDelete = useCallback((message: ChatMessage) => setDialog({
+    title: message.role === 'user' ? '删除这条消息？' : '删除这条回答？',
+    message: message.role === 'user' ? '这条消息和它的回答会一起删除，之后的对话不会再参考它们。' : '删除后，之后的对话不会再参考这条回答。',
+    icon: 'trash',
+    actions: [
+      { label: '取消', tone: 'secondary', onPress: () => setDialog(null) },
+      { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeMessage(message.id).then(() => showToast('已删除')).catch((error) => report('没有删除', error)); } },
+    ],
+  }), [removeMessage, report]);
+  const startEditing = useCallback((message: ChatMessage) => {
+    if (editingRef.current) return;
+    const stash = draftRef.current;
+    setEditing({ message, stash });
+    setPrompt(message.prompt);
+    setImages(message.references ?? []);
+    setDocuments(message.documents ?? []);
+    setMaskUri(message.maskUri ?? null);
+    setResearch(false);
+    setTimeout(() => inputRef.current?.focus(), 80);
+  }, []);
   const userMessageAction = useCallback((message: ChatMessage) => setDialog({
     title: '这条消息', message: message.prompt.length > 80 ? `${message.prompt.slice(0, 80)}…` : message.prompt, icon: 'chat',
     actions: [
       { label: '复制', tone: 'secondary', onPress: () => { setDialog(null); void Clipboard.setStringAsync(message.prompt).then(() => showToast('已复制')); } },
-      { label: '编辑后重新发送', tone: 'primary', onPress: () => { setDialog(null); setPrompt(message.prompt); setTimeout(() => inputRef.current?.focus(), 80); } },
+      { label: '删除', tone: 'secondary', onPress: () => { setDialog(null); confirmDelete(message); } },
+      { label: '编辑后重新发送', tone: 'primary', onPress: () => { setDialog(null); if (app.busy) { showToast('等这条回复完成后再编辑', 'hourglass'); return; } startEditing(message); } },
     ],
-  }), []);
+  }), [app.busy, confirmDelete, startEditing]);
   const { runAction: runPhoneAction, dismissAction: dismissPhoneAction, newChat: startChat } = app;
   const onRunAction = useCallback((message: ChatMessage, action: PhoneAction) => void runPhoneAction(message, action.id).catch((error) => report('操作没有完成', error, 'bolt')), [runPhoneAction, report]);
   const onDismissAction = useCallback((message: ChatMessage, action: PhoneAction) => void dismissPhoneAction(message, action.id), [dismissPhoneAction]);
@@ -159,29 +195,86 @@ export function ChatScreen() {
   const share = useCallback((uri: string) => void shareImage(uri).catch((error) => report('分享失败', error)), [report]);
 
 
-  // Each conversation keeps its own unsent draft (text + attachments), like a mail app.
-  const draftRef = useRef({ prompt, images, documents, maskUri, research });
+  // Each conversation keeps its own unsent draft, like a mail app. Text survives a restart (saved
+  // shortly after typing stops); attachments stay for this run only, since unsent files are swept on start.
+  const draftRef = useRef<ComposerDraft>({ prompt, images, documents, maskUri, research });
   draftRef.current = { prompt, images, documents, maskUri, research };
-  const drafts = useRef(new Map<string, typeof draftRef.current>());
+  const drafts = useRef(new Map<string, ComposerDraft>());
   const draftKey = useRef(app.activeConversationId ?? 'new');
+  const applyDraft = useCallback((draft: ComposerDraft | null | undefined) => {
+    setPrompt(draft?.prompt ?? '');
+    setImages(draft?.images ?? []);
+    setDocuments(draft?.documents ?? []);
+    setMaskUri(draft?.maskUri ?? null);
+    setResearch(draft?.research ?? false);
+  }, []);
+  /** The conversation whose saved draft has been read; nothing is saved over a draft before it is read. */
+  const loadedDraftKey = useRef<string | null>(null);
+  const loadSavedDraft = useCallback((key: string) => {
+    loadedDraftKey.current = null;
+    let alive = true;
+    void getSetting(draftSettingKey(key)).then((raw) => {
+      if (!alive || !raw || draftKey.current !== key || draftRef.current.prompt) return;
+      try {
+        const saved = JSON.parse(raw) as { prompt?: string; research?: boolean };
+        setPrompt(typeof saved.prompt === 'string' ? saved.prompt : '');
+        setResearch(Boolean(saved.research));
+      } catch { /* an old or broken draft is just skipped */ }
+    }).catch(() => undefined).finally(() => { if (alive && draftKey.current === key) loadedDraftKey.current = key; });
+    return () => { alive = false; };
+  }, []);
+  useEffect(() => loadSavedDraft(draftKey.current), [loadSavedDraft]);
+  useEffect(() => {
+    if (editing) return; // the edit is not a draft
+    const key = draftKey.current;
+    if (loadedDraftKey.current !== key) return;
+    const text = prompt.trim() ? prompt : '';
+    const timer = setTimeout(() => void setSetting(draftSettingKey(key), text || research ? JSON.stringify({ prompt: text, research }) : null).catch(() => undefined), 700);
+    return () => clearTimeout(timer);
+  }, [prompt, research, editing]);
   useEffect(() => {
     followRef.current = true;
     setShowJump(false);
     const next = app.activeConversationId ?? 'new';
     if (next === draftKey.current) return;
     instantScrollRef.current = true;
-    const current = draftRef.current;
+    // Leaving mid-edit drops the edit; the draft it replaced is what this conversation keeps.
+    const pendingEdit = editingRef.current;
+    if (pendingEdit) setEditing(null);
+    if (pendingEdit) dropEditFiles(pendingEdit.message, draftRef.current);
+    const current = pendingEdit ? pendingEdit.stash : draftRef.current;
     if (current.prompt.trim() || current.images.length || current.documents.length || current.maskUri || current.research) drafts.current.set(draftKey.current, current);
     else drafts.current.delete(draftKey.current);
     const restored = drafts.current.get(next);
     drafts.current.delete(next);
     draftKey.current = next;
-    setPrompt(restored?.prompt ?? '');
-    setImages(restored?.images ?? []);
-    setDocuments(restored?.documents ?? []);
-    setMaskUri(restored?.maskUri ?? null);
-    setResearch(restored?.research ?? false);
-  }, [app.activeConversationId]);
+    applyDraft(restored);
+    if (restored) { loadedDraftKey.current = next; return; }
+    return loadSavedDraft(next);
+  }, [app.activeConversationId, applyDraft, loadSavedDraft]);
+
+  // A search hit: scroll to the message and mark it for a moment.
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const jumpTries = useRef(0);
+  const jump = app.jumpRequest;
+  /** A request seen before this screen mounted (e.g. coming back from another space) is not replayed. */
+  const handledJump = useRef(jump?.seq ?? 0);
+  useEffect(() => {
+    if (!jump || jump.seq === handledJump.current) return;
+    handledJump.current = jump.seq;
+    followRef.current = false;
+    instantScrollRef.current = false;
+    setHighlightId(jump.messageId);
+    jumpTries.current = 0;
+    const scroll = setTimeout(() => {
+      const index = app.messages.findIndex((item) => item.id === jump.messageId);
+      if (index >= 0) listRef.current?.scrollToIndex({ index, viewPosition: 0.2, animated: false });
+    }, 120);
+    const fade = setTimeout(() => setHighlightId(null), 2600);
+    return () => { clearTimeout(scroll); clearTimeout(fade); };
+    // Only a new request scrolls; later message changes must not pull the list back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jump?.seq]);
 
   // Where the answering model changes mid-conversation, a small divider says who answers from here on.
   const modelSwitches = useMemo(() => {
@@ -226,16 +319,18 @@ export function ChatScreen() {
     } catch (error) { report('无法添加文件', error, 'file'); }
   };
 
+  /** Files of the message being edited still belong to it until the edit is sent. */
+  const dropFile = (uri: string | null | undefined) => { if (!ownedByEdit(editing?.message, uri)) deleteLocalFile(uri); };
   const removeImage = (id: string) => {
     const target = images.find((item) => item.id === id);
     if (!target) return;
-    if (images[0]?.id === id && maskUri) { deleteLocalFile(maskUri); setMaskUri(null); }
-    deleteLocalFile(target.uri);
+    if (images[0]?.id === id && maskUri) { dropFile(maskUri); setMaskUri(null); }
+    dropFile(target.uri);
     setImages((current) => current.filter((item) => item.id !== id));
   };
   const removeDocument = (id: string) => {
     const target = documents.find((item) => item.id === id);
-    deleteLocalFile(target?.uri);
+    dropFile(target?.uri);
     setDocuments((current) => current.filter((item) => item.id !== id));
   };
 
@@ -247,8 +342,8 @@ export function ChatScreen() {
       const prepared = await prepareReferenceForMask(primary);
       if (prepared.uri !== primary.uri) {
         setImages((current) => [prepared, ...current.slice(1)]);
-        deleteLocalFile(primary.uri);
-        if (maskUri) { deleteLocalFile(maskUri); setMaskUri(null); }
+        dropFile(primary.uri);
+        if (maskUri) { dropFile(maskUri); setMaskUri(null); }
       }
       setMaskOpen(true);
     } catch (error) { report('无法打开涂抹', error, 'brush'); }
@@ -262,12 +357,34 @@ export function ChatScreen() {
     const sent = { text, images, documents, maskUri, research: research && Boolean(app.chatProvider) };
     followRef.current = true;
     setShowJump(false);
+    const edit = editing;
+    if (edit) {
+      // The unsent draft the edit pushed aside comes back once the edit is on its way.
+      setEditing(null);
+      applyDraft(edit.stash);
+      draftRef.current = edit.stash;
+      void app.editAndResend(edit.message.id, sent).catch((error) => {
+        // The old turn is already gone if this failed while sending: the text is offered again as a new message.
+        if (!draftRef.current.prompt) applyDraft({ prompt: text, images: sent.images, documents: sent.documents, maskUri: sent.maskUri, research: sent.research });
+        report('没有发送出去', error);
+      });
+      return;
+    }
     setPrompt(''); setImages([]); setDocuments([]); setMaskUri(null); setResearch(false);
     draftRef.current = { prompt: '', images: [], documents: [], maskUri: null, research: false };
+    void setSetting(draftSettingKey(draftKey.current), null).catch(() => undefined);
     void app.send(sent).catch((error) => {
       setPrompt(text); setImages(sent.images); setDocuments(sent.documents); setMaskUri(sent.maskUri); setResearch(sent.research);
       report('没有发送出去', error);
     });
+  };
+
+  const cancelEditing = () => {
+    const edit = editing;
+    if (!edit) return;
+    dropEditFiles(edit.message, draftRef.current);
+    setEditing(null);
+    applyDraft(edit.stash);
   };
 
   const newChat = () => {
@@ -300,7 +417,7 @@ export function ChatScreen() {
   const secondary = app.chatProvider && app.imageProvider && app.imageProvider.id !== app.chatProvider.id ? app.imageProvider : undefined;
   const isDraft = !app.activeConversationId && app.messages.length === 0 && !app.activeAgentId;
   const connected = app.providers.length > 0;
-  const covered = drawer || settings || liveOpen || providersOpen || voiceOpen || modelsOpen || agentsOpen || personalOpen || toolsOpen || memoryBoxOpen || about || network || remoteOpen;
+  const covered = drawer || settings || liveOpen || providersOpen || voiceOpen || modelsOpen || agentsOpen || personalOpen || toolsOpen || memoryBoxOpen || about || network;
   const headerTitle = app.activeConversation?.title || activeAgent?.name || 'Salcara';
   const headerModel = activeAgent && headerTitle !== activeAgent.name ? [activeAgent.name, engine].filter(Boolean).join(' · ') : engine;
 
@@ -327,19 +444,20 @@ export function ChatScreen() {
   return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
     <View style={styles.header}>
       <IconButton icon="menu" label="打开侧边栏" onPress={() => setDrawer(true)} />
-      <SpaceSwitch space="assistant" onSwitch={app.switchSpace} />
-      <MotionPressable scaleTo={0.96} accessibilityRole="button" accessibilityLabel={`${headerTitle}${engine ? `，${engine}` : ''}，切换模型`} onPress={() => setModelsOpen(true)} wrapperStyle={styles.titleWrap} style={styles.titleButton}>
-        {activeAgent ? <AgentAvatar agent={activeAgent} size={24} /> : null}
-        <View style={styles.titleText}>
-          <Text style={styles.title} numberOfLines={1}>{headerTitle}</Text>
-          {headerModel ? <Text style={styles.engine} numberOfLines={1}>{headerModel}</Text> : null}
-        </View>
-        <Icon name="chevronDown" size={14} color={colors.subtle} strokeWidth={2} />
-      </MotionPressable>
+      <View style={{ flex: 1 }} />
       <IconButton icon="compose" label="新对话" disabled={isDraft} onPress={newChat} />
+      <View pointerEvents="box-none" style={styles.headerCenter}><SpaceSwitch space="assistant" onSwitch={app.switchSpace} /></View>
+    </View>
+    <View style={styles.modelRow}>
+      <MotionPressable scaleTo={0.96} accessibilityRole="button" accessibilityLabel={`${headerTitle}${engine ? `，${engine}` : ''}，切换模型`} onPress={() => setModelsOpen(true)} style={styles.titleButton}>
+        {activeAgent ? <AgentAvatar agent={activeAgent} size={18} /> : null}
+        <Text style={styles.title} numberOfLines={1}>{headerTitle}</Text>
+        {headerModel ? <Text style={styles.engine} numberOfLines={1}>{headerModel}</Text> : null}
+        <Icon name="chevronDown" size={12} color={colors.subtle} strokeWidth={2} />
+      </MotionPressable>
     </View>
 
-    <KeyboardAvoidingView style={styles.body} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.body}>
       {app.messages.length === 0
         ? activeAgent
           ? <AgentHome key={activeAgent.id} agent={activeAgent} onStarter={(text) => { setPrompt(text); setTimeout(() => inputRef.current?.focus(), 60); }} />
@@ -349,6 +467,19 @@ export function ChatScreen() {
             ref={listRef}
             data={app.messages}
             keyExtractor={(item) => item.id}
+            // Long conversations open with their newest page; older messages load while scrolling up,
+            // and the list keeps its place while they are inserted above.
+            onStartReached={() => {
+              if (!app.hasOlderMessages || loadingOlderRef.current) return;
+              loadingOlderRef.current = true;
+              void app.loadOlderMessages().catch(() => undefined).finally(() => { loadingOlderRef.current = false; });
+            }}
+            onStartReachedThreshold={1.5}
+            maintainVisibleContentPosition={app.hasOlderMessages ? { minIndexForVisible: 0 } : undefined}
+            ListHeaderComponent={app.hasOlderMessages ? <View style={styles.olderRow}><ActivityIndicator size="small" color={colors.subtle} /></View> : null}
+            initialNumToRender={12}
+            maxToRenderPerBatch={8}
+            windowSize={11}
             contentContainerStyle={styles.messages}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="interactive"
@@ -367,6 +498,11 @@ export function ChatScreen() {
               followRef.current = contentSize.height - layoutMeasurement.height - contentOffset.y < 40;
             }}
             scrollEventThrottle={64}
+            onScrollToIndexFailed={({ index, averageItemLength }) => {
+              listRef.current?.scrollToOffset({ offset: averageItemLength * index, animated: false });
+              jumpTries.current += 1;
+              if (jumpTries.current <= 3) setTimeout(() => { if (index < app.messages.length) listRef.current?.scrollToIndex({ index, viewPosition: 0.2, animated: false }); }, 200);
+            }}
             onContentSizeChange={() => {
               if (!followRef.current) return;
               if (instantScrollRef.current) {
@@ -383,7 +519,7 @@ export function ChatScreen() {
               <View style={styles.switchLine} />
               <Text style={styles.switchText} numberOfLines={1}>以下由 {modelSwitches.get(item.id)} 回答 · 前文已同步</Text>
               <View style={styles.switchLine} />
-            </View>}<MessageBubble
+            </View>}<View style={item.id === highlightId ? styles.highlight : undefined}><MessageBubble
               message={item}
               phase={item.id === lastId ? app.phase : 'idle'}
               elapsedSeconds={item.id === lastId && item.preparedPrompt ? elapsedSeconds : 0}
@@ -395,10 +531,11 @@ export function ChatScreen() {
               onShare={share}
               onFollowUp={followUp}
               onUserMessageAction={userMessageAction}
+              onDelete={confirmDelete}
               onRunAction={onRunAction}
               onDismissAction={onDismissAction}
               onOpenFile={setPreviewFile}
-            /></>}
+            /></View></>}
           />
           {showJump && <Appear style={styles.jumpWrap} distance={6}>
             <MotionPressable accessibilityRole="button" accessibilityLabel="回到底部" onPress={() => { followRef.current = true; setShowJump(false); listRef.current?.scrollToEnd({ animated: true }); }} style={styles.jump}>
@@ -408,6 +545,7 @@ export function ChatScreen() {
         </View>}
 
       <Composer
+        editing={editing ? { onCancel: cancelEditing } : null}
         inputRef={inputRef}
         value={prompt}
         onChangeText={setPrompt}
@@ -430,7 +568,7 @@ export function ChatScreen() {
         }}
         onOpenLive={openLive}
       />
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
 
     <Sheet visible={attachOpen} onClose={() => setAttachOpen(false)}>
       <View style={styles.attachRow}>
@@ -444,13 +582,12 @@ export function ChatScreen() {
       </View>
     </Sheet>
     <ConversationDrawer visible={drawer} onClose={() => setDrawer(false)} onNewChat={newChat} onOpenSettings={() => setSettings(true)}
-      onOpenAgents={() => setAgentsOpen(true)} onStartAgent={startAgent} onOpenRemote={() => setRemoteOpen(true)} />
+      onOpenAgents={() => setAgentsOpen(true)} onStartAgent={startAgent} />
     <AppSettingsSheet visible={settings} onClose={() => setSettings(false)}
       onOpenProviders={() => setProvidersOpen(true)} onOpenModels={(tab) => { setModelsTab(tab ?? 'chat'); setModelsOpen(true); }}
       onOpenNetwork={() => setNetwork(true)} onOpenAbout={() => setAbout(true)} onCheckUpdates={() => setUpdateToken((value) => value + 1)}
       onOpenVoice={() => setVoiceOpen(true)} onOpenPersonalization={() => setPersonalOpen(true)} onOpenTools={() => setToolsOpen(true)} onOpenAgents={() => setAgentsOpen(true)}
-      onOpenMemoryBox={() => setMemoryBoxOpen(true)} onOpenRemote={() => setRemoteOpen(true)} />
-    <RemoteScreen visible={remoteOpen} onClose={() => setRemoteOpen(false)} />
+      onOpenMemoryBox={() => setMemoryBoxOpen(true)} onOpenRemote={() => { setSettings(false); app.switchSpace('remote'); }} />
     <MemoryBoxSettingsSheet visible={memoryBoxOpen} onClose={() => setMemoryBoxOpen(false)} />
     <PersonalizationSheet visible={personalOpen} onClose={() => setPersonalOpen(false)} />
     <ToolsSheet visible={toolsOpen} onClose={() => setToolsOpen(false)} />
@@ -465,7 +602,7 @@ export function ChatScreen() {
       secondaryProviderId={secondary?.id} secondaryBaseUrl={secondary?.baseUrl}
       imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
     <MaskEditor visible={maskOpen} image={images[0] ?? null} onCancel={() => setMaskOpen(false)}
-      onConfirm={(uri) => { if (maskUri && maskUri !== uri) deleteLocalFile(maskUri); setMaskUri(uri); setMaskOpen(false); }} />
+      onConfirm={(uri) => { if (maskUri && maskUri !== uri && !ownedByEdit(editing?.message, maskUri)) deleteLocalFile(maskUri); setMaskUri(uri); setMaskOpen(false); }} />
     <ImagePreview uri={previewUri} onClose={() => setPreviewUri(null)} onSave={saveImage} onShare={share} />
     <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} icon={dialog?.icon} actions={dialog?.actions} onClose={() => setDialog(null)} />
     <AppDialog visible={preparingMask} title="正在准备图片" message="马上就好…" icon="brush" actions={[{ label: '处理中', disabled: true }]} dismissible={false} onClose={() => undefined}><ActivityIndicator color={colors.primary} /></AppDialog>
@@ -483,6 +620,7 @@ function Home({ canDraw, onSuggestion, covered = false }: {
   canDraw: boolean; covered?: boolean;
   onSuggestion: (item: typeof SUGGESTIONS[number]) => void;
 }) {
+  const styles = useStyles();
   const { width } = useWindowDimensions();
   const items = SUGGESTIONS.filter((item) => canDraw || !item.draw);
   return <View style={{ flex: 1 }}>
@@ -504,6 +642,7 @@ function Home({ canDraw, onSuggestion, covered = false }: {
 
 /** Home of a custom agent: who it is and a few ways to start. */
 function AgentHome({ agent, onStarter }: { agent: CustomAgent; onStarter: (text: string) => void }) {
+  const styles = useStyles();
   return <ScrollView contentContainerStyle={styles.agentHome} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
     <Appear distance={10}><AgentAvatar agent={agent} size={76} /></Appear>
     <Appear delay={80} distance={10}><Text style={styles.agentHomeName}>{agent.name}</Text></Appear>
@@ -519,6 +658,7 @@ function AgentHome({ agent, onStarter }: { agent: CustomAgent; onStarter: (text:
 }
 
 function ToolRow({ icon, title, detail, active = false, onPress }: { icon: IconName; title: string; detail: string; active?: boolean; onPress: () => void }) {
+  const styles = useStyles();
   return <MotionPressable scaleTo={0.98} accessibilityRole="button" accessibilityState={{ selected: active }} accessibilityLabel={title} onPress={onPress} style={[styles.toolRow, active && styles.toolRowActive]}>
     <View style={[styles.toolIcon, active && { backgroundColor: colors.primary }]}><Icon name={icon} size={19} color={active ? '#FFFFFF' : colors.textSecondary} /></View>
     <View style={{ flex: 1 }}>
@@ -530,6 +670,7 @@ function ToolRow({ icon, title, detail, active = false, onPress }: { icon: IconN
 }
 
 function Welcome({ onStart }: { onStart: () => void }) {
+  const styles = useStyles();
   return <ScrollView contentContainerStyle={styles.welcome} showsVerticalScrollIndicator={false}>
     <View style={styles.welcomeCenter}>
       <Appear distance={10}><View style={styles.welcomeHalo}><BrandMark size={104} /></View></Appear>
@@ -547,6 +688,7 @@ function Welcome({ onStart }: { onStart: () => void }) {
 }
 
 function Feature({ icon, text }: { icon: IconName; text: string }) {
+  const styles = useStyles();
   return <View style={styles.feature}>
     <View style={styles.featureIcon}><Icon name={icon} size={18} color={colors.primary} /></View>
     <Text style={styles.featureText}>{text}</Text>
@@ -554,35 +696,34 @@ function Feature({ icon, text }: { icon: IconName; text: string }) {
 }
 
 function AttachTile({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
+  const styles = useStyles();
   return <MotionPressable wrapperStyle={{ flex: 1 }} scaleTo={0.94} accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={styles.attachTile}>
     <Icon name={icon} size={26} color={colors.text} />
     <Text style={styles.attachLabel}>{label}</Text>
   </MotionPressable>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
+  highlight: { backgroundColor: c.blueSurface, borderRadius: 16 },
+  olderRow: { alignItems: 'center', paddingVertical: 12 },
   screen: { flex: 1, backgroundColor: colors.canvas },
   switchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 6, paddingHorizontal: 12 },
   switchLine: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
   switchText: { color: colors.subtle, fontSize: 11.5, letterSpacing: 0.2, maxWidth: '70%' },
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.canvas },
   header: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, gap: 4 },
-  titleWrap: { flex: 1, flexShrink: 1 },
-  titleButton: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', maxWidth: '100%', minHeight: 44, paddingHorizontal: 8, borderRadius: 20 },
-  titleText: { flexShrink: 1 },
-  title: { color: colors.text, fontSize: 15.5, lineHeight: 20, fontWeight: '600', letterSpacing: -0.3 },
-  engine: { color: colors.subtle, fontSize: 12, lineHeight: 16 },
+  headerCenter: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
+  modelRow: { alignItems: 'center', marginTop: -6, paddingBottom: 2 },
+  titleButton: { flexDirection: 'row', alignItems: 'center', gap: 5, maxWidth: 280, height: 30, paddingHorizontal: 12, borderRadius: 15 },
+  title: { color: colors.text, fontSize: 13, lineHeight: 18, fontWeight: '600', flexShrink: 1 },
+  engine: { color: colors.subtle, fontSize: 12, lineHeight: 16, flexShrink: 1 },
   body: { flex: 1 },
   messages: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 28, gap: 26, width: '100%', maxWidth: 780, alignSelf: 'center' },
   jumpWrap: { position: 'absolute', bottom: 12, alignSelf: 'center' },
   jump: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.soft },
   home: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 20, paddingTop: 24, paddingBottom: 20, gap: 10 },
-  homeSubtitle: { color: '#8A90A9', fontSize: 26, lineHeight: 35, fontWeight: '500', letterSpacing: -0.5 },
+  homeSubtitle: { color: c.textMuted, fontSize: 26, lineHeight: 35, fontWeight: '500', letterSpacing: -0.5 },
   suggestions: { paddingHorizontal: 12, gap: 8, paddingBottom: 4 },
-  agentStrip: { marginHorizontal: -20, flexGrow: 0, marginTop: 6 },
-  agentChips: { paddingHorizontal: 20, gap: 8 },
-  agentChip: { flexDirection: 'row', alignItems: 'center', gap: 8, height: 38, paddingLeft: 7, paddingRight: 14, borderRadius: 19, backgroundColor: colors.surface, maxWidth: 200 },
-  agentChipText: { color: colors.textSecondary, fontSize: 14, fontWeight: '500', flexShrink: 1 },
   agentHome: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 28, paddingVertical: 24, gap: 8 },
   agentHomeName: { color: colors.text, fontSize: 26, fontWeight: '700', letterSpacing: -0.5, marginTop: 10 },
   agentHomeDetail: { color: colors.textMuted, fontSize: 15, lineHeight: 22, textAlign: 'center' },
@@ -611,4 +752,4 @@ const styles = StyleSheet.create({
   featureIcon: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center' },
   featureText: { flex: 1, color: colors.textSecondary, fontSize: 15.5 },
   welcomeNote: { color: colors.subtle, fontSize: 12, textAlign: 'center', marginTop: 14 },
-});
+}));

@@ -5,7 +5,7 @@ import type { ChatMessage, ProviderProfile } from '../domain';
 import { listMessagesBetween } from '../storage/database';
 import { embeddingModelOf, embeddingProvider, embedTexts, loadMemoryBoxSettings, type MemoryBoxSettings } from './settings';
 import { retrieve } from './search';
-import { addLinks, loadBox, loadCharacters, newNote, patchNotes, putNotes, removeOrphans, updateCharacter, updateNote } from './store';
+import { addLinks, forgetNotesSince, loadBox, loadCharacters, newNote, patchNotes, putNotes, removeOrphans, updateCharacter, updateNote } from './store';
 import { NOTE_TYPES, type Character, type MemNote, type NoteType } from './types';
 import { completeJson, resolveWorker, type WorkerModel } from './worker';
 
@@ -389,6 +389,16 @@ async function reflect(character: Character, worker: WorkerModel, settings: Memo
 }
 
 /** Runs pending work for every character (called at startup). */
+/**
+ * A turn was regenerated or edited: drop the memories taken from it (and after it) and let
+ * memory read the conversation again from the last batch before it.
+ */
+export async function forgetTurnsFrom(characterId: string, conversationId: string, since: number): Promise<void> {
+  const resume = await forgetNotesSince(characterId, conversationId, since);
+  // Without an earlier extraction to resume from, re-read from the turn itself (not the whole history).
+  await scheduleMemoryWork(characterId, { rewindTo: resume > 0 ? Math.min(since - 1, resume) : since - 1 });
+}
+
 export async function catchUpAll(): Promise<void> {
   await removeOrphans().catch(() => undefined);
   const list = await loadCharacters().catch(() => []);

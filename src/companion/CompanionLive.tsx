@@ -11,6 +11,8 @@ import type { Character } from '../memorybox/types';
 import { useVoiceConversation } from '../voice/useVoiceConversation';
 import { CharacterAvatar } from './CharacterAvatar';
 import { warm } from './theme';
+import { currentScheme } from '../theme';
+import { themed } from '../theme';
 
 /**
  * Live with a chat character: a bright, airy call screen built around the character's own avatar.
@@ -80,7 +82,7 @@ export function CompanionLive({ visible, character, paused = false, onClose, onO
   }, [visible, enter, mounted, reduced]);
   if (!mounted) return null;
   return <Modal visible transparent animationType="none" statusBarTranslucent onRequestClose={onClose}>
-    <StatusBar style="dark" />
+    <StatusBar style={currentScheme() === 'dark' ? 'light' : 'dark'} />
     <Stage character={character} active={session && !paused} enter={enter} onClose={onClose} onOpenSettings={onOpenSettings} />
   </Modal>;
 }
@@ -88,6 +90,7 @@ export function CompanionLive({ visible, character, paused = false, onClose, onO
 function Stage({ character, active, enter, onClose, onOpenSettings }: {
   character: Character; active: boolean; enter: Animated.Value; onClose: () => void; onOpenSettings: () => void;
 }) {
+  const styles = useStyles();
   const live = useVoiceConversation(active);
   const { width, height } = useWindowDimensions();
   const reduced = useReducedMotion();
@@ -130,8 +133,8 @@ function Stage({ character, active, enter, onClose, onOpenSettings }: {
     <Svg width={width} height={height} style={StyleSheet.absoluteFill}>
       <Defs>
         <LinearGradient id="companionLiveBg" x1="0" y1="0" x2="0" y2="1">
-          <Stop offset="0" stopColor="#F8F9FF" />
-          <Stop offset="0.55" stopColor="#EEF0FF" />
+          <Stop offset="0" stopColor={warm.background} />
+          <Stop offset="0.55" stopColor={warm.surface} />
           <Stop offset="1" stopColor={color} stopOpacity={0.32} />
         </LinearGradient>
       </Defs>
@@ -229,19 +232,19 @@ function Stage({ character, active, enter, onClose, onOpenSettings }: {
   </Animated.View>;
 }
 
-const styles = StyleSheet.create({
-  stage: { ...StyleSheet.absoluteFill, backgroundColor: '#F5F7FF', overflow: 'hidden' },
+const useStyles = themed((c, d) => StyleSheet.create({
+  stage: { ...StyleSheet.absoluteFill, backgroundColor: c.blueSurface, overflow: 'hidden' },
   safe: { flex: 1 },
   top: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingTop: 6 },
-  topButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.7)' },
-  pill: { flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 8, height: 34, paddingHorizontal: 14, borderRadius: 17, backgroundColor: 'rgba(255,255,255,0.7)', marginHorizontal: 10 },
+  topButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: c.glass },
+  pill: { flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 8, height: 34, paddingHorizontal: 14, borderRadius: 17, backgroundColor: c.glass, marginHorizontal: 10 },
   liveDot: { width: 7, height: 7, borderRadius: 4 },
   pillText: { color: warm.textSecondary, fontSize: 13.5, fontWeight: '600', flexShrink: 1 },
-  notice: { alignSelf: 'center', marginTop: 12, maxWidth: '88%', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.85)' },
+  notice: { alignSelf: 'center', marginTop: 12, maxWidth: '88%', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 14, backgroundColor: c.glass },
   noticeText: { color: warm.textSecondary, fontSize: 12.5, textAlign: 'center' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   avatarStage: { alignItems: 'center', justifyContent: 'center' },
-  avatarShadow: { backgroundColor: '#FFFFFF', shadowOpacity: 0.35, shadowRadius: 24, shadowOffset: { width: 0, height: 10 }, elevation: 12 },
+  avatarShadow: { backgroundColor: c.card, shadowOpacity: 0.35, shadowRadius: 24, shadowOffset: { width: 0, height: 10 }, elevation: 12 },
   orbitDot: { position: 'absolute', borderRadius: 6 },
   name: { color: warm.text, fontSize: 24, fontWeight: '700', letterSpacing: -0.4, marginTop: -8 },
   statusRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
@@ -252,4 +255,4 @@ const styles = StyleSheet.create({
   assistantDone: { color: warm.textSecondary },
   hint: { color: warm.muted, fontSize: 15, lineHeight: 22, textAlign: 'center' },
   controls: { flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'flex-start', paddingBottom: 18, paddingHorizontal: 16 },
-});
+}));

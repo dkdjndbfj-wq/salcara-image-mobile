@@ -4,7 +4,7 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { clearMemories, editMemory, MAX_MEMORIES, removeMemory, useMemories } from '../agent/memory';
 import { updateAgentSettings, useAgentSettings } from '../agent/settings';
 import type { Memory } from '../agent/types';
-import { colors } from '../theme';
+import { colors, themed } from '../theme';
 import { Icon } from './Icon';
 import { DraftField, ToggleRow } from './SettingsParts';
 import { AppDialog, Chip, Group, SectionLabel, Sheet, showToast } from './ui';
@@ -13,6 +13,7 @@ const STYLE_PRESETS = ['简洁直接，先给结论', '详细深入，多举例�
 
 /** 个性化: what Salcara knows about the user and how it answers. */
 export function PersonalizationSheet({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  const styles = useStyles();
   const settings = useAgentSettings();
   const memories = useMemories();
   const [editing, setEditing] = useState<Memory | null>(null);
@@ -79,7 +80,7 @@ export function PersonalizationSheet({ visible, onClose }: { visible: boolean; o
   </Sheet>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 28 },
   group: { padding: 14, gap: 12 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
@@ -95,4 +96,4 @@ const styles = StyleSheet.create({
   clear: { alignSelf: 'center', paddingVertical: 12, paddingHorizontal: 16 },
   clearText: { color: colors.danger, fontSize: 14, fontWeight: '500' },
   editInput: { minHeight: 90, borderRadius: 14, backgroundColor: colors.surfaceStrong, padding: 12, color: colors.text, fontSize: 15, marginTop: 8 },
-});
+}));

@@ -6,6 +6,7 @@ import { Icon, type IconName } from '../components/Icon';
 import { MotionPressable, useReducedMotion } from '../components/MotionPressable';
 import { REACTIONS } from './reactions';
 import { warm } from './theme';
+import { themed } from '../theme';
 
 /** Small moments of delight for the chat space: ambient light, emoji rain, the long-press reaction menu. */
 
@@ -98,6 +99,7 @@ export type MenuAction = { icon: IconName; label: string; onPress: () => void; d
 export function MessageMenu({ visible, y, current, actions, onReact, onClose }: {
   visible: boolean; y: number; current: string | undefined; actions: MenuAction[]; onReact: (emoji: string | null) => void; onClose: () => void;
 }) {
+  const styles = useStyles();
   const { height } = useWindowDimensions();
   const progress = useRef(new Animated.Value(0)).current;
   const pops = useRef(REACTIONS.map(() => new Animated.Value(0))).current;
@@ -133,21 +135,21 @@ export function MessageMenu({ visible, y, current, actions, onReact, onClose }: 
   </Modal>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   scrim: { backgroundColor: 'rgba(27,33,80,0.18)' },
   menu: { position: 'absolute', left: 24, right: 24, gap: 10 },
   reactions: {
-    alignSelf: 'center', flexDirection: 'row', gap: 4, padding: 6, borderRadius: 30, backgroundColor: '#FFFFFF',
+    alignSelf: 'center', flexDirection: 'row', gap: 4, padding: 6, borderRadius: 30, backgroundColor: c.card,
     shadowColor: '#2B2F7A', shadowOpacity: 0.18, shadowRadius: 20, shadowOffset: { width: 0, height: 8 }, elevation: 10,
   },
   reaction: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
   reactionOn: { backgroundColor: warm.accentSoft },
   reactionText: { fontSize: 27 },
   actions: {
-    alignSelf: 'center', width: 240, borderRadius: 20, overflow: 'hidden', backgroundColor: '#FFFFFF',
+    alignSelf: 'center', width: 240, borderRadius: 20, overflow: 'hidden', backgroundColor: c.card,
     shadowColor: '#2B2F7A', shadowOpacity: 0.16, shadowRadius: 20, shadowOffset: { width: 0, height: 8 }, elevation: 10,
   },
   action: { height: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18 },
   actionDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: warm.border },
   actionText: { color: warm.text, fontSize: 15.5 },
-});
+}));

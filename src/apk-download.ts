@@ -13,6 +13,37 @@ function validateExpected(expected: VerifiedApkMetadata): void {
   }
 }
 
+/** Give each mirror an idle deadline; slow downloads with progress may continue. */
+export async function withApkDownloadDeadline<T>(
+  operation: (signal: AbortSignal, keepAlive: () => void) => Promise<T>,
+  parentSignal: AbortSignal,
+  timeoutMs = 90_000,
+): Promise<T> {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (parentSignal.aborted) throw abortError();
+  parentSignal.addEventListener('abort', cancel, { once: true });
+  let timeout = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  const keepAlive = () => {
+    if (controller.signal.aborted) return;
+    clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  };
+  try {
+    const result = await operation(controller.signal, keepAlive);
+    if (parentSignal.aborted) throw abortError();
+    if (controller.signal.aborted) throw new Error('下载服务器连接超时');
+    return result;
+  } catch (error) {
+    if (parentSignal.aborted) throw abortError();
+    if (controller.signal.reason === 'timeout') throw new Error('下载服务器连接超时');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    parentSignal.removeEventListener('abort', cancel);
+  }
+}
+
 /**
  * Verify an already downloaded file without buffering the APK in JavaScript.
  * This is deliberately separate from copyVerifiedApk: the native Expo

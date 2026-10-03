@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Platform, StyleSheet, Text, View } from 'react-native';
 
 import { getSearchKey, SEARCH_ENGINES, setSearchKey, updateAgentSettings, useAgentSettings, type SearchKeyName } from '../agent/settings';
-import { colors, radius } from '../theme';
+import { colors, radius, themed } from '../theme';
 import { Icon } from './Icon';
 import { DraftField, RadioRow, ToggleRow } from './SettingsParts';
 import { AppDialog, Group, SectionLabel, Sheet, showToast } from './ui';
@@ -21,6 +21,7 @@ function KeyField({ name, label, hint }: { name: SearchKeyName; label: string; h
 
 /** 联网与手机操作: on/off first; other search services and their keys only when asked for. */
 export function ToolsSheet({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  const styles = useStyles();
   const settings = useAgentSettings();
   const save = (patch: Parameters<typeof updateAgentSettings>[0]) => void updateAgentSettings(patch).catch(() => showToast('没有保存成功', 'alert'));
   const [clearing, setClearing] = useState(0);
@@ -71,11 +72,11 @@ export function ToolsSheet({ visible, onClose }: { visible: boolean; onClose: ()
   </Sheet>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 28 },
   group: { padding: 14, gap: 14, marginTop: 12 },
   more: { color: colors.primary, fontSize: 13.5, fontWeight: '600', marginTop: 12, marginLeft: 8, alignSelf: 'flex-start', paddingVertical: 4 },
   link: { color: colors.danger, fontSize: 13, fontWeight: '500', alignSelf: 'flex-start', paddingVertical: 8 },
   tip: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', marginTop: 10, marginHorizontal: 6, padding: 10, borderRadius: radius.md },
   tipText: { flex: 1, color: colors.subtle, fontSize: 12.5, lineHeight: 18 },
-});
+}));

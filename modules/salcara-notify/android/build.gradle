@@ -1,0 +1,27 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'top.salcara'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.salcaranotify"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+  sourceSets {
+    main {
+      // Kotlin sources live in a short path (android/kotlin) on purpose.
+      java.srcDirs += ['kotlin']
+    }
+  }
+}
+
+dependencies {
+  // Push for task news while the app is closed. Inactive (no Firebase app) unless the
+  // build includes google-services.json; see app.config.js.
+  implementation 'com.google.firebase:firebase-messaging:24.1.0'
+}

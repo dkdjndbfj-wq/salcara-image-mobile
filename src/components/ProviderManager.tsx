@@ -8,7 +8,7 @@ import { createId, normalizeBaseUrl } from '../domain-utils';
 import { useApp } from '../state/AppContext';
 import { upsertProvider } from '../storage/database';
 import { getProviderKey } from '../storage/secure-keys';
-import { colors, prettyModel, radius } from '../theme';
+import { colors, prettyModel, radius, themed } from '../theme';
 import { updateVoiceSettings, useVoiceSettings, voiceSettings } from '../voice/settings';
 import { VendorBadge } from './FunctionPicker';
 import { Icon } from './Icon';
@@ -28,6 +28,7 @@ const PROTOCOLS: { value: ChatApi; title: string }[] = [
 const KINDS: ServiceKind[] = ['chat', 'image', 'stt', 'tts', 'realtime'];
 
 export function ProviderManager({ visible, onClose, focusProviderId, kind }: { visible: boolean; onClose: () => void; focusProviderId?: string | null; kind?: ServiceKind | null }) {
+  const styles = useStyles();
   const { providers, chatProvider, imageProvider, reloadProviders, selectChatProvider, selectImageProvider, removeProvider } = useApp();
   const voice = useVoiceSettings();
   const [editing, setEditing] = useState(false);
@@ -275,13 +276,14 @@ function hostOf(url: string): string {
 }
 
 function Field({ label, first, ...props }: React.ComponentProps<typeof TextInput> & { label: string; first?: boolean }) {
+  const styles = useStyles();
   return <View style={styles.field}>
     <Text style={styles.fieldLabel} numberOfLines={1}>{label}</Text>
     <View style={[styles.fieldBody, !first && styles.divider]}><TextInput {...props} accessibilityLabel={label} style={styles.fieldInput} placeholderTextColor={colors.subtle} /></View>
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   page: { paddingHorizontal: 16, paddingBottom: 20 },
   lead: { color: colors.textMuted, fontSize: 14, lineHeight: 21, marginVertical: 12, marginHorizontal: 6 },
   serviceRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingLeft: 14 },
@@ -319,4 +321,4 @@ const styles = StyleSheet.create({
   checkingText: { color: colors.primaryDeep, fontSize: 13.5 },
   delete: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 10, paddingHorizontal: 8 },
   deleteText: { color: colors.danger, fontSize: 15, fontWeight: '500' },
-});
+}));

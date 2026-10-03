@@ -1,3 +1,6 @@
+import { useSyncExternalStore } from 'react';
+import { Appearance } from 'react-native';
+
 /**
  * Salcara design system — white-first surfaces with the logo's sky-blue →
  * violet → pink gradient as the accent. Old token names are kept as aliases.
@@ -26,7 +29,7 @@ export const palette = {
 export const brandGradient = ['#7CC6FF', '#3D7BFA', '#A68BF7', '#F4A6CE'] as const;
 export const brandStops = brandGradient.map((color, index) => ({ color, offset: index / (brandGradient.length - 1) }));
 
-export const colors = {
+const lightColors = {
   background: palette.white,
   canvas: palette.white,
   card: palette.white,
@@ -59,7 +62,148 @@ export const colors = {
   warningSurface: '#FFF7E8',
   success: '#12A150',
   mask: 'rgba(61, 123, 250, 0.42)',
-} as const;
+  /** Frosted surface over a picture or a glow (translucent white; a faint veil at night). */
+  glass: 'rgba(255, 255, 255, 0.8)',
+};
+export type Palette = { -readonly [K in keyof typeof lightColors]: string };
+
+/** The same roles at night: soft charcoal surfaces, the brand blue lifted for contrast. */
+const darkColors: Palette = {
+  background: '#0F1116',
+  canvas: '#0F1116',
+  card: '#171A21',
+  surface: '#1C2028',
+  surfaceStrong: '#242933',
+  blueSurface: '#1A2236',
+  tint: '#262C3A',
+  primary: '#6F98FF',
+  primaryStrong: '#6F98FF',
+  primaryDeep: '#9DB6FF',
+  primarySoft: '#1A2236',
+  glow: '#2A3557',
+  accent: '#B7A2FA',
+  pink: '#F4A6CE',
+  peach: '#FFD9BD',
+  text: '#E8EBF2',
+  textSecondary: '#C3C9D6',
+  textMuted: '#98A0B3',
+  subtle: '#8E96A8',
+  faint: '#5D6576',
+  ink: '#E8EBF2',
+  onPrimary: '#FFFFFF',
+  border: '#2A2F3A',
+  divider: '#232832',
+  userBubble: '#232A3B',
+  scrim: 'rgba(0, 0, 0, 0.55)',
+  danger: '#F06A70',
+  dangerSurface: '#3A1E22',
+  warningText: '#E8B15C',
+  warningSurface: '#33281A',
+  success: '#3DC48A',
+  mask: 'rgba(111, 152, 255, 0.42)',
+  glass: 'rgba(255, 255, 255, 0.08)',
+};
+
+/**
+ * 编程 space: the desktop app's look (Salcara Bridge) — quiet grey canvas, white
+ * cards with hairline borders, a near-black primary button and the blue only
+ * as a small accent. Values mirror remote/bridge/internal/console/web (shell.css, dark.css).
+ */
+const deskLight = {
+  bg: '#F3F5F9', surface: '#FFFFFF', surface2: '#F5F7FB', surface3: '#EDF0F6',
+  text: '#141A26', text2: '#3A4356', muted: '#6E7789', faint: '#A3ABBB',
+  line: '#E4E8EF', lineStrong: '#D9DEE7',
+  ink: '#141A26', onInk: '#FFFFFF',
+  accent: '#2F6BFF', accentSoft: 'rgba(47, 107, 255, 0.09)', accentText: '#1F56E0',
+  ok: '#12A06A', okSoft: 'rgba(18, 160, 106, 0.10)',
+  warn: '#B86E0A', warnSoft: 'rgba(232, 160, 50, 0.14)',
+  bad: '#E0444B', badSoft: 'rgba(224, 68, 75, 0.09)',
+  press: 'rgba(20, 30, 60, 0.05)', dot: 'rgba(20, 30, 60, 0.07)', glow: '#FFFFFF',
+  scrim: 'rgba(20, 26, 38, 0.32)', scrimLight: 'rgba(20, 26, 38, 0.12)',
+  shadow: '#1E2846', code: '#151922', codeText: '#D5DAE6', codeMuted: '#8A93A8',
+  userBubble: 'rgba(47, 107, 255, 0.08)',
+};
+export type Desk = { -readonly [K in keyof typeof deskLight]: string };
+const deskDark: Desk = {
+  bg: '#121419', surface: '#1A1D24', surface2: '#20242C', surface3: '#282D37',
+  text: '#E8EBF2', text2: '#B9C0CF', muted: '#8E96A8', faint: '#5D6576',
+  line: '#2A2F3A', lineStrong: '#343A46',
+  ink: '#E8EBF2', onInk: '#11141A',
+  accent: '#6F98FF', accentSoft: 'rgba(111, 152, 255, 0.14)', accentText: '#9DB6FF',
+  ok: '#3DC48A', okSoft: 'rgba(61, 196, 138, 0.14)',
+  warn: '#E8A23C', warnSoft: 'rgba(232, 162, 60, 0.16)',
+  bad: '#F06A70', badSoft: 'rgba(240, 106, 112, 0.14)',
+  press: 'rgba(255, 255, 255, 0.06)', dot: 'rgba(255, 255, 255, 0.06)', glow: 'rgba(255, 255, 255, 0.06)',
+  scrim: 'rgba(0, 0, 0, 0.55)', scrimLight: 'rgba(0, 0, 0, 0.3)',
+  shadow: '#000000', code: '#0D0F13', codeText: '#D5DAE6', codeMuted: '#7A8396',
+  userBubble: 'rgba(111, 152, 255, 0.16)',
+};
+
+/* ---------- light / dark ---------- */
+export type Scheme = 'light' | 'dark';
+export type AppearancePreference = 'system' | 'light' | 'dark';
+/**
+ * Dark mode is switched on only once every screen reads its colours through
+ * themed()/useColors(); until then the app stays light so nothing is half dark.
+ */
+export const DARK_MODE_READY = true;
+let preference: AppearancePreference = 'system';
+function systemScheme(): Scheme { try { return Appearance.getColorScheme() === 'dark' ? 'dark' : 'light'; } catch { return 'light'; } }
+function resolveScheme(): Scheme { return !DARK_MODE_READY ? 'light' : preference === 'system' ? systemScheme() : preference; }
+let scheme: Scheme = resolveScheme();
+const schemeListeners = new Set<() => void>();
+
+/** Live palette. Styles made with themed() follow the scheme; reading colors.* in render does too. */
+export const colors: Palette = { ...(scheme === 'dark' ? darkColors : lightColors) };
+export const desk: Desk = { ...(scheme === 'dark' ? deskDark : deskLight) };
+
+/** Other palettes (e.g. the chat space's `warm`) switch in place together with `colors`. */
+const palettes: Array<{ target: Record<string, unknown>; light: Record<string, unknown>; dark: Record<string, unknown> }> = [];
+export function registerPalette<T extends Record<string, unknown>>(target: T, light: T, dark: T): T {
+  palettes.push({ target, light, dark });
+  Object.assign(target, scheme === 'dark' ? dark : light);
+  return target;
+}
+
+function applyScheme() {
+  const next = resolveScheme();
+  if (next === scheme) return;
+  scheme = next;
+  Object.assign(colors, next === 'dark' ? darkColors : lightColors);
+  Object.assign(desk, next === 'dark' ? deskDark : deskLight);
+  for (const item of palettes) Object.assign(item.target, next === 'dark' ? item.dark : item.light);
+  // Styles are built per scheme on the next render, after every palette above has switched.
+  schemeListeners.forEach((listener) => listener());
+}
+try { Appearance.addChangeListener?.(() => applyScheme()); } catch { /* test hosts */ }
+
+export function setAppearancePreference(next: AppearancePreference) {
+  preference = next;
+  if (DARK_MODE_READY) {
+    // Native pieces (keyboard, system dialogs) follow the same choice.
+    try { Appearance.setColorScheme?.((next === 'system' ? 'unspecified' : next) as never); } catch { /* older hosts */ }
+  }
+  applyScheme();
+}
+export function currentScheme(): Scheme { return scheme; }
+function subscribeScheme(listener: () => void) { schemeListeners.add(listener); return () => { schemeListeners.delete(listener); }; }
+export function useScheme(): Scheme { return useSyncExternalStore(subscribeScheme, () => scheme, () => scheme); }
+export function useColors(): Palette { return useScheme() === 'dark' ? darkColors : lightColors; }
+export function useDesk(): Desk { return useScheme() === 'dark' ? deskDark : deskLight; }
+
+/**
+ * Styles that follow light / dark (any palette read inside the factory, `colors.x` included, is
+ * already switched when it runs): `const useStyles = themed((c, d) => StyleSheet.create({...}))`
+ * and `const styles = useStyles()` inside the component. Built once per scheme.
+ */
+export function themed<T>(factory: (c: Palette, d: Desk, s: Scheme) => T): (() => T) & { current: () => T } {
+  const cache: Partial<Record<Scheme, T>> = {};
+  const build = (s: Scheme) => (cache[s] ??= factory(s === 'dark' ? darkColors : lightColors, s === 'dark' ? deskDark : deskLight, s));
+  function useThemedStyles() { return build(useScheme()); }
+  /** For plain helpers called while a component renders (not a hook). */
+  useThemedStyles.current = () => build(scheme);
+  return useThemedStyles;
+}
 
 export const type = {
   display: { fontSize: 30, lineHeight: 38, fontWeight: '600' as const, letterSpacing: -0.8 },

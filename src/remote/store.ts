@@ -5,24 +5,36 @@ import type { ProviderProfile } from '../domain';
 import { getSetting, setSetting } from '../storage/database';
 import { getProviderKey } from '../storage/secure-keys';
 import {
-  command, confirmPair, devices as fetchDevices, hubUrlFor, HubError, me, openStream, ping,
-  type ApprovalMode, type Decision, type DeviceStatus, type Hub, type HubEvent, type Project, type SessionInfo, type StreamHandle, type ToolId, type ToolKind, type Usage,
+  command, confirmPair, confirmQrPair, devices as fetchDevices, discoverStation, hubUrlFor, HubError, me, ping, revokePair, sessionEventsPage,
+  type AgentId, type AgentProfile, type ApprovalMode, type Command, type Decision, type DeviceStatus, type Effort, type Hub, type HubEvent, type Project,
+  type RemoteApiOption, type SessionInfo, type ToolId, type ToolKind, type Usage,
+  type RemoteQuestion, type QuestionAnswers, type ModelCapability, type ModelCatalog,
 } from './client';
+import { clearRemoteCache, loadCachedSessions, loadCachedThread, resetRemoteCacheForTests, saveCachedSessions, saveCachedThread } from './cache';
 import { deletePairToken, getPairToken, savePairToken } from './pair-storage';
+import { connectionId, connectionToken, deliveryCredentialId, forgetConnection, loadConnections, saveConnection, selectConnection, selectedConnection, type RemoteConnection } from './connections';
+import { readPairQr, type PairQr } from './pairing';
+import { parseAgentStatus, type AgentStatus } from './projection';
+import { cancelPendingDelivery, deliverMessage, DeliveryPendingError, pendingDelivery, resetDeliveryForTests } from './delivery';
+import { attachmentChunks, type RemoteImage } from './attachment-chunks';
+import { randomUUID } from 'expo-crypto';
+import { CODEX_EFFORTS, isEffort } from './effort';
 
 // ——— timeline ———
 
 export type TimelineItem =
-  | { kind: 'message'; id: string; role: 'user' | 'assistant'; text: string; final: boolean; ts: number; local?: boolean }
-  | { kind: 'reasoning'; id: string; text: string; final: boolean; ts: number }
-  | { kind: 'tool'; id: string; tool: ToolKind; title: string; detail?: string; status: 'running' | 'done' | 'failed'; output?: string; diff?: string; exitCode?: number; ts: number }
-  | { kind: 'approval'; id: string; approval: ApprovalKind; title: string; detail?: string; diff?: string; cwd?: string; state: 'pending' | Decision; by?: 'phone' | 'desktop' | 'timeout'; ts: number }
+  | { kind: 'message'; id: string; role: 'user' | 'assistant'; text: string; final: boolean; ts: number; local?: boolean; images?: string[]; parentId?: string }
+  | { kind: 'reasoning'; id: string; text: string; final: boolean; ts: number; parentId?: string }
+  | { kind: 'tool'; id: string; tool: ToolKind; title: string; detail?: string; status: 'running' | 'done' | 'failed'; output?: string; diff?: string; exitCode?: number; ts: number; parentId?: string; childSessionKeys?: string[] }
+  | { kind: 'approval'; id: string; approval: ApprovalKind; title: string; detail?: string; diff?: string; cwd?: string; state: 'pending' | Decision; by?: 'phone' | 'desktop' | 'timeout'; ts: number; questions?: RemoteQuestion[]; questionMode?: string; expiresAt?: number; approvalTransport?: 'codex-hook-v1' }
   | { kind: 'turn'; id: string; status: 'started' | 'completed' | 'failed' | 'interrupted'; error?: string; usage?: Usage; ts: number }
-  | { kind: 'notice'; id: string; level: 'info' | 'warn' | 'error'; text: string; ts: number };
-export type ApprovalKind = 'command' | 'file_change' | 'tool' | 'permission';
+  | { kind: 'notice'; id: string; level: 'info' | 'warn' | 'error'; text: string; ts: number; parentId?: string };
+export type ApprovalKind = 'command' | 'file_change' | 'tool' | 'permission' | 'question';
 
-export interface Timeline { items: TimelineItem[]; session?: SessionInfo; loading: boolean; error?: string }
+export interface Timeline { items: TimelineItem[]; session?: SessionInfo; loading: boolean; /** Shown from the on-device cache, not yet confirmed by the computer. */ cachedAt?: number; error?: string; snapshotAt?: number; snapshotStartedAt?: number; nextCursor?: string; loadingEarlier?: boolean; earlierError?: string; historyLease?: string; historyExpanded?: boolean }
 export const EMPTY_TIMELINE: Timeline = { items: [], loading: false };
+const HISTORY_GAP_PREFIX = '[salcara:history-gap:v1]';
+const historyGap = (event: HubEvent) => event.type === 'notice' && event.text.startsWith(HISTORY_GAP_PREFIX);
 
 function upsert(items: TimelineItem[], item: TimelineItem): TimelineItem[] {
   const index = items.findIndex((existing) => existing.kind === item.kind && existing.id === item.id);
@@ -42,16 +54,18 @@ export function applyEvent(timeline: Timeline, event: HubEvent): Timeline {
       let items = timeline.items;
       // The echo of a follow-up we sent replaces its optimistic bubble.
       if (event.role === 'user') items = items.filter((item) => !(item.kind === 'message' && item.local && item.text.trim() === event.text.trim()));
-      return { ...timeline, items: upsert(items, { kind: 'message', id: event.id, role: event.role, text: event.text, final: event.final, ts }) };
+      return { ...timeline, items: upsert(items, { kind: 'message', id: event.id, role: event.role, text: event.text, final: event.final, ts, parentId: event.parentId }) };
     }
-    case 'reasoning':
-      return { ...timeline, items: upsert(timeline.items, { kind: 'reasoning', id: event.id, text: event.text, final: event.final, ts }) };
-    case 'tool':
-      return { ...timeline, items: upsert(timeline.items, { kind: 'tool', id: event.id, tool: event.kind, title: event.title, detail: event.detail, status: event.status, output: event.output, diff: event.diff, exitCode: event.exitCode, ts }) };
+    case 'reasoning': {
+      return { ...timeline, items: upsert(timeline.items, { kind: 'reasoning', id: event.id, text: event.text, final: event.final, ts, parentId: event.parentId }) };
+    }
+    case 'tool': {
+      return { ...timeline, items: upsert(timeline.items, { kind: 'tool', id: event.id, tool: event.kind, title: event.title, detail: event.detail, status: event.status, output: event.output, diff: event.diff, exitCode: event.exitCode, ts, parentId: event.parentId, childSessionKeys: event.childSessionKeys }) };
+    }
     case 'approval.request': {
       const existing = timeline.items.find((item) => item.kind === 'approval' && item.id === event.approvalId);
       if (existing?.kind === 'approval' && existing.state !== 'pending') return timeline;
-      return { ...timeline, items: upsert(timeline.items, { kind: 'approval', id: event.approvalId, approval: event.kind, title: event.title, detail: event.detail, diff: event.diff, cwd: event.cwd, state: 'pending', ts }) };
+      return { ...timeline, items: upsert(timeline.items, { kind: 'approval', id: event.approvalId, approval: event.kind, title: event.title, detail: event.detail, diff: event.diff, cwd: event.cwd, state: event.expiresAt && event.expiresAt <= Date.now() ? 'deny' : 'pending', by: event.expiresAt && event.expiresAt <= Date.now() ? 'timeout' : undefined, ts, questions: event.questions, questionMode: event.questionMode, expiresAt: event.expiresAt, ...(event.approvalTransport === 'codex-hook-v1' ? { approvalTransport: event.approvalTransport } : {}) }) };
     }
     case 'approval.resolved': {
       const existing = timeline.items.find((item) => item.kind === 'approval' && item.id === event.approvalId);
@@ -67,30 +81,53 @@ export function applyEvent(timeline: Timeline, event: HubEvent): Timeline {
       return { ...timeline, items: [...timeline.items, { kind: 'turn', id, status: event.status, error: event.error, usage: event.usage, ts }] };
     }
     case 'notice': {
-      const id = `notice:${ts}:${event.text}`;
+      const text = historyGap(event) ? '离线期间的临时进度缓存不完整，恢复时读取最近的会话记录；完整历史仍在原电脑。' : event.text;
+      const id = `notice:${ts}:${text}`;
       if (timeline.items.some((item) => item.id === id)) return timeline;
-      return { ...timeline, items: [...timeline.items, { kind: 'notice', id, level: event.level, text: event.text, ts }] };
+      return { ...timeline, items: [...timeline.items, { kind: 'notice', id, level: event.level, text, ts, parentId: event.parentId }] };
     }
     default:
       return timeline;
   }
 }
 
-/** Rebuilds from session.open history, keeping live items newer than the history. */
-export function mergeHistory(current: Timeline, session: SessionInfo | undefined, history: HubEvent[]): Timeline {
+/** Only progress from a pre-snapshot recovery page must avoid downgrading that snapshot. */
+export function applyRecoveredEvent(timeline: Timeline, event: HubEvent): Timeline {
+  if (event.type === 'message' || event.type === 'reasoning') {
+    const existing = timeline.items.find((item) => item.kind === event.type && item.id === event.id);
+    if ((existing?.kind === 'message' || existing?.kind === 'reasoning') && existing.final && !event.final) return timeline;
+  } else if (event.type === 'tool') {
+    const existing = timeline.items.find((item) => item.kind === 'tool' && item.id === event.id);
+    if (existing?.kind === 'tool' && existing.status !== 'running' && event.status === 'running') return timeline;
+  }
+  return applyEvent(timeline, event);
+}
+
+/** A bounded computer snapshot is not proof that older, already displayed history was deleted. */
+export function mergeHistory(current: Timeline, session: SessionInfo | undefined, history: HubEvent[], concurrentApprovals = new Set<string>()): Timeline {
   let next: Timeline = { items: [], session: session ?? current.session, loading: false };
   for (const event of history) next = applyEvent(next, event);
-  const newest = next.items.reduce((max, item) => Math.max(max, item.ts), 0);
+  const knownItems = new Set(next.items.map(item => `${item.kind}:${item.id}`));
+  const confirmed = new Set(next.items.filter((item) => item.kind === 'message' && item.role === 'user' && !item.local).map((item) => (item as { text: string }).text.trim()));
   for (const item of current.items) {
-    const known = next.items.some((existing) => existing.kind === item.kind && existing.id === item.id);
+    const known = knownItems.has(`${item.kind}:${item.id}`);
+    // A live question/decision received during the read is newer than an absent
+    // or older snapshot. Preserve its identity even if computer clocks differ.
+    if (item.kind === 'approval' && concurrentApprovals.has(item.id)) {
+      next = { ...next, items: upsert(next.items, item) }; continue;
+    }
     if (item.kind === 'approval' && known) {
       // Keep a decision the live stream already saw.
       if (item.state !== 'pending') next = { ...next, items: upsert(next.items, item) };
       continue;
     }
-    if (!known && item.ts >= newest) next = { ...next, items: [...next.items, item] };
+    // A stale request absent from the fresh snapshot is not a currently actionable approval.
+    if (item.kind === 'approval' && item.state === 'pending') continue;
+    // The optimistic bubble is replaced by the real message once the computer has it.
+    if (item.kind === 'message' && item.local && confirmed.has(item.text.trim())) continue;
+    if (!known) next = { ...next, items: [...next.items, item] };
   }
-  return { ...next, session: session ?? next.session };
+  return { ...next, items: next.items.sort((a, b) => a.ts - b.ts), session: session ?? next.session };
 }
 
 // ——— state ———
@@ -98,18 +135,25 @@ export function mergeHistory(current: Timeline, session: SessionInfo | undefined
 export type Probe = 'checking' | 'ok' | 'no';
 export type Connection = 'idle' | 'connecting' | 'open' | 'retrying' | 'error';
 export interface PendingApproval { approvalId: string; deviceId: string; sessionKey: string; tool: ToolId; title: string; ts: number }
-export interface DeviceSessions { list: SessionInfo[]; loading: boolean; loaded: boolean; error?: string }
+export interface NativeDirectory { list: SessionInfo[]; loading: boolean; loaded: boolean; error?: string }
+export interface DeviceSessions { list: SessionInfo[]; loading: boolean; loaded: boolean; error?: string; native?: NativeDirectory; readOnly?: Partial<Record<import('./client').ClaudeDesktopScope, NativeDirectory & { nextCursor?: string; identity: string }>>; directorySurface?: 'desktop' | 'all'; pages?: Partial<Record<AgentId, { nextCursor?: string; loading: boolean; error?: string }>> }
+export interface DeviceAgents { list: AgentProfile[]; apis: RemoteApiOption[]; loading: boolean; loaded: boolean; error?: string; autoAll?: boolean }
 
 export interface RemoteState {
   /** 'loading' until the saved choice is read. */
   phase: 'loading' | 'setup' | 'pairing' | 'ready';
   serviceId: string | null;
+  connections: RemoteConnection[];
+  connectionId: string | null;
+  /** Only set after a successful public plugin discovery. QR scans must match exactly. */
+  selectedHubUrl: string | null;
   probes: Record<string, Probe>;
   connection: Connection;
   connectionError?: string;
   devices: DeviceStatus[];
   devicesLoaded: boolean;
   sessions: Record<string, DeviceSessions>;
+  agents: Record<string, DeviceAgents>;
   timelines: Record<string, Timeline>;
   approvals: Record<string, PendingApproval>;
   signingIn: string | null;
@@ -118,19 +162,74 @@ export interface RemoteState {
 }
 
 const SETTING = 'remote_service';
-const initial: RemoteState = { phase: 'loading', serviceId: null, probes: {}, connection: 'idle', devices: [], devicesLoaded: false, sessions: {}, timelines: {}, approvals: {}, signingIn: null, focus: null };
+const initial: RemoteState = { phase: 'loading', serviceId: null, connections: [], connectionId: null, selectedHubUrl: null, probes: {}, connection: 'idle', devices: [], devicesLoaded: false, sessions: {}, agents: {}, timelines: {}, approvals: {}, signingIn: null, focus: null };
 let state: RemoteState = initial;
 let hub: Hub | null = null;
-let stream: StreamHandle | null = null;
 let lastSeq = 0;
 let booted = false;
 let screenOpen = false;
+let connectionGeneration = 0;
+let hubCapabilities = new Set<string>();
+const sessionCursors = new Map<string, number>();
+const sessionApprovalSnapshots = new Map<string, number>();
+const sessionRequests = new Map<string, number>();
+const agentRequests = new Map<string, number>();
+const apiChanges = new Map<string, number>();
+const apiMutationOwners = new Map<Hub, Set<string>>();
 const listeners = new Set<() => void>();
 const alertListeners = new Set<(approval: PendingApproval) => void>();
 
 function set(patch: Partial<RemoteState> | ((current: RemoteState) => Partial<RemoteState>)) {
+  const previous = state;
   state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) };
+  try { persistChanges(previous, state); } catch { /* the cache is optional */ }
   listeners.forEach((listener) => listener());
+}
+
+/** Keep confirmed CLI threads and session lists on the device (see cache.ts). */
+function remoteCacheScope(): string | null {
+  return state.connectionId && hub?.pairToken ? `${state.connectionId}|credential:${deliveryCredentialId(hub.pairToken)}` : null;
+}
+function persistChanges(previous: RemoteState, next: RemoteState) {
+  const scope = remoteCacheScope();
+  if (!scope || previous.connectionId !== next.connectionId) return;
+  if (previous.timelines !== next.timelines) {
+    for (const [key, timeline] of Object.entries(next.timelines)) {
+      if (timeline === previous.timelines[key] || !timeline.snapshotAt || timeline.loading || !timeline.items.length) continue;
+      const sessionKey = key.slice(key.indexOf('|') + 1);
+      if (isReadOnlyDesktopSession(sessionKey) || timeline.historyLease || timeline.session?.controlSurface === 'desktop' || timeline.session?.controlSurface === 'read-only') continue;
+      // Approvals and unsent local echoes are live state; never restore them from disk.
+      saveCachedThread(scope, key, { items: timeline.items.filter((item) => item.kind !== 'approval' && !(item.kind === 'message' && item.local)), session: timeline.session });
+    }
+  }
+  if (previous.sessions !== next.sessions) {
+    for (const [deviceId, entry] of Object.entries(next.sessions)) {
+      if (entry && entry !== previous.sessions[deviceId] && entry.loaded && !entry.error) saveCachedSessions(scope, deviceId, entry.list);
+    }
+  }
+}
+
+/** Show the last confirmed copy of a thread at once; the computer's snapshot replaces it when it arrives. */
+export async function hydrateCachedThread(deviceId: string, sessionKey: string): Promise<void> {
+  const scope = remoteCacheScope(), owner = hub;
+  const key = timelineKey(deviceId, sessionKey);
+  if (!scope || isReadOnlyDesktopSession(sessionKey) || isNativeSession(deviceId, sessionKey) || state.timelines[key]?.historyLease || state.timelines[key]?.items.length) return;
+  const cached = await loadCachedThread(scope, key);
+  if (!cached || owner !== hub || remoteCacheScope() !== scope || isNativeSession(deviceId, sessionKey) || state.timelines[key]?.historyLease) return;
+  set((current) => {
+    const existing = current.timelines[key];
+    if (existing?.items.length || existing?.snapshotAt || existing?.historyLease || existing?.session?.controlSurface === 'desktop') return {};
+    return { timelines: { ...current.timelines, [key]: { ...(existing ?? EMPTY_TIMELINE), items: cached.items as TimelineItem[], session: existing?.session ?? cached.session, cachedAt: cached.savedAt } } };
+  });
+}
+
+/** Recent tasks for the saved computer, readable before (or without) a connection. */
+export async function hydrateCachedSessions(deviceId: string): Promise<void> {
+  const scope = remoteCacheScope(), owner = hub;
+  if (!scope || state.sessions[deviceId]?.list.length) return;
+  const list = await loadCachedSessions(scope, deviceId);
+  if (!list?.length || owner !== hub || remoteCacheScope() !== scope) return;
+  set((current) => current.sessions[deviceId]?.list.length ? {} : { sessions: { ...current.sessions, [deviceId]: { ...(current.sessions[deviceId] ?? { loading: false, loaded: false }), list } } });
 }
 
 export const timelineKey = (deviceId: string, sessionKey: string) => `${deviceId}|${sessionKey}`;
@@ -144,26 +243,54 @@ export function usePendingApprovalCount(): number {
 }
 export function getRemoteState() { return state; }
 
-export function setRemoteScreenOpen(open: boolean) { screenOpen = open; }
+export function setRemoteScreenOpen(open: boolean) {
+  screenOpen = open;
+  if (open && hub?.pairToken) void refreshDevices(true);
+}
 export function setRemoteFocus(focus: RemoteState['focus']) { set({ focus }); }
 /** Foreground alerts for approvals that arrive while the remote screen is closed. */
+const eventListeners = new Set<(event: HubEvent) => void>();
+/** Live (non-replayed) events, e.g. for task-finished notifications. Listeners must not throw. */
+export function onRemoteEvent(listener: (event: HubEvent) => void): () => void {
+  eventListeners.add(listener);
+  return () => { eventListeners.delete(listener); };
+}
+export function isRemoteScreenOpen(): boolean { return screenOpen; }
+/** For the native background watch only: the current Hub and this session's read cursor. Kept in memory, never persisted. */
+export function watchCredentials(): { url: string; key?: string; pairToken?: string } | null { return hub?.pairToken ? { url: hub.url, key: hub.key, pairToken: hub.pairToken } : null; }
+export function sessionCursor(deviceId: string, sessionKey: string): number { return sessionCursors.get(timelineKey(deviceId, sessionKey)) ?? 0; }
+
 export function onApprovalAlert(listener: (approval: PendingApproval) => void): () => void {
   alertListeners.add(listener);
   return () => { alertListeners.delete(listener); };
 }
 
-function handleEvent(event: HubEvent) {
+function handleEvent(event: HubEvent, recovered = false) {
+  // Native Claude history has an account-stamped command channel only. An old
+  // Hub event must not recreate a cleared namespace or turn it into a worker.
+  if (event.sessionKey.startsWith('claude-desktop:')) return;
   if (typeof event.seq === 'number') lastSeq = Math.max(lastSeq, event.seq);
   const key = timelineKey(event.deviceId, event.sessionKey);
+  let newApproval = false;
   set((current) => {
-    const patch: Partial<RemoteState> = { timelines: { ...current.timelines, [key]: applyEvent(current.timelines[key] ?? EMPTY_TIMELINE, event) } };
+    const patch: Partial<RemoteState> = { timelines: { ...current.timelines, [key]: (recovered ? applyRecoveredEvent : applyEvent)(current.timelines[key] ?? EMPTY_TIMELINE, event) } };
     if (event.type === 'session.updated') {
       const entry = current.sessions[event.deviceId] ?? { list: [], loading: false, loaded: false };
       const list = [event.session, ...entry.list.filter((item) => item.sessionKey !== event.session.sessionKey)].sort((a, b) => b.updatedAt - a.updatedAt);
-      patch.sessions = { ...current.sessions, [event.deviceId]: { ...entry, list } };
+      // Native order belongs to a directory snapshot. A live status update must
+      // not insert an unauthorized history thread or rearrange native pins.
+      const native = entry.native && { ...entry.native, list: entry.native.list.map(item => item.sessionKey === event.session.sessionKey
+        ? { ...event.session, controlSurface: 'desktop' as const, sidebarIndex: item.sidebarIndex, pinnedIndex: item.pinnedIndex } : item) };
+      patch.sessions = { ...current.sessions, [event.deviceId]: { ...entry, list, ...(native ? { native } : {}) } };
     }
     if (event.type === 'approval.request') {
-      patch.approvals = { ...current.approvals, [event.approvalId]: { approvalId: event.approvalId, deviceId: event.deviceId, sessionKey: event.sessionKey, tool: event.tool, title: event.title, ts: event.ts } };
+      const item = patch.timelines![key].items.find((entry) => entry.kind === 'approval' && entry.id === event.approvalId);
+      const approvals = { ...current.approvals };
+      if (item?.kind === 'approval' && item.state === 'pending' && (!item.expiresAt || item.expiresAt > Date.now())) {
+        newApproval = !approvals[event.approvalId];
+        approvals[event.approvalId] = { approvalId: event.approvalId, deviceId: event.deviceId, sessionKey: event.sessionKey, tool: event.tool, title: event.title, ts: event.ts };
+      } else delete approvals[event.approvalId];
+      patch.approvals = approvals;
     }
     if (event.type === 'approval.resolved' && current.approvals[event.approvalId]) {
       const approvals = { ...current.approvals };
@@ -172,8 +299,9 @@ function handleEvent(event: HubEvent) {
     }
     return patch;
   });
+  if (!recovered) eventListeners.forEach((listener) => { try { listener(event); } catch { /* decorative */ } });
   // Replayed history is not news.
-  if (event.type === 'approval.request' && !screenOpen && Date.now() - event.ts < 120_000 && AppState.currentState === 'active') {
+  if (event.type === 'approval.request' && newApproval && !recovered && !screenOpen && Date.now() - event.ts < 120_000 && AppState.currentState === 'active') {
     const approval = state.approvals[event.approvalId];
     if (approval) alertListeners.forEach((listener) => listener(approval));
   }
@@ -186,29 +314,135 @@ function handleDevice(device: DeviceStatus) {
   });
 }
 
-function startStream() {
-  stream?.close();
-  if (!hub?.pairToken) return;
-  stream = openStream({
-    hub, after: lastSeq, onEvent: handleEvent, onDevice: handleDevice,
-    onState: (next, info) => {
-      if (next === 'open') { set({ connection: 'open', connectionError: undefined }); void refreshDevices(true); }
-      else if (next === 'connecting') set((current) => ({ connection: current.connection === 'retrying' ? 'retrying' : 'connecting' }));
-      else if (next === 'retrying') set({ connection: 'retrying', connectionError: info?.error });
-      else if (info?.error) set({ connection: 'error', connectionError: info.error });
-    },
-  });
+// Pairing is persistent; an HTTP connection is not. No default SSE, watchdog or background polling.
+function startDemandConnection() { if (screenOpen && hub?.pairToken) void refreshDevices(true); }
+function stopStream() { /* Legacy callers pause networking; there is no permanent phone stream. */ }
+
+function resetConnection(patch: Partial<RemoteState>) {
+  stopStream(); connectionGeneration += 1; hub = null; lastSeq = 0;
+  hubCapabilities.clear(); sessionCursors.clear(); sessionApprovalSnapshots.clear(); sessionRequests.clear(); modelCache.clear(); modelRequests.clear(); apiChanges.clear();
+  set({ ...initial, phase: 'setup', connections: state.connections, probes: state.probes, ...patch });
 }
 
-function stopStream() { stream?.close(); stream = null; }
+/** First step: explicitly choose a station and verify its plugin. No model API key is read. */
+export async function connectStation(stationUrl: string, stillWanted: () => boolean = () => true): Promise<void> {
+  const generation = connectionGeneration;
+  const previousConnectionId = state.connectionId;
+  const previousServiceId = state.serviceId;
+  let selectionAttempted = false;
+  let serviceAttempted = false;
+  let committed = false;
+  set({ signingIn: 'station' });
+  try {
+    const discovery = await discoverStation(stationUrl);
+    if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重试');
+    // Discovery is read-only. Leaving the setup page must not discard the
+    // currently paired computer or its cached conversations when it finishes.
+    if (!stillWanted()) return;
+    selectionAttempted = true;
+    await selectConnection(null);
+    if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重试');
+    if (!stillWanted()) return;
+    serviceAttempted = true;
+    await setSetting(SETTING, null);
+    if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重试');
+    if (!stillWanted()) return;
+    committed = true;
+    resetConnection({ phase: 'pairing', selectedHubUrl: discovery.url, signingIn: null });
+    hub = { url: discovery.url };
+    hubCapabilities = new Set(discovery.capabilities);
+  } finally {
+    // Cancellation during a SQLite await must also retain the saved startup
+    // choice. Never restore over a different connection that has since won.
+    if (!committed && generation === connectionGeneration) {
+      try {
+        if (selectionAttempted) await selectConnection(previousConnectionId);
+        if (serviceAttempted && generation === connectionGeneration) await setSetting(SETTING, previousServiceId);
+      } finally { if (generation === connectionGeneration && state.signingIn === 'station') set({ signingIn: null }); }
+    }
+  }
+}
+
+export async function useSavedConnection(id: string, deferNetwork = false): Promise<void> {
+  const profile = state.connections.find((item) => item.id === id);
+  if (!profile) throw new Error('没有找到这台电脑的连接记录');
+  resetConnection({ phase: 'ready', connectionId: profile.id, selectedHubUrl: profile.hubUrl, signingIn: id, connection: 'connecting' });
+  const generation = connectionGeneration;
+  try {
+    const discovery = deferNetwork ? null : await discoverStation(profile.hubUrl);
+    const token = await connectionToken(profile);
+    if (generation !== connectionGeneration) return;
+    if (!token) {
+      set({ phase: 'pairing', signingIn: null, connection: 'idle', connectionId: null });
+      hub = { url: profile.hubUrl };
+      await selectConnection(null);
+      return;
+    }
+    hub = { url: profile.hubUrl, pairToken: token, deviceId: profile.deviceId };
+    hubCapabilities = new Set(discovery?.capabilities ?? []);
+    await selectConnection(profile.id);
+    if (generation !== connectionGeneration) return;
+    set({ signingIn: null, ...(deferNetwork ? { connection: 'idle' as const } : {}) });
+    if (!deferNetwork) await refreshDevices(true);
+  } catch (error) {
+    if (generation === connectionGeneration) set({ signingIn: null, devicesLoaded: true, connection: 'error', connectionError: (error as Error).message });
+    throw error;
+  }
+}
+
+/** Scanner validation and confirmation are separate: merely scanning never sends a ticket. */
+export function parseRemoteQr(raw: string): PairQr {
+  if (!state.selectedHubUrl || state.phase !== 'pairing') throw new Error('请先输入中转站地址并检查远程插件');
+  return readPairQr(raw, state.selectedHubUrl);
+}
+export async function pairRemoteQr(qr: PairQr): Promise<void> {
+  if (!state.selectedHubUrl || state.phase !== 'pairing') throw new Error('请先连接中转站');
+  const validated = readPairQr(JSON.stringify(qr), state.selectedHubUrl);
+  const generation = connectionGeneration;
+  const result = await confirmQrPair(validated);
+  if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重新扫码');
+  const profile: RemoteConnection = {
+    id: connectionId(validated.hubUrl, validated.deviceId), hubUrl: validated.hubUrl,
+    deviceId: validated.deviceId, deviceName: result.device.name, pairedAt: Date.now(),
+  };
+  const connections = await saveConnection(profile, result.token);
+  if (generation !== connectionGeneration) return;
+  await selectConnection(profile.id);
+  if (generation !== connectionGeneration) return;
+  hub = { url: profile.hubUrl, pairToken: result.token, deviceId: profile.deviceId };
+  lastSeq = 0;
+  set({ phase: 'ready', connections, connectionId: profile.id, devices: [result.device], devicesLoaded: true, connection: 'open', connectionError: undefined });
+}
+
+export async function revokeRemoteConnection(): Promise<void> {
+  const profile = state.connections.find((item) => item.id === state.connectionId);
+  if (!profile || !hub?.pairToken) throw new Error('请先恢复这台电脑的连接');
+  const owner = hub;
+  const cacheScope = remoteCacheScope();
+  await revokePair(owner);
+  if (cacheScope) await clearRemoteCache(cacheScope, [profile.deviceId, ...Object.keys(state.sessions)]);
+  // Retire the pre-credential cache too; never migrate unverified old contents.
+  await clearRemoteCache(profile.id, [profile.deviceId]);
+  const connections = await forgetConnection(profile);
+  if (owner !== hub) { set({ connections }); return; }
+  resetConnection({ connections });
+}
 
 /** Reads the saved relay once and connects; call whenever the service list changes. */
 export async function bootRemote(providers: ProviderProfile[]): Promise<void> {
   if (!booted) {
     booted = true;
+    const connections = await loadConnections().catch(() => []);
+    const selected = await selectedConnection().catch(() => null);
+    set({ connections });
+    if (selected && connections.some((item) => item.id === selected)) {
+      await useSavedConnection(selected, true).catch(() => undefined);
+      return;
+    }
     const saved = await getSetting(SETTING).catch(() => null);
     set({ serviceId: saved, phase: saved ? 'ready' : 'setup' });
   }
+  if (state.connectionId || state.selectedHubUrl) return;
   const service = providers.find((item) => item.id === state.serviceId);
   if (state.serviceId && !service && providers.length) { await signOutRemote(); return; }
   if (!service || hub) return;
@@ -218,14 +452,13 @@ export async function bootRemote(providers: ProviderProfile[]): Promise<void> {
   const pairToken = await getPairToken(service.id).catch(() => null);
   hub = { url, key, pairToken: pairToken ?? undefined };
   set({ phase: pairToken ? 'ready' : 'pairing' });
-  if (pairToken) { startStream(); void refreshDevices(); }
+  if (pairToken) startDemandConnection();
 }
 
-/** Pauses the stream in the background and catches up (after=<seq>) on return. */
+/** Returning to the remote screen performs one short check, never opens a permanent stream. */
 export function setRemoteForeground(active: boolean) {
   if (!hub?.pairToken) return;
-  if (active && !stream) startStream();
-  else if (!active) { stopStream(); set({ connection: 'idle' }); }
+  if (active && screenOpen) startDemandConnection();
 }
 
 export async function probeServices(providers: ProviderProfile[]): Promise<void> {
@@ -268,12 +501,13 @@ export async function signInRemote(service: ProviderProfile): Promise<void> {
         }
       }
     }
-    stopStream();
+    stopStream(); connectionGeneration += 1;
     hub = next;
     lastSeq = 0;
     await setSetting(SETTING, service.id);
-    set({ ...initial, phase: paired ? 'ready' : 'pairing', serviceId: service.id, probes: state.probes, signingIn: null });
-    if (paired) { startStream(); void refreshDevices(true); }
+    await selectConnection(null);
+    set({ ...initial, connections: state.connections, phase: paired ? 'ready' : 'pairing', serviceId: service.id, probes: state.probes, signingIn: null });
+    if (paired) startDemandConnection();
   } finally {
     set({ signingIn: null });
   }
@@ -285,7 +519,9 @@ export async function signOutRemote(): Promise<void> {
   hub = null;
   lastSeq = 0;
   await setSetting(SETTING, null).catch(() => undefined);
-  set({ ...initial, phase: 'setup', probes: state.probes });
+  await selectConnection(null).catch(() => undefined);
+  connectionGeneration += 1;
+  set({ ...initial, phase: 'setup', probes: state.probes, connections: state.connections });
 }
 
 export async function pairRemote(code: string): Promise<void> {
@@ -294,107 +530,687 @@ export async function pairRemote(code: string): Promise<void> {
   await savePairToken(state.serviceId, result.token);
   hub = { ...hub, pairToken: result.token };
   lastSeq = 0;
-  set({ phase: 'ready', devices: [result.device], devicesLoaded: true, connectionError: undefined });
-  startStream();
+  set({ phase: 'ready', devices: [result.device], devicesLoaded: true, connection: 'open', connectionError: undefined });
 }
 
 export async function refreshDevices(quiet = false): Promise<void> {
   if (!hub || !hub.pairToken) return;
+  const owner = hub;
   try {
-    const list = await fetchDevices(hub);
-    set({ devices: list, devicesLoaded: true, ...(quiet ? {} : { connectionError: undefined }) });
+    if (!hubCapabilities.size) {
+      const discovery = await discoverStation(owner.url);
+      if (owner !== hub) return;
+      hubCapabilities = new Set(discovery.capabilities);
+    }
+    const list = await fetchDevices(owner);
+    if (owner !== hub) return;
+    set({ devices: list, devicesLoaded: true, connection: 'open', connectionError: undefined });
   } catch (error) {
-    if (error instanceof HubError && error.status === 403) {
+    if (owner !== hub) return;
+    if (error instanceof HubError && (error.status === 403 || error.status === 401)) {
       stopStream();
+      const cacheScope = remoteCacheScope();
+      if (cacheScope) void clearRemoteCache(cacheScope, Object.keys(state.sessions));
       if (state.serviceId) await deletePairToken(state.serviceId).catch(() => undefined);
       hub = { ...hub, pairToken: undefined };
-      set({ phase: 'pairing', devices: [], connection: 'idle' });
+      set({ phase: 'pairing', devices: [], sessions: {}, agents: {}, timelines: {}, approvals: {}, focus: null, connection: 'error', connectionError: error.message });
     }
-    set({ devicesLoaded: true });
+    set({ devicesLoaded: true, connectionError: (error as Error).message, connection: 'error' });
     if (!quiet) throw error;
   }
 }
 
 function need(): Hub {
-  if (!hub) throw new Error('还没有登录中转站');
+  if (!hub?.pairToken) throw new Error('请先扫码配对电脑');
   return hub;
 }
 
-export async function loadSessions(deviceId: string): Promise<void> {
-  const entry = state.sessions[deviceId] ?? { list: [], loading: false, loaded: false };
-  set((current) => ({ sessions: { ...current.sessions, [deviceId]: { ...entry, loading: true, error: undefined } } }));
+export function remoteDeliveryScope(): string {
+  const station = state.connectionId ?? state.selectedHubUrl ?? state.serviceId ?? '';
+  return hub?.pairToken ? `${station}|credential:${deliveryCredentialId(hub.pairToken)}` : station;
+}
+export function getPendingRemoteMessage(deviceId: string, sessionKey: string) { return pendingDelivery(remoteDeliveryScope(), deviceId, sessionKey); }
+export function cancelPendingRemoteMessage(deviceId: string, sessionKey: string, scope = remoteDeliveryScope()) { return cancelPendingDelivery(scope, deviceId, sessionKey); }
+
+async function runCommand<T = Record<string, unknown>>(owner: Hub, deviceId: string, input: Command, requestId?: string): Promise<T> {
   try {
-    const result = await command<{ sessions?: SessionInfo[] }>(need(), deviceId, { type: 'sessions.list' });
-    const list = [...(result.sessions ?? [])].sort((a, b) => b.updatedAt - a.updatedAt);
-    set((current) => ({ sessions: { ...current.sessions, [deviceId]: { list, loading: false, loaded: true } } }));
+    const result = await command<T>(owner, deviceId, input, requestId);
+    if (owner === hub) set((current) => ({ connection: 'open', connectionError: undefined,
+      ...(!requestId ? { devices: current.devices.map((device) => device.deviceId === deviceId ? { ...device, online: true } : device) } : {}) }));
+    return result;
   } catch (error) {
-    set((current) => ({ sessions: { ...current.sessions, [deviceId]: { ...(current.sessions[deviceId] ?? entry), loading: false, loaded: true, error: (error as Error).message } } }));
+    if (owner === hub && error instanceof HubError && (error.status === 0 || error.status >= 500 || error.status === 401 || error.status === 403 || error.status === 409)) {
+      set({ connection: 'error', connectionError: error.message });
+    }
     throw error;
   }
 }
 
-export async function openSession(deviceId: string, sessionKey: string): Promise<void> {
+async function retryCapability(owner: Hub, force = false): Promise<boolean> {
+  if (!hubCapabilities.size || force) {
+    const discovery = await discoverStation(owner.url);
+    if (owner !== hub) throw new Error('连接已切换');
+    hubCapabilities = new Set(discovery.capabilities);
+  }
+  return hubCapabilities.has('commands.idempotency.v1');
+}
+
+/** A bounded short request resumes only this session's cursor, without keeping an SSE subscription. */
+export async function syncSessionEvents(deviceId: string, sessionKey: string, waitSeconds = 0): Promise<void> {
+  // Desktop execution is observed through the actual host, not CLI-only Hub
+  // emitters. The existing foreground demand window schedules these reads.
+  if (isNativeSession(deviceId, sessionKey) || isReadOnlyDesktopSession(sessionKey)) {
+    if (state.timelines[timelineKey(deviceId, sessionKey)]?.loading) return;
+    await openSession(deviceId, sessionKey, { background: true });
+    return;
+  }
+  const owner = need();
   const key = timelineKey(deviceId, sessionKey);
-  set((current) => ({ timelines: { ...current.timelines, [key]: { ...(current.timelines[key] ?? EMPTY_TIMELINE), loading: true, error: undefined } } }));
+  const revisionKey = `sync:${key}`;
+  const snapshotKey = `open:${key}`;
+  const revision = (sessionRequests.get(revisionKey) ?? 0) + 1;
+  sessionRequests.set(revisionKey, revision);
+  let snapshotRevision = sessionRequests.get(snapshotKey) ?? 0;
+  let approvalSnapshotThrough = sessionApprovalSnapshots.get(key) ?? 0;
+  const currentRequest = () => owner === hub && sessionRequests.get(revisionKey) === revision
+    && (sessionRequests.get(snapshotKey) ?? 0) === snapshotRevision;
   try {
-    const result = await command<{ session?: SessionInfo; events?: HubEvent[] }>(need(), deviceId, { type: 'session.open', sessionKey });
-    set((current) => {
-      const timeline = mergeHistory(current.timelines[key] ?? EMPTY_TIMELINE, result.session, result.events ?? []);
-      const approvals = { ...current.approvals };
-      for (const item of timeline.items) {
-        if (item.kind === 'approval' && item.state === 'pending') approvals[item.id] = { approvalId: item.id, deviceId, sessionKey, tool: timeline.session?.tool ?? 'codex', title: item.title, ts: item.ts };
-        else if (item.kind === 'approval') delete approvals[item.id];
+    if (!sessionCursors.has(key) || state.devices.some((device) => device.deviceId === deviceId && device.online === false)) {
+      // Establish the cursor BEFORE the authoritative snapshot; later events are not skipped.
+      // A known-offline computer is checked by the same read-only recovery,
+      // not by adding a permanent presence ping or a model task.
+      snapshotRevision += 1;
+      await openSession(deviceId, sessionKey);
+      if (!currentRequest()) return;
+      approvalSnapshotThrough = sessionApprovalSnapshots.get(key) ?? 0;
+    }
+    for (let page = 0; page < 3; page += 1) {
+      const after = sessionCursors.get(key) ?? 0;
+      const result = await sessionEventsPage(owner, deviceId, sessionKey, after, page === 0 && hubSupportsWait() ? waitSeconds : 0);
+      if (!currentRequest()) return;
+      const gap = result.events.find((event) => event.deviceId === deviceId && event.sessionKey === sessionKey
+        && (typeof event.seq !== 'number' || event.seq > after) && historyGap(event));
+      if (result.resetRequired || gap) {
+        // The Hub buffer has a gap: reload the authoritative thread, then follow from the newest event.
+        snapshotRevision += 1;
+        await openSession(deviceId, sessionKey);
+        if (!currentRequest()) return;
+        approvalSnapshotThrough = sessionApprovalSnapshots.get(key) ?? 0;
+        // The local registry in session.open is authoritative for pending
+        // approvals. Preserve progress from this page, but never resurrect an
+        // old request just because a transient Hub buffer still contains it.
+        for (const event of result.events) {
+          if (event.deviceId !== deviceId || event.sessionKey !== sessionKey || historyGap(event)
+            || event.type === 'session.updated' || (typeof event.seq === 'number' && event.seq <= after)) continue;
+          if (event.type === 'approval.request' && (typeof event.seq !== 'number' || event.seq <= approvalSnapshotThrough)) continue;
+          handleEvent(event, true);
+        }
+        if (gap) handleEvent(gap);
+        // nextSeq is the last event actually in this page; lastSeq may point
+        // beyond it. Continuing from lastSeq silently discards unread progress.
+        if (result.events.length) sessionCursors.set(key, result.nextSeq);
+        if (!result.hasMore || result.nextSeq <= after) break;
+        continue;
       }
-      return { timelines: { ...current.timelines, [key]: timeline }, approvals };
+      for (const event of result.events) {
+        if (event.deviceId !== deviceId || event.sessionKey !== sessionKey || (typeof event.seq === 'number' && event.seq <= after)) continue;
+        const predatesSnapshot = approvalSnapshotThrough > 0 && (typeof event.seq !== 'number' || event.seq <= approvalSnapshotThrough);
+        if (event.type === 'session.updated' && predatesSnapshot) continue;
+        if (event.type === 'approval.request' && approvalSnapshotThrough > 0
+          && (typeof event.seq !== 'number' || event.seq <= approvalSnapshotThrough)) continue;
+        handleEvent(event, predatesSnapshot);
+      }
+      sessionCursors.set(key, result.nextSeq);
+      if (!result.hasMore || result.nextSeq <= after) break;
+    }
+    set({ connection: 'open', connectionError: undefined });
+  } catch (error) {
+    if (currentRequest()) set({ connection: 'error', connectionError: (error as Error).message });
+    throw error;
+  }
+}
+
+/** Every status source must revoke cached history from a previous desktop identity. */
+function publishAgentStatus(deviceId: string, parsed: AgentStatus): void {
+  set(previous => {
+    const identity = parsed.agents.find(item => item.id === 'claude-desktop')?.desktopHistory?.identity;
+    const entry = previous.sessions[deviceId];
+    const readOnly = Object.fromEntries(Object.entries(entry?.readOnly ?? {}).filter(([, directory]) => Boolean(identity) && directory?.identity === identity));
+    const timelines = Object.fromEntries(Object.entries(previous.timelines).filter(([key, timeline]) => !key.startsWith(`${deviceId}|claude-desktop:`)
+      || Boolean(identity) && timeline.historyLease === identity));
+    return { agents: { ...previous.agents, [deviceId]: { list: parsed.agents, apis: parsed.apis, autoAll: parsed.autoAll, loading: false, loaded: true } },
+      ...(entry?.readOnly ? { sessions: { ...previous.sessions, [deviceId]: { ...entry, readOnly } } } : {}), timelines };
+  });
+}
+
+/** Reads which agents are installed and which API remote tasks will use. Never applies keys or restarts tools. */
+export async function loadAgentProfiles(deviceId: string): Promise<void> {
+  const owner = need();
+  const revision = (agentRequests.get(deviceId) ?? 0) + 1;
+  agentRequests.set(deviceId, revision);
+  const current = () => owner === hub && agentRequests.get(deviceId) === revision;
+  const entry = state.agents[deviceId] ?? { list: [], apis: [], loading: false, loaded: false };
+  set((previous) => ({ agents: { ...previous.agents, [deviceId]: { ...entry, loading: true, error: undefined } } }));
+  try {
+    const result = await runCommand<unknown>(owner, deviceId, { type: 'agents.status' });
+    if (!current()) return;
+    const parsed = parseAgentStatus(result, state.devices.find((item) => item.deviceId === deviceId));
+    publishAgentStatus(deviceId, parsed);
+  } catch (error) {
+    if (!current()) return;
+    const message = error instanceof HubError && error.status === 409 ? '电脑不在线' : '没有读到 Agent 信息，请更新电脑端 Salcara Bridge 或重试';
+    set((previous) => ({ agents: { ...previous.agents, [deviceId]: { ...entry, loading: false, loaded: true, error: message } } }));
+    throw new Error(message);
+  }
+}
+
+/**
+ * Chooses the API the computer uses for this agent's remote tasks. An empty
+ * accountId follows the computer again. The desktop tool itself is not changed.
+ */
+export async function setAgentApi(deviceId: string, agent: AgentId, accountId: string, model?: string, sessionKey?: string): Promise<AgentProfile | undefined> {
+  const owner = need();
+  const mutations = apiMutationOwners.get(owner) ?? new Set<string>();
+  if (mutations.has(deviceId)) throw new Error('API 正在切换，请稍候');
+  mutations.add(deviceId); apiMutationOwners.set(owner, mutations);
+  try {
+  if (sessionKey && await pendingDelivery(remoteDeliveryScope(), deviceId, sessionKey)) throw new Error('先核对待确认消息，再换 API');
+  if (owner !== hub) throw new Error('连接已切换，请刷新确认');
+  const cacheKey = `${deviceId}|${agent === 'codex' ? 'codex' : 'claude'}`;
+  // Replies contain all Agent cards, so mutations of different families on one
+  // computer must share a revision too.
+  const change = (apiChanges.get(deviceId) ?? 0) + 1;
+  apiChanges.set(deviceId, change);
+  modelCache.delete(cacheKey);
+  modelRequests.set(cacheKey, (modelRequests.get(cacheKey) ?? 0) + 1);
+  agentRequests.set(deviceId, (agentRequests.get(deviceId) ?? 0) + 1);
+  const result = await runCommand<unknown>(owner, deviceId, { type: 'agents.api.set', agent, accountId, model: model?.trim() || undefined, ...(sessionKey ? { sessionKey } : {}) });
+  if (owner !== hub || apiChanges.get(deviceId) !== change) throw new Error('API 或连接已切换，请刷新确认');
+  agentRequests.set(deviceId, (agentRequests.get(deviceId) ?? 0) + 1);
+  modelCache.delete(cacheKey);
+  modelRequests.set(cacheKey, (modelRequests.get(cacheKey) ?? 0) + 1);
+  const parsed = parseAgentStatus(result, state.devices.find((item) => item.deviceId === deviceId));
+  publishAgentStatus(deviceId, parsed);
+  return parsed.agents.find((item) => item.id === agent);
+  } finally { mutations.delete(deviceId); if (!mutations.size) apiMutationOwners.delete(owner); }
+}
+
+const LAST_AGENT = 'remote_last_agent_v1';
+export async function lastAgent(): Promise<AgentId> {
+  const saved = await getSetting(LAST_AGENT).catch(() => null);
+  return saved === 'claude' || saved === 'claude-desktop' ? saved : 'codex';
+}
+export async function rememberAgent(agent: AgentId): Promise<void> { await setSetting(LAST_AGENT, agent).catch(() => undefined); }
+
+/** True when the station can hold an empty events read open (live updates without a permanent stream). */
+export function hubSupportsWait(): boolean { return hubCapabilities.has('events.wait.v1'); }
+/** The Hub can push task news to this phone while the app is closed (Firebase). */
+export function hubSupportsPush(): boolean { return hubCapabilities.has('push.fcm.v1'); }
+/** The paired connection push registration is for: its Hub credentials and computer. */
+export function pushTarget(): { hub: Hub; deviceId: string } | null {
+  // Legacy code pairing has no device in the connection: it pairs exactly one computer.
+  const deviceId = hub?.deviceId ?? (state.devices.length === 1 ? state.devices[0].deviceId : undefined);
+  return hub?.pairToken && deviceId ? { hub, deviceId } : null;
+}
+/** Plain subscription to store changes (outside React). */
+export function onRemoteChange(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; }
+
+const sessionMatchesAgent = (session: SessionInfo, agent: AgentId) => agent === 'codex' ? session.tool === 'codex'
+  : session.tool === 'claude' && /Claude Desktop/i.test(session.client ?? '') === (agent === 'claude-desktop');
+function safePageCursor(value: unknown): string | undefined {
+  if (value == null || value === '') return undefined;
+  if (typeof value !== 'string' || value.length > 4096) throw new Error('电脑返回的读取位置无效');
+  return value;
+}
+const readOnlyDesktopKey = /^claude-desktop:local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function isReadOnlyDesktopSession(key: string): boolean { return readOnlyDesktopKey.test(key); }
+function claudeHistoryIdentity(deviceId: string): string {
+  const history = state.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory;
+  if (!history?.available) throw new Error('桌面历史不可用，请刷新');
+  return history.identity;
+}
+function claudeHistoryScope(deviceId: string, sessionKey: string, identity: string): import('./client').ClaudeDesktopScope {
+  const timeline = state.timelines[timelineKey(deviceId, sessionKey)];
+  const row = (timeline?.historyLease === identity ? timeline.session : undefined) ?? Object.values(state.sessions[deviceId]?.readOnly ?? {})
+    .filter(entry => entry?.identity === identity).flatMap(entry => entry?.list ?? []).find(item => item.sessionKey === sessionKey);
+  if (row?.sessionScope !== 'desktop-chat' && row?.sessionScope !== 'desktop-cowork') throw new Error('请从桌面会话列表打开');
+  return row.sessionScope;
+}
+function validClaudeHistorySession(session: SessionInfo, key: string, scope: import('./client').ClaudeDesktopScope): boolean {
+  return session.sessionKey === key && session.tool === 'claude' && session.client === 'Claude Desktop'
+    && session.sessionScope === scope && session.controlSurface === 'read-only' && session.controllable === false;
+}
+/** A cold native ID must resolve its category from current desktop metadata, never from a guessed CLI list. */
+async function resolveClaudeHistoryScope(owner: Hub, deviceId: string, sessionKey: string, identity: string): Promise<import('./client').ClaudeDesktopScope> {
+  try { return claudeHistoryScope(deviceId, sessionKey, identity); } catch { /* No current metadata cached. */ }
+  const result = await runCommand<{ session?: SessionInfo; historyIdentity?: string }>(owner, deviceId,
+    { type: 'session.describe', sessionKey, controlSurface: 'read-only', historyIdentity: identity });
+  if (owner !== hub || claudeHistoryIdentity(deviceId) !== identity || result.historyIdentity !== identity) throw new Error('桌面账号已变更，请刷新');
+  const scope = result.session?.sessionScope;
+  const scopes = state.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory?.scopes ?? [];
+  if (!result.session || scope !== 'desktop-chat' && scope !== 'desktop-cowork' || !scopes.includes(scope)
+    || !validClaudeHistorySession(result.session, sessionKey, scope)) throw new Error('桌面会话身份不一致，已取消读取');
+  return scope;
+}
+/** Native Claude Chat/Cowork has its own read-only directory and account identity. */
+export async function loadClaudeDesktopHistory(deviceId: string, scope: import('./client').ClaudeDesktopScope, more = false): Promise<void> {
+  const owner = need(), identity = claudeHistoryIdentity(deviceId);
+  if (!state.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory?.scopes.includes(scope)) throw new Error('这个桌面目录不可用');
+  const entry = state.sessions[deviceId]?.readOnly?.[scope], cursor = more && entry?.identity === identity ? entry.nextCursor : undefined;
+  if (more && (!cursor || entry?.loading)) return;
+  const requestKey = `claude-history:${deviceId}:${scope}`, revision = (sessionRequests.get(requestKey) ?? 0) + 1;
+  sessionRequests.set(requestKey, revision);
+  const current = () => owner === hub && sessionRequests.get(requestKey) === revision;
+  const publish = (directory: NonNullable<DeviceSessions['readOnly']>[typeof scope]) => set(previous => ({ sessions: { ...previous.sessions,
+    [deviceId]: { ...(previous.sessions[deviceId] ?? { list: [], loading: false, loaded: false }), readOnly: { ...previous.sessions[deviceId]?.readOnly, [scope]: directory } } } }));
+  publish({ list: entry?.identity === identity ? entry.list : [], loaded: entry?.identity === identity && entry.loaded === true, loading: true, identity });
+  try {
+    const result = await runCommand<{ sessions?: SessionInfo[]; nextCursor?: string; historyIdentity?: string }>(owner, deviceId,
+      { type: 'sessions.list', tool: 'claude', client: scope, controlSurface: 'read-only', historyIdentity: identity, limit: 100, ...(cursor ? { cursor } : {}) });
+    if (!current()) return;
+    if (claudeHistoryIdentity(deviceId) !== identity || result.historyIdentity !== identity) throw new Error('桌面账号已变更，请刷新');
+    if (!Array.isArray(result.sessions) || result.sessions.some(row => !row || !isReadOnlyDesktopSession(row.sessionKey) || row.tool !== 'claude' || row.controlSurface !== 'read-only' || row.controllable !== false
+      || row.client !== 'Claude Desktop' || row.sessionScope !== scope) || new Set(result.sessions.map(row => row.sessionKey)).size !== result.sessions.length) throw new Error('桌面目录无效');
+    const nextCursor = safePageCursor(result.nextCursor);
+    if (cursor && nextCursor === cursor) throw new Error('电脑没有推进读取位置，请刷新');
+    const list = [...new Map([...(more ? entry?.list ?? [] : []), ...result.sessions].map(row => [row.sessionKey, row])).values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    publish({ list, nextCursor, loading: false, loaded: true, identity });
+  } catch (error) {
+    if (!current()) return;
+    if (state.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory?.identity !== identity) throw error;
+    publish({ list: entry?.identity === identity ? entry.list : [], nextCursor: entry?.identity === identity ? entry.nextCursor : undefined, loading: false, loaded: true, identity, error: (error as Error).message });
+    throw error;
+  }
+}
+export async function loadSessions(deviceId: string, agent?: AgentId, options?: { preservePages?: boolean }): Promise<void> { return readSessions(deviceId, agent, false, options?.preservePages === true); }
+export async function loadMoreSessions(deviceId: string, agent: AgentId): Promise<void> { return readSessions(deviceId, agent, true); }
+const nativeThreadKey = /^codex:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+function isNativeSession(deviceId: string, sessionKey: string): boolean {
+  return Boolean(state.timelines[timelineKey(deviceId, sessionKey)]?.session?.controlSurface === 'desktop'
+    || state.sessions[deviceId]?.native?.list.some(item => item.sessionKey === sessionKey)
+    || state.agents[deviceId]?.list.find(item => item.id === 'codex')?.desktopLive?.sessionKeys.includes(sessionKey));
+}
+function nativeLease(deviceId: string, sessionKey?: string) {
+  const live = state.agents[deviceId]?.list.find(item => item.id === 'codex')?.desktopLive;
+  if (!live || live.expiresAt <= Date.now() || (sessionKey ? !live.capabilities?.read || !live.sessionKeys.includes(sessionKey) : !live.capabilities?.list)) {
+    throw new Error('桌面连接已断开，请在电脑重新授权');
+  }
+  return live;
+}
+function nativeLeaseIdentity(deviceId: string, sessionKey?: string): string {
+  const live = nativeLease(deviceId, sessionKey);
+  return JSON.stringify([live.expiresAt, live.sessionKeys]);
+}
+/** Local directory preference survives opening a thread and returning after lease expiry. */
+export function selectSessionDirectory(deviceId: string, surface: 'desktop' | 'all'): void {
+  set(current => { const entry = current.sessions[deviceId] ?? { list: [], loading: false, loaded: false };
+    return { sessions: { ...current.sessions, [deviceId]: { ...entry, directorySurface: surface } } }; });
+}
+/** Native and all-history directories are separate; a native failure never falls back to CLI. */
+export async function loadNativeSessions(deviceId: string): Promise<void> {
+  const owner = need(), requestKey = `native-sessions:${deviceId}`;
+  const revision = (sessionRequests.get(requestKey) ?? 0) + 1;
+  sessionRequests.set(requestKey, revision);
+  const currentRequest = () => owner === hub && sessionRequests.get(requestKey) === revision;
+  set(current => { const entry = current.sessions[deviceId] ?? { list: [], loading: false, loaded: false };
+    return { sessions: { ...current.sessions, [deviceId]: { ...entry, directorySurface: 'desktop', native: { ...(entry.native ?? { list: [], loaded: false }), loading: true, error: undefined } } } }; });
+  try {
+    const lease = nativeLeaseIdentity(deviceId);
+    const result = await runCommand<{ sessions?: SessionInfo[] }>(owner, deviceId, { type: 'desktop.sessions.list', tool: 'codex', controlSurface: 'desktop' });
+    if (!currentRequest()) return;
+    if (nativeLeaseIdentity(deviceId) !== lease) throw new Error('桌面授权已更新，请重新读取');
+    const allowed = new Set(nativeLease(deviceId).sessionKeys), seen = new Set<string>(), positions = new Set<number>();
+    if (!Array.isArray(result.sessions) || result.sessions.length > 200) throw new Error('电脑返回的桌面目录无效');
+    const list = result.sessions.map(item => {
+      if (!item || !nativeThreadKey.test(item.sessionKey) || !allowed.has(item.sessionKey) || seen.has(item.sessionKey)
+        || item.tool !== 'codex' || item.controlSurface !== 'desktop' || !Number.isInteger(item.sidebarIndex) || item.sidebarIndex! < 1 || item.sidebarIndex! > 200 || positions.has(item.sidebarIndex!)
+        || item.pinnedIndex !== undefined && (!Number.isInteger(item.pinnedIndex) || item.pinnedIndex < 1 || item.pinnedIndex > 10000)) throw new Error('电脑返回的桌面目录无效');
+      seen.add(item.sessionKey); positions.add(item.sidebarIndex!); return item;
+    }).sort((a, b) => a.sidebarIndex! - b.sidebarIndex!);
+    set(current => { const entry = current.sessions[deviceId];
+      return { sessions: { ...current.sessions, [deviceId]: { ...entry, native: { list, loading: false, loaded: true } } } }; });
+  } catch (error) {
+    if (!currentRequest()) return;
+    set(current => { const entry = current.sessions[deviceId];
+      return { sessions: { ...current.sessions, [deviceId]: { ...entry, native: { ...entry.native!, loading: false, loaded: true, error: (error as Error).message } } } }; });
+    throw error;
+  }
+}
+async function readSessions(deviceId: string, agent: AgentId | undefined, more: boolean, preservePages = false): Promise<void> {
+  const owner = need();
+  const entry = state.sessions[deviceId] ?? { list: [], loading: false, loaded: false };
+  const preserve = Boolean(agent && preservePages && entry.pages?.[agent]);
+  // Automatic head refresh must not supersede a user's in-flight older page.
+  if (preserve && agent && entry.pages?.[agent]?.loading) return;
+  const cursor = agent && more ? entry.pages?.[agent]?.nextCursor : undefined;
+  if (more && (!cursor || agent && entry.pages?.[agent]?.loading)) return;
+  const requestKey = `sessions:${deviceId}:${agent ?? 'all'}`;
+  const revision = (sessionRequests.get(requestKey) ?? 0) + 1;
+  sessionRequests.set(requestKey, revision);
+  const currentRequest = () => owner === hub && sessionRequests.get(requestKey) === revision;
+  set(current => ({ sessions: { ...current.sessions, [deviceId]: { ...(current.sessions[deviceId] ?? entry),
+    ...(more ? {} : { loading: true, error: undefined }),
+    ...(agent ? { pages: { ...current.sessions[deviceId]?.pages, [agent]: { ...(more || preserve ? entry.pages?.[agent] : {}), loading: true } } } : {}) } } }));
+  try {
+    const result = await runCommand<{ sessions?: SessionInfo[]; nextCursor?: string }>(owner, deviceId, { type: 'sessions.list',
+      ...(agent ? { tool: agent === 'codex' ? 'codex' : 'claude', limit: 100, ...(agent === 'codex' ? {} : { client: agent === 'claude-desktop' ? 'desktop-code' : 'code' }) } : {}),
+      ...(cursor ? { cursor } : {}) });
+    if (!currentRequest()) return;
+    const nextCursor = safePageCursor(result.nextCursor);
+    if (cursor && nextCursor === cursor) throw new Error('电脑没有推进读取位置，请刷新');
+    const received = [...(result.sessions ?? [])].filter(item => item && typeof item.sessionKey === 'string' && (!agent || sessionMatchesAgent(item, agent)));
+    set(current => {
+      const latest = current.sessions[deviceId] ?? entry;
+      const previous = more || preserve ? latest.list : agent ? latest.list.filter(item => !sessionMatchesAgent(item, agent)) : [];
+      const list = [...new Map([...previous, ...received].map(item => [item.sessionKey, item])).values()].sort((a, b) => b.updatedAt - a.updatedAt);
+      return { sessions: { ...current.sessions, [deviceId]: { ...latest, list, loading: false, loaded: true, error: undefined,
+        ...(agent ? { pages: { ...latest.pages, [agent]: { nextCursor: preserve ? entry.pages?.[agent]?.nextCursor : nextCursor, loading: false } } } : {}) } } };
     });
   } catch (error) {
-    set((current) => ({ timelines: { ...current.timelines, [key]: { ...(current.timelines[key] ?? EMPTY_TIMELINE), loading: false, error: (error as Error).message } } }));
+    if (!currentRequest()) return;
+    set(current => ({ sessions: { ...current.sessions, [deviceId]: { ...(current.sessions[deviceId] ?? entry), loading: false, loaded: true,
+      ...(more ? {} : { error: (error as Error).message }),
+      ...(agent ? { pages: { ...current.sessions[deviceId]?.pages, [agent]: { ...(more || preserve ? entry.pages?.[agent] : {}), loading: false, error: (error as Error).message } } } : {}) } } }));
     throw error;
   }
 }
 
-export async function startSession(deviceId: string, input: { tool: ToolId; cwd: string; prompt: string; model?: string; approval: ApprovalMode }): Promise<string> {
-  const result = await command<{ sessionKey?: string }>(need(), deviceId, { type: 'session.start', ...input, model: input.model?.trim() || undefined });
+export async function openSession(deviceId: string, sessionKey: string, options?: { background?: boolean }): Promise<void> {
+  const owner = need();
+  const key = timelineKey(deviceId, sessionKey);
+  const revisionKey = `open:${key}`;
+  const revision = (sessionRequests.get(revisionKey) ?? 0) + 1;
+  sessionRequests.set(revisionKey, revision);
+  if (!options?.background) sessionRequests.set(`history:${key}`, (sessionRequests.get(`history:${key}`) ?? 0) + 1);
+  const currentRequest = () => owner === hub && sessionRequests.get(revisionKey) === revision;
+  const snapshotStartedAt = Date.now();
+  const native = isNativeSession(deviceId, sessionKey);
+  const readOnly = isReadOnlyDesktopSession(sessionKey);
+  let lease = '';
+  const originalApprovals = new Map((state.timelines[key]?.items ?? []).filter(item => item.kind === 'approval').map(item => [item.id, item]));
+  set(current => {
+    const identity = readOnly ? current.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory?.identity : undefined;
+    const cached = current.timelines[key] ?? EMPTY_TIMELINE;
+    const existing = readOnly && (!identity || cached.historyLease !== identity) ? EMPTY_TIMELINE : cached;
+    return { timelines: { ...current.timelines, [key]: { ...existing,
+      ...(readOnly ? { historyLease: identity } : {}), loading: options?.background && existing.snapshotAt ? false : true, error: undefined,
+      ...(options?.background ? {} : { loadingEarlier: false, earlierError: undefined }) } } };
+  });
+  try {
+    lease = native ? nativeLeaseIdentity(deviceId, sessionKey) : readOnly ? claudeHistoryIdentity(deviceId) : '';
+    const historyScope = readOnly ? await resolveClaudeHistoryScope(owner, deviceId, sessionKey, lease) : undefined;
+    // Capture a baseline before reading the computer. Anything produced during
+    // that read remains available to the next incremental request.
+    const head = native || readOnly ? { lastSeq: 0, nextSeq: 0 } : await sessionEventsPage(owner, deviceId, sessionKey, 0, 0, 1);
+    if (!currentRequest()) return;
+    const result = await runCommand<{ session?: SessionInfo; events?: HubEvent[]; nextCursor?: string; historyIdentity?: string }>(owner, deviceId,
+      native ? { type: 'desktop.session.open', sessionKey, controlSurface: 'desktop' } : { type: 'session.open', sessionKey, limit: 400, ...(readOnly ? { controlSurface: 'read-only' as const, historyIdentity: lease, client: historyScope } : {}) });
+    if (!currentRequest()) return;
+    if (!result.session || result.session.sessionKey !== sessionKey) throw new Error('会话身份不一致，已取消读取');
+    if (native && (nativeLeaseIdentity(deviceId, sessionKey) !== lease || result.session.controlSurface !== 'desktop' || result.session.tool !== 'codex')) throw new Error('桌面授权已更新，请重新读取');
+    if (readOnly && (claudeHistoryIdentity(deviceId) !== lease || result.historyIdentity !== lease)) throw new Error('桌面账号已变更，请刷新');
+    if (historyScope && !validClaudeHistorySession(result.session, sessionKey, historyScope)) throw new Error('桌面会话身份不一致，已取消读取');
+    const history = (result.events ?? []).filter((event) => event.sessionKey === sessionKey
+      && (!event.deviceId || event.deviceId === deviceId)
+      && (event.type !== 'session.updated' || event.session.sessionKey === sessionKey)
+      && (!readOnly || event.tool === 'claude' && event.type !== 'approval.request' && event.type !== 'approval.resolved'
+        && (event.type !== 'session.updated' || validClaudeHistorySession(event.session, sessionKey, historyScope!))));
+    set((current) => {
+      const cached = current.timelines[key] ?? EMPTY_TIMELINE;
+      const existing = readOnly && cached.historyLease !== lease ? EMPTY_TIMELINE : cached;
+      const concurrentApprovals = new Set(existing.items.filter(item => item.kind === 'approval' && originalApprovals.get(item.id) !== item).map(item => item.id));
+      const keepFrontier = Boolean((native || readOnly) && options?.background && existing.historyLease === lease && existing.historyExpanded);
+      const timeline = { ...mergeHistory(existing, result.session, history, concurrentApprovals), cachedAt: undefined, snapshotAt: Date.now(), snapshotStartedAt,
+        nextCursor: keepFrontier ? existing.nextCursor : safePageCursor(result.nextCursor), historyLease: native || readOnly ? lease : undefined,
+        historyExpanded: keepFrontier, loadingEarlier: options?.background ? existing.loadingEarlier : false,
+        earlierError: options?.background ? existing.earlierError : undefined };
+      const approvals = { ...current.approvals };
+      // A fresh snapshot reconciles approvals for this thread only. Do not
+      // resurrect a days-old request merely because it was once cached.
+      for (const [id, approval] of Object.entries(approvals)) {
+        if (approval.deviceId === deviceId && approval.sessionKey === sessionKey) delete approvals[id];
+      }
+      for (const item of timeline.items) {
+        if (item.kind === 'approval' && item.state === 'pending' && (!item.expiresAt || item.expiresAt > Date.now())) approvals[item.id] = { approvalId: item.id, deviceId, sessionKey, tool: timeline.session?.tool ?? 'codex', title: item.title, ts: item.ts };
+        else if (item.kind === 'approval') delete approvals[item.id];
+      }
+      const entry = current.sessions[deviceId];
+      const sessions = entry && result.session ? { ...current.sessions, [deviceId]: { ...entry,
+        list: entry.list.map((item) => item.sessionKey === sessionKey ? result.session! : item),
+        ...(entry.native ? { native: { ...entry.native, list: entry.native.list.map(item => item.sessionKey === sessionKey ? { ...result.session!, sidebarIndex: item.sidebarIndex, pinnedIndex: item.pinnedIndex } : item) } } : {}) } } : current.sessions;
+      return { timelines: { ...current.timelines, [key]: timeline }, approvals, sessions };
+    });
+    sessionCursors.set(key, Math.max(head.lastSeq, head.nextSeq));
+    sessionApprovalSnapshots.set(key, Math.max(head.lastSeq, head.nextSeq));
+  } catch (error) {
+    if (!currentRequest()) return;
+    if (readOnly && lease && state.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory?.identity !== lease) throw error;
+    set((current) => ({ timelines: { ...current.timelines, [key]: { ...(current.timelines[key] ?? EMPTY_TIMELINE),
+      session: current.timelines[key]?.session ?? (native ? current.sessions[deviceId]?.native?.list : current.sessions[deviceId]?.list)?.find((item) => item.sessionKey === sessionKey),
+      loading: false, error: (error as Error).message } } }));
+    throw error;
+  }
+}
+
+/** Older history is local-computer data, not an extension of server event retention. */
+export async function loadEarlierHistory(deviceId: string, sessionKey: string): Promise<void> {
+  const owner = need(), key = timelineKey(deviceId, sessionKey);
+  const original = state.timelines[key];
+  if (!original?.nextCursor || original.loading || original.loadingEarlier) return;
+  const cursor = original.nextCursor, historyRevision = sessionRequests.get(`history:${key}`);
+  const pageKey = `earlier:${key}`, revision = (sessionRequests.get(pageKey) ?? 0) + 1;
+  sessionRequests.set(pageKey, revision);
+  const currentRequest = () => owner === hub && sessionRequests.get(pageKey) === revision && sessionRequests.get(`history:${key}`) === historyRevision;
+  const readOnly = isReadOnlyDesktopSession(sessionKey);
+  let lease = '';
+  set(current => ({ timelines: { ...current.timelines, [key]: { ...current.timelines[key], loadingEarlier: true, earlierError: undefined } } }));
+  try {
+    const native = original.session?.controlSurface === 'desktop';
+    lease = native ? nativeLeaseIdentity(deviceId, sessionKey) : readOnly ? claudeHistoryIdentity(deviceId) : '';
+    if (readOnly && original.historyLease !== lease) throw new Error('桌面账号已变更，请刷新');
+    const historyScope = readOnly ? await resolveClaudeHistoryScope(owner, deviceId, sessionKey, lease) : undefined;
+    const result = await runCommand<{ session?: SessionInfo; events?: HubEvent[]; nextCursor?: string; historyIdentity?: string }>(owner, deviceId,
+      native ? { type: 'desktop.session.open', sessionKey, cursor, controlSurface: 'desktop' } : { type: 'session.open', sessionKey, cursor, limit: 400, ...(readOnly ? { controlSurface: 'read-only' as const, historyIdentity: lease, client: historyScope } : {}) });
+    if (!currentRequest()) return;
+    if (result.session?.sessionKey !== sessionKey) throw new Error('会话身份不一致，已取消读取');
+    if (native && (nativeLeaseIdentity(deviceId, sessionKey) !== lease || result.session.controlSurface !== 'desktop' || result.session.tool !== 'codex')) throw new Error('桌面授权已更新，请重新读取');
+    if (readOnly && (claudeHistoryIdentity(deviceId) !== lease || result.historyIdentity !== lease)) throw new Error('桌面账号已变更，请刷新');
+    if (historyScope && !validClaudeHistorySession(result.session, sessionKey, historyScope)) throw new Error('桌面会话身份不一致，已取消读取');
+    const nextCursor = safePageCursor(result.nextCursor);
+    if (nextCursor === cursor) throw new Error('电脑没有推进读取位置，请刷新');
+    let older: Timeline = EMPTY_TIMELINE;
+    for (const event of result.events ?? []) {
+      if (event.sessionKey !== sessionKey || event.deviceId && event.deviceId !== deviceId || event.type === 'approval.request' || event.type === 'approval.resolved' || event.type === 'session.updated') continue;
+      if (readOnly && event.tool !== 'claude') continue;
+      older = applyEvent(older, event);
+    }
+    set(current => {
+      const cached = current.timelines[key];
+      const latest = readOnly && cached?.historyLease !== lease ? { ...EMPTY_TIMELINE, session: result.session, historyLease: lease } : cached ?? EMPTY_TIMELINE;
+      const items = [...new Map([...older.items, ...latest.items].map(item => [`${item.kind}|${item.id}`, item])).values()].sort((a, b) => a.ts - b.ts);
+      return { timelines: { ...current.timelines, [key]: { ...latest, items, nextCursor, historyExpanded: true, loadingEarlier: false, earlierError: undefined } } };
+    });
+  } catch (error) {
+    if (!currentRequest()) return;
+    if (readOnly && lease && state.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory?.identity !== lease) throw error;
+    set(current => ({ timelines: { ...current.timelines, [key]: { ...current.timelines[key], loadingEarlier: false, earlierError: (error as Error).message } } }));
+    throw error;
+  }
+}
+
+/** Sends phone images to the computer in Hub-sized chunks; returns their ids. */
+export async function uploadImages(deviceId: string, images: RemoteImage[], owner: Hub = need()): Promise<string[]> {
+  const ids: string[] = [];
+  for (const image of images) {
+    const id = `att_${randomUUID().replace(/-/g, '')}`;
+    const chunks = attachmentChunks(image.base64);
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (owner !== hub) throw new Error('连接已切换，图片未发送');
+      await command(owner, deviceId, { type: 'attachment.put', id, mime: image.mime, index, total: chunks.length, data: chunks[index] });
+      if (owner !== hub) throw new Error('连接已切换，图片未发送');
+    }
+    ids.push(id);
+  }
+  return ids;
+}
+
+export async function startSession(deviceId: string, input: { tool: ToolId; cwd: string; prompt: string; model?: string; effort?: Effort; approval: ApprovalMode; images?: RemoteImage[]; desktop?: boolean }): Promise<string> {
+  const owner = need();
+  if (apiMutationOwners.get(owner)?.has(deviceId)) throw new Error('API 正在切换，请稍候');
+  const attachments = input.images?.length ? await uploadImages(deviceId, input.images, owner) : [];
+  if (owner !== hub) throw new Error('连接已切换，任务未发送');
+  if (apiMutationOwners.get(owner)?.has(deviceId)) throw new Error('API 正在切换，请稍候');
+  const result = await command<{ sessionKey?: string }>(owner, deviceId, { type: 'session.start', tool: input.tool, cwd: input.cwd, prompt: input.prompt, approval: input.approval,
+    model: input.model?.trim() || undefined, ...(input.effort ? { effort: input.effort } : {}), ...(attachments.length ? { attachments } : {}),
+    ...(input.desktop && input.tool === 'claude' ? { entrypoint: 'claude-desktop' as const } : {}) });
+  if (owner !== hub) throw new Error('连接已切换，原电脑上的任务不会被转移');
   if (!result.sessionKey) throw new Error('电脑没有返回新会话');
   const key = timelineKey(deviceId, result.sessionKey);
   set((current) => {
     const existing = current.timelines[key] ?? EMPTY_TIMELINE;
     const hasPrompt = existing.items.some((item) => item.kind === 'message' && item.role === 'user');
-    return { timelines: { ...current.timelines, [key]: hasPrompt ? existing : { ...existing, items: [{ kind: 'message', id: `local:${Date.now()}`, role: 'user', text: input.prompt, final: true, ts: Date.now(), local: true }, ...existing.items] } } };
+    return { timelines: { ...current.timelines, [key]: hasPrompt ? existing : { ...existing, items: [{ kind: 'message', id: `local:${Date.now()}`, role: 'user', text: input.prompt, final: true, ts: Date.now(), local: true, images: input.images?.map((image) => image.uri) }, ...existing.items] } } };
   });
   return result.sessionKey;
 }
 
-export async function sendToSession(deviceId: string, sessionKey: string, text: string): Promise<void> {
+export interface SendOptions { model?: string; effort?: Effort; images?: RemoteImage[]; surface?: 'cli' | 'desktop' }
+
+/** Continues a thread on the computer. Shows the message immediately; the computer's echo replaces it. */
+export async function sendToSession(deviceId: string, sessionKey: string, text: string, options: SendOptions = {}): Promise<void> {
+  if (isReadOnlyDesktopSession(sessionKey) || state.timelines[timelineKey(deviceId, sessionKey)]?.session?.controlSurface === 'read-only') throw new Error('这个桌面对话目前只支持查看');
+  const owner = need();
+  if (apiMutationOwners.get(owner)?.has(deviceId)) throw new Error('API 正在切换，请稍候');
+  const scope = remoteDeliveryScope();
+  const previous = await pendingDelivery(scope, deviceId, sessionKey);
+  const surface = previous?.surface ?? options.surface ?? 'cli';
+  const idempotent = await retryCapability(owner, previous?.attempted === true);
+  if (owner !== hub) throw new Error('连接已切换，消息未从新连接发送');
+  if (apiMutationOwners.get(owner)?.has(deviceId)) throw new Error('API 正在切换，请稍候');
   const key = timelineKey(deviceId, sessionKey);
-  const id = `local:${Date.now()}`;
-  const optimistic: TimelineItem = { kind: 'message', id, role: 'user', text, final: true, ts: Date.now(), local: true };
-  set((current) => ({ timelines: { ...current.timelines, [key]: { ...(current.timelines[key] ?? EMPTY_TIMELINE), items: [...(current.timelines[key]?.items ?? []), optimistic] } } }));
+  const localId = `local:${Date.now()}`;
+  let originalSession: SessionInfo | undefined, optimisticSession: SessionInfo | undefined;
+  let originalItems = new Set<TimelineItem>();
+  set((current) => {
+    const timeline = current.timelines[key] ?? EMPTY_TIMELINE;
+    if (timeline.items.some((item) => item.kind === 'message' && item.local && item.text.trim() === text.trim())) return {};
+    originalSession = timeline.session; originalItems = new Set(timeline.items);
+    optimisticSession = timeline.session ? { ...timeline.session, status: 'running' } : undefined;
+    return { timelines: { ...current.timelines, [key]: { ...timeline, items: [...timeline.items, { kind: 'message', id: localId, role: 'user', text, final: true, ts: Date.now(), local: true, images: options.images?.map((image) => image.uri) }],
+      session: optimisticSession } } };
+  });
   try {
-    await command(need(), deviceId, { type: 'session.send', sessionKey, text });
+    // A retried message reuses the images already on the computer.
+    const attachments = previous?.attachments ?? (options.images?.length ? await uploadImages(deviceId, options.images, owner) : undefined);
+    await deliverMessage({ scope, deviceId, sessionKey, surface, text, idempotent, attachments, sendOptions: { ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) },
+      perform: async (receipt) => {
+        if (owner !== hub) throw new HubError('连接已切换，尚未发送消息', 200, 'request_scope_changed');
+        if (apiMutationOwners.get(owner)?.has(deviceId)) throw new HubError('API 正在切换，请稍候', 429, 'api_switching');
+        const frozenOptions = receipt.sendOptions ?? options; // Pre-upgrade receipts retain their original compatibility behavior.
+        await runCommand(owner, deviceId, { type: 'session.send', sessionKey, text, controlSurface: receipt.surface, operationId: receipt.requestId,
+          ...(frozenOptions.model ? { model: frozenOptions.model } : {}), ...(frozenOptions.effort ? { effort: frozenOptions.effort } : {}),
+          ...(receipt.attachments?.length ? { attachments: receipt.attachments } : {}) }, receipt.requestId);
+        if (owner !== hub) throw new HubError('连接已切换，请回原连接确认送达', 409, 'command_delivery_uncertain');
+      } });
   } catch (error) {
-    set((current) => ({ timelines: { ...current.timelines, [key]: { ...(current.timelines[key] ?? EMPTY_TIMELINE), items: (current.timelines[key]?.items ?? []).filter((item) => item.id !== id) } } }));
+    // Keep the bubble only while the phone will retry the same receipt.
+    if (owner === hub && !(error instanceof Error && error.name === 'DeliveryPendingError' && (error as { retryable?: boolean }).retryable)) {
+      set((current) => {
+        const timeline = current.timelines[key];
+        if (!timeline) return {};
+        // An explicit rejection before any actual worker progress must not
+        // leave the API picker locked by our optimistic "running" placeholder.
+        const progressed = timeline.items.some((item) => item.id !== localId && !originalItems.has(item));
+        const restore = !(error instanceof DeliveryPendingError) && originalSession && timeline.session === optimisticSession && !progressed;
+        return { timelines: { ...current.timelines, [key]: { ...timeline, items: timeline.items.filter((item) => item.id !== localId), session: restore ? originalSession : timeline.session } } };
+      });
+    }
     throw error;
   }
 }
 
-export async function interruptSession(deviceId: string, sessionKey: string): Promise<void> {
-  await command(need(), deviceId, { type: 'session.interrupt', sessionKey });
+const CODEX_THREAD = /^codex:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CLAUDE_SESSION = /^claude:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Codex threads open in the Codex app; Claude Desktop sessions bring up Claude Desktop. */
+export function canOpenOnDesktop(sessionKey: string, client?: string): boolean {
+  return CODEX_THREAD.test(sessionKey) || (CLAUDE_SESSION.test(sessionKey) && /Claude Desktop/i.test(client ?? ''));
+}
+/** Asks the computer to show this thread in its desktop app. Sends nothing. */
+export async function openOnDesktop(deviceId: string, sessionKey: string, client?: string): Promise<void> {
+  if (!canOpenOnDesktop(sessionKey, client)) throw new Error('这个对话没有对应的桌面应用');
+  await command(need(), deviceId, { type: 'desktop.navigate', sessionKey, controlSurface: 'desktop' });
 }
 
-export async function respondApproval(approval: { approvalId: string; deviceId: string; sessionKey: string }, decision: Decision, message?: string): Promise<void> {
-  await command(need(), approval.deviceId, { type: 'approval.respond', approvalId: approval.approvalId, decision, message: message?.trim() || undefined });
+export async function interruptSession(deviceId: string, sessionKey: string): Promise<void> {
+  if (isReadOnlyDesktopSession(sessionKey)) throw new Error('这个桌面对话目前只支持查看');
+  await command(need(), deviceId, { type: 'session.interrupt', sessionKey, controlSurface: 'cli' });
+}
+
+export interface ApprovalReceipt { requestId: string; retrying: boolean; scope: string; expiresAt?: number; signal: AbortSignal }
+export async function respondApproval(approval: { approvalId: string; deviceId: string; sessionKey: string; controlSurface?: 'cli' | 'desktop' }, decision: Decision, message?: string, answers?: QuestionAnswers, receipt?: ApprovalReceipt): Promise<void> {
+  if (isReadOnlyDesktopSession(approval.sessionKey)) throw new Error('这个桌面对话目前只支持查看');
+  const owner = need();
+  const guard = () => {
+    if (!receipt) return;
+    if (receipt.signal.aborted || owner !== hub || receipt.scope !== remoteDeliveryScope()) throw new HubError('连接已切换，回答没有从新连接发送', 200, 'request_scope_changed');
+    if (receipt.expiresAt && receipt.expiresAt <= Date.now()) throw new HubError('问题已过期，请刷新', 200, 'question_expired');
+  };
+  guard();
+  // Lost acknowledgements may only be retried on a Hub with durable deduplication.
+  if (receipt?.retrying && !(await retryCapability(owner, true))) throw new HubError('本站不支持安全重试，请先核对电脑上的问题', 200, 'question_retry_unsupported');
+  guard();
+  const timeline = state.timelines[`${approval.deviceId}|${approval.sessionKey}`];
+  const item = timeline?.items.find(value => value.kind === 'approval' && value.id === approval.approvalId);
+  const native = approval.controlSurface === 'desktop' || timeline?.session?.controlSurface === 'desktop' || item?.kind === 'approval' && item.approvalTransport === 'codex-hook-v1';
+  if (native) {
+    if (item?.kind !== 'approval' || item.approvalTransport !== 'codex-hook-v1' || item.state !== 'pending'
+        || !item.expiresAt || item.expiresAt <= Date.now() || decision === 'allow_session' || answers) throw new HubError('这个桌面请求请在电脑处理', 200, 'desktop_capability_unavailable');
+    const operationId = receipt?.requestId ?? randomUUID();
+    await command(owner, approval.deviceId, { type: 'desktop.approval.respond', sessionKey: approval.sessionKey, approvalId: approval.approvalId, decision,
+      message: message?.trim() || undefined, operationId, controlSurface: 'desktop' }, operationId);
+  } else {
+    await command(owner, approval.deviceId, { type: 'approval.respond', approvalId: approval.approvalId, decision, message: message?.trim() || undefined, ...(answers ? { answers } : {}), controlSurface: 'cli' }, receipt?.requestId);
+  }
+  if (owner !== hub) throw new HubError('请回原连接核对回答', 409, 'command_delivery_uncertain');
   handleEvent({ type: 'approval.resolved', approvalId: approval.approvalId, decision, by: 'phone', deviceId: approval.deviceId, sessionKey: approval.sessionKey, tool: 'codex', ts: Date.now() });
 }
 
 export async function listProjects(deviceId: string): Promise<Project[]> {
-  const result = await command<{ projects?: Project[] }>(need(), deviceId, { type: 'projects.list' });
+  const owner = need();
+  const result = await command<{ projects?: Project[] }>(owner, deviceId, { type: 'projects.list' });
+  if (owner !== hub) throw new Error('连接已切换');
   return result.projects ?? [];
 }
 
-export async function listModels(deviceId: string, tool: ToolId): Promise<string[]> {
-  try { return (await command<{ models?: string[] }>(need(), deviceId, { type: 'models.list', tool })).models ?? []; } catch { return []; }
+/** The selected API's upstream models (cached per computer and agent; refresh re-reads the provider). */
+const modelCache = new Map<string, ModelCatalog>();
+const modelRequests = new Map<string, number>();
+export function cachedModels(deviceId: string, tool: ToolId): ModelCatalog | undefined { return modelCache.get(`${deviceId}|${tool}`); }
+export async function listModels(deviceId: string, tool: ToolId, refresh = false): Promise<ModelCatalog> {
+  const owner = need();
+  const cacheKey = `${deviceId}|${tool}`;
+  const revision = (modelRequests.get(cacheKey) ?? 0) + 1;
+  modelRequests.set(cacheKey, revision);
+  const result = await command<{ models?: string[]; api?: string; modelCapabilities?: unknown }>(owner, deviceId, { type: 'models.list', tool, ...(refresh ? { refresh: true } : {}) });
+  if (owner !== hub || modelRequests.get(cacheKey) !== revision) throw new Error('API 或连接已切换，请重新读取模型');
+  const models = Array.from(new Set(Array.isArray(result.models) ? result.models.filter((item): item is string =>
+    typeof item === 'string' && item.length > 0 && item.length <= 200 && item.trim() === item && !/[\r\n\u0000]/.test(item)) : [])).slice(0, 1000);
+  const raw = result.modelCapabilities && typeof result.modelCapabilities === 'object' && !Array.isArray(result.modelCapabilities) ? result.modelCapabilities as Record<string, unknown> : {};
+  const modelCapabilities = Object.fromEntries(models.map(id => {
+    const entry = raw[id] && typeof raw[id] === 'object' ? raw[id] as Record<string, unknown> : {};
+    const source: ModelCapability['source'] = entry.source === 'codex-model-list' || entry.source === 'relay-model-list' ? entry.source : 'unknown';
+    const known = source === 'codex-model-list' && entry.reasoningKnown === true && Array.isArray(entry.reasoningEfforts);
+    const efforts = Array.isArray(entry.reasoningEfforts) ? entry.reasoningEfforts.filter(isEffort) : [];
+    const modalities = Array.isArray(entry.inputModalities) ? entry.inputModalities : [];
+    const capability: ModelCapability = { source, reasoningKnown: known,
+      ...(known ? { reasoningEfforts: CODEX_EFFORTS.filter(value => efforts.includes(value)) } : {}),
+      ...(source === 'codex-model-list' && Array.isArray(entry.inputModalities) ? { inputModalities: ['text', 'image'].filter(value => modalities.includes(value)) as Array<'text' | 'image'> } : {}) };
+    return [id, capability];
+  }));
+  const value: ModelCatalog = { models, modelCapabilities, api: typeof result.api === 'string' ? result.api : undefined };
+  modelCache.set(`${deviceId}|${tool}`, value);
+  return value;
 }
 
 /** Test hook. */
-export function resetRemoteForTests() { stopStream(); hub = null; lastSeq = 0; booted = false; state = initial; }
+export function resetRemoteForTests() { resetRemoteCacheForTests(); modelCache.clear(); modelRequests.clear(); apiChanges.clear(); stopStream(); connectionGeneration += 1; hub = null; lastSeq = 0; booted = false; screenOpen = false; hubCapabilities.clear(); sessionCursors.clear(); sessionApprovalSnapshots.clear(); sessionRequests.clear(); agentRequests.clear(); resetDeliveryForTests(); state = initial; }

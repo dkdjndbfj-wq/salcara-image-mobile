@@ -8,7 +8,7 @@ import { BLANK_CHARACTER, CHARACTER_COLORS, CHARACTER_TEMPLATES, type CharacterD
 import { clearBox, updateCharacter, useCharacters } from '../memorybox/store';
 import type { Character, MemoryMode } from '../memorybox/types';
 import { useApp } from '../state/AppContext';
-import { colors } from '../theme';
+import { colors, themed } from '../theme';
 import { deleteAvatar, pickAvatar } from './avatar';
 import { CharacterAvatar } from './CharacterAvatar';
 import { warm } from './theme';
@@ -30,6 +30,7 @@ function toDraft(character: Character): CharacterDraft {
 export function CharacterSheet({ visible, characterId, onClose, onCreated }: {
   visible: boolean; characterId: string | null; onClose: () => void; onCreated?: (character: Character) => void;
 }) {
+  const styles = useStyles();
   const app = useApp();
   const characters = useCharacters();
   const existing = characters.find((item) => item.id === characterId) ?? null;
@@ -186,6 +187,7 @@ export function CharacterSheet({ visible, characterId, onClose, onCreated }: {
 }
 
 function MenuTile({ icon, label, onPress }: { icon: 'image' | 'camera' | 'trash'; label: string; onPress: () => void }) {
+  const styles = useStyles();
   return <MotionPressable scaleTo={0.94} accessibilityRole="button" accessibilityLabel={label} onPress={onPress} wrapperStyle={{ flex: 1 }} style={styles.menuTile}>
     <View style={[styles.menuIcon, icon === 'trash' && { backgroundColor: colors.dangerSurface }]}><Icon name={icon} size={22} color={icon === 'trash' ? colors.danger : warm.accent} /></View>
     <Text style={styles.menuLabel}>{label}</Text>
@@ -193,6 +195,7 @@ function MenuTile({ icon, label, onPress }: { icon: 'image' | 'camera' | 'trash'
 }
 
 function Field({ label, value, onChange, lines, placeholder }: { label: string; value: string; onChange: (value: string) => void; lines: number; placeholder: string }) {
+  const styles = useStyles();
   return <View>
     <SectionLabel>{label}</SectionLabel>
     <TextInput value={value} onChangeText={onChange} multiline={lines > 1} textAlignVertical={lines > 1 ? 'top' : 'center'} placeholder={placeholder} placeholderTextColor={warm.faint}
@@ -200,7 +203,7 @@ function Field({ label, value, onChange, lines, placeholder }: { label: string; 
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 28 },
   lead: { color: warm.muted, fontSize: 14.5, lineHeight: 22, marginTop: 8, marginBottom: 16, marginHorizontal: 4 },
   templates: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
@@ -230,4 +233,4 @@ const styles = StyleSheet.create({
   dangerRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, paddingHorizontal: 6 },
   modelNote: { color: warm.muted, fontSize: 12.5, lineHeight: 18, marginTop: 18, marginHorizontal: 6 },
   dangerText: { color: colors.danger, fontSize: 15, fontWeight: '500' },
-});
+}));

@@ -4,7 +4,7 @@ import { ActivityIndicator, Platform, ScrollView, StyleSheet, Text, View } from 
 
 import { extensionOf, readGeneratedFile, shareGeneratedFile } from '../agent/files';
 import type { GeneratedFile } from '../agent/types';
-import { colors, radius } from '../theme';
+import { colors, radius, themed } from '../theme';
 import { MessageContent } from './MessageContent';
 import { PrimaryButton, Sheet, showToast } from './ui';
 
@@ -33,6 +33,7 @@ export function parseCsv(text: string, delimiter = ','): string[][] {
 }
 
 export function FilePreviewSheet({ file, onClose }: { file: GeneratedFile | null; onClose: () => void }) {
+  const styles = useStyles();
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -73,7 +74,7 @@ export function FilePreviewSheet({ file, onClose }: { file: GeneratedFile | null
 /** iOS has no font named “monospace”. */
 const MONO = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 12 },
   footer: { flexDirection: 'row', gap: 10 },
   error: { color: colors.danger, fontSize: 14, marginTop: 20 },
@@ -83,4 +84,4 @@ const styles = StyleSheet.create({
   cell: { width: 128, paddingHorizontal: 10, paddingVertical: 8, fontSize: 13, color: colors.text, borderLeftWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   headText: { fontWeight: '600' },
   code: { fontFamily: MONO, fontSize: 12.5, lineHeight: 19, color: colors.textSecondary },
-});
+}));

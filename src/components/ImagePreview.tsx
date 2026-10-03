@@ -4,7 +4,7 @@ import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 
-import { colors, radius } from '../theme';
+import { colors, radius, themed } from '../theme';
 import { Icon } from './Icon';
 import { ToastHost } from './ui';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,6 +13,7 @@ const MIN_SCALE = 1;
 const MAX_SCALE = 5;
 
 export function ImagePreview({ uri, onClose, onSave, onShare }: { uri: string | null; onClose: () => void; onSave?: (uri: string) => void; onShare?: (uri: string) => void }) {
+  const styles = useStyles();
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);
   const translateX = useSharedValue(0);
@@ -115,7 +116,7 @@ export function ImagePreview({ uri, onClose, onSave, onShare }: { uri: string | 
     </GestureHandlerRootView>
   </Modal>;
 }
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   modalRoot: { flex: 1 }, preview: { flex: 1, backgroundColor: '#05080F', alignItems: 'center' },
   topBar: { width: '100%', minHeight: 60, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 2 },
   zoomGroup: { flexDirection: 'row', gap: 8 },
@@ -124,7 +125,7 @@ const styles = StyleSheet.create({
   previewImage: { width: '100%', height: '100%' },
   bottomBar: { width: '100%', paddingHorizontal: 20, paddingVertical: 14, flexDirection: 'row', gap: 10 },
   action: { flex: 1, height: 52, flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.12)' },
-  actionPrimary: { backgroundColor: '#FFFFFF' },
+  actionPrimary: { backgroundColor: c.card },
   actionText: { color: '#fff', fontSize: 15.5, fontWeight: '600' },
   actionTextDark: { color: colors.text, fontSize: 15.5, fontWeight: '600' },
-});
+}));

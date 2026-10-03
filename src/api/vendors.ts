@@ -1,3 +1,4 @@
+import { PROMO, promoUrl } from '../promo';
 import type { ChatApi } from '../domain';
 
 /**
@@ -114,6 +115,15 @@ const QWEN_REALTIME_VOICES: VoiceOption[] = [
 
 export const VENDORS: Vendor[] = [
   // ——— 国内 ———
+  // Official relay first (see src/promo.ts); any other relay still works through “其他 · OpenAI 兼容”.
+  ...(PROMO.enabled ? [{
+    id: 'salcara', name: 'Salcara 中转站', region: 'cn' as const, blurb: '官方推荐 · 一个 Key 用 Claude、GPT 等模型', baseUrl: 'https://salcara.top/v1', chatApi: 'chat-completions' as const, lists: true, image: true,
+    keyUrl: promoUrl('provider'),
+    // Same OpenAI-compatible capabilities as “其他 · OpenAI 兼容”, so an existing salcara.top service keeps voice features.
+    stt: { protocol: 'openai' as const, models: ['gpt-4o-mini-transcribe', 'whisper-1'] },
+    tts: { protocol: 'openai' as const, models: ['gpt-4o-mini-tts', 'tts-1'], voices: OPENAI_TTS_VOICES, customVoice: true },
+    realtime: { protocol: 'openai' as const, models: ['gpt-realtime-2.1', 'gpt-realtime'], voices: OPENAI_REALTIME_VOICES, customVoice: true },
+  }] : []),
   { id: 'deepseek', name: 'DeepSeek', region: 'cn', blurb: '对话', baseUrl: 'https://api.deepseek.com/v1', chatApi: 'chat-completions', lists: true, prefer: /deepseek-chat/, keyUrl: 'https://platform.deepseek.com/api_keys' },
   {
     id: 'dashscope', name: '阿里云百炼 · 通义', region: 'cn', blurb: '对话、绘图、语音识别 / 合成、实时语音',

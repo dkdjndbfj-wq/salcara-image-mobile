@@ -4,15 +4,15 @@ import { File, Paths } from 'expo-file-system';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 
-import { colors, radius, spacing } from '../theme';
+import { colors, radius, spacing, themed } from '../theme';
 import {
-  apkDownloadCandidates, type AppRelease, autoUpdateCheckEnabled, compareVersions, fetchLatestRelease, formatBytes, IOS_UPDATE_URL, updateInstallMode,
+  apkDownloadCandidates, type AppRelease, autoUpdateCheckEnabled, compareVersions, fetchLatestRelease, formatBytes, IOS_UPDATE_URL, productionUpdateCheckEnabled, updateInstallMode,
 } from '../update';
 import { AppDialog, type DialogAction } from './ui';
 import { networkFailureMessage } from '../api/network';
-import { verifyDownloadedApk } from '../apk-download';
+import { verifyDownloadedApk, withApkDownloadDeadline } from '../apk-download';
 
-type Phase = 'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'permission' | 'error';
+type Phase = 'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'permission' | 'error' | 'test-build';
 
 const INSTALL_MIME = 'application/vnd.android.package-archive';
 const FLAG_GRANT_READ_URI_PERMISSION = 1;
@@ -24,7 +24,9 @@ async function intentLauncher() {
 }
 
 export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }) {
+  const styles = useStyles();
   const currentVersion = Application.nativeApplicationVersion ?? '0.0.0';
+  const productionUpdatesEnabled = productionUpdateCheckEnabled(Application.applicationId);
   /** Android installs the APK in-app; iOS can only point to the App Store / TestFlight (or just show the notes). */
   const installMode = updateInstallMode(Platform.OS);
   const [phase, setPhase] = useState<Phase>('idle');
@@ -40,6 +42,10 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
   const lastManualTokenRef = useRef(0);
 
   const check = useCallback(async (manual: boolean) => {
+    if (!productionUpdatesEnabled) {
+      if (manual) setPhase('test-build');
+      return;
+    }
     if (downloadRef.current) return;
     if (checkingRef.current) {
       if (manual) {
@@ -77,17 +83,17 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
       manualRequestedRef.current = false;
       clearTimeout(timeout);
     }
-  }, [currentVersion]);
+  }, [currentVersion, productionUpdatesEnabled]);
 
   useEffect(() => {
     // iOS without a store link: no silent checks (an Android-only release must not nag iPhone users).
-    if (!autoUpdateCheckEnabled(Platform.OS)) return () => { downloadRef.current?.abort(); };
+    if (!productionUpdatesEnabled || !autoUpdateCheckEnabled(Platform.OS)) return () => { downloadRef.current?.abort(); };
     const timer = setTimeout(() => void check(false), 1_200);
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active' && Date.now() - lastCheckAtRef.current >= nextAutoCheckDelayRef.current) void check(false);
     });
     return () => { clearTimeout(timer); subscription.remove(); downloadRef.current?.abort(); };
-  }, [check]);
+  }, [check, productionUpdatesEnabled]);
 
   useEffect(() => {
     if (manualCheckToken <= 0 || manualCheckToken === lastManualTokenRef.current) return;
@@ -156,19 +162,20 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
         if (controller.signal.aborted) throw new Error('下载已取消');
         remove(temporaryFile);
         try {
-          const downloaded = await File.downloadFileAsync(candidate.url, temporaryFile, {
+          const downloaded = await withApkDownloadDeadline((candidateSignal, keepAlive) => File.downloadFileAsync(candidate.url, temporaryFile, {
             idempotent: true,
-            signal: controller.signal,
+            signal: candidateSignal,
             headers: {
               Accept: 'application/vnd.android.package-archive,application/octet-stream,*/*',
               'User-Agent': 'Salcara-Image-Android',
               ...candidate.headers,
             },
             onProgress: ({ bytesWritten, totalBytes }) => {
+              keepAlive();
               const total = totalBytes > 0 ? totalBytes : release.apk.size;
               setProgress(total > 0 ? Math.min(0.9, bytesWritten / total * 0.9) : 0);
             },
-          });
+          }), controller.signal);
           await verifyDownloadedApk(downloaded.readableStream(), downloaded.size, release.apk, controller.signal, (fraction) => {
             setProgress(0.9 + fraction * 0.1);
           });
@@ -246,7 +253,12 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
   let actions: DialogAction[] = [];
   let dismissible = true;
 
-  if (phase === 'checking') {
+  if (phase === 'test-build') {
+    title = '独立远程测试版';
+    description = `当前版本 ${currentVersion}。测试版不检查或安装正式版更新，请从测试仓库的 GitHub Actions 构建产物下载新 APK。正式版与测试版的数据互不影响。`;
+    icon = 'flask-outline';
+    actions = [{ label: '知道了', tone: 'primary', onPress: close }];
+  } else if (phase === 'checking') {
     title = '正在检查更新';
     description = '正在连接 Salcara 更新站与官方版本清单。';
     actions = [{ label: '请稍候', disabled: true }];
@@ -312,10 +324,10 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   progressArea: { gap: spacing.sm },
   progressTrack: { height: 8, overflow: 'hidden', borderRadius: radius.pill, backgroundColor: colors.blueSurface },
   progressFill: { height: '100%', borderRadius: radius.pill, backgroundColor: colors.primary },
   progressText: { color: colors.primaryStrong, textAlign: 'right', fontSize: 12, fontWeight: '700' },
   digest: { color: colors.textMuted, fontSize: 11, lineHeight: 17 },
-});
+}));

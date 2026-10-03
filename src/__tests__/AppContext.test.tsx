@@ -60,6 +60,18 @@ jest.mock('../storage/database', () => ({
     return removed;
   },
   listMessages: async (id: string) => mockMessages.filter((item) => item.conversationId === id),
+  listRecentMessages: async (id: string, limit: number, before?: number) =>
+    mockMessages.filter((item) => item.conversationId === id && (before === undefined || item.createdAt < before)).slice(-limit),
+  deleteMessageRecords: async (id: string, ids: string[]) => {
+    const removed = mockMessages.filter((item) => item.conversationId === id && ids.includes(item.id));
+    mockMessages = mockMessages.filter((item) => !removed.includes(item));
+    return removed;
+  },
+  deleteMessagesFrom: async (id: string, createdAt: number) => {
+    const removed = mockMessages.filter((item) => item.conversationId === id && item.createdAt >= createdAt);
+    mockMessages = mockMessages.filter((item) => !removed.includes(item));
+    return removed;
+  },
   insertMessage: async (message: ChatMessage) => { mockMessages.push(message); },
   listMemories: async () => [],
   listAgents: async () => [],
@@ -386,4 +398,47 @@ test('image prompts keep the user’s own words unless they lean on earlier cont
   // Says nothing drawable by itself (“画吧”): the drafted prompt is used.
   expect(faithfulPrompt('好，画吧', '一只在云朵上睡觉的橘猫')).toBe('一只在云朵上睡觉的橘猫');
   expect(faithfulPrompt('', '一座雪山')).toBe('一座雪山');
+});
+
+const seeded = (id: string, role: 'user' | 'assistant', createdAt: number, patch: Partial<ChatMessage> = {}): ChatMessage => ({
+  id, conversationId: 'c1', role, prompt: role === 'user' ? `问题 ${id}` : '', mode: 'chat', status: 'complete', providerId: 'chat', model: 'vision-model',
+  quality: 'auto', size: 'auto', transparent: false, imageUri: null, remoteImageUrl: null, references: [], maskUri: null, error: null, elapsedMs: null,
+  createdAt, text: role === 'assistant' ? `回答 ${id}` : null, ...patch,
+} as ChatMessage);
+
+test('editing a sent message replaces it and every later turn; deleting a question takes its answer along', async () => {
+  const old: ReferenceImage = { ...upload, id: 'old', uri: 'file:///old.png' };
+  const kept: ReferenceImage = { ...upload, id: 'kept', uri: 'file:///kept.png' };
+  mockConversations = [{ id: 'c1', title: '旧对话', providerId: 'chat', transparent: false, createdAt: 1, updatedAt: 1 }];
+  mockMessages = [
+    seeded('u1', 'user', 1000), seeded('a1', 'assistant', 1001),
+    seeded('u2', 'user', 2000, { references: [old, kept] }), seeded('a2', 'assistant', 2001),
+    seeded('u3', 'user', 3000), seeded('a3', 'assistant', 3001),
+  ];
+  mockAgent.mockResolvedValue({ text: '新的回答', imageCall: null, images: new Map(), toolMode: 'native' });
+  await mount();
+  await act(async () => { await app.openConversation('c1'); });
+  await act(async () => { await app.editAndResend('u2', { text: '改过的问题', images: [kept] }); });
+  expect(app.messages.map((item) => item.role === 'user' ? item.prompt : item.text)).toEqual(['问题 u1', '回答 a1', '改过的问题', '新的回答']);
+  expect(app.messages[3]).toMatchObject({ role: 'assistant', prompt: '改过的问题', text: '新的回答' });
+  expect(mockMessages.some((item) => ['u2', 'a2', 'u3', 'a3'].includes(item.id))).toBe(false);
+  // The picture carried into the edit stays; the one left out is deleted.
+  expect(mockDeleteFile).toHaveBeenCalledWith('file:///old.png');
+  expect(mockDeleteFile).not.toHaveBeenCalledWith('file:///kept.png');
+
+  await act(async () => { await app.deleteMessage('u1'); });
+  expect(app.messages.map((item) => item.role === 'user' ? item.prompt : item.text)).toEqual(['改过的问题', '新的回答']);
+  expect(mockMessages.some((item) => item.id === 'u1' || item.id === 'a1')).toBe(false);
+});
+
+test('a search hit opens its conversation at that message', async () => {
+  mockConversations = [{ id: 'c1', title: '长对话', providerId: 'chat', transparent: false, createdAt: 1, updatedAt: 1 }];
+  mockMessages = Array.from({ length: 200 }, (_, index) => seeded(`m${index}`, index % 2 ? 'assistant' : 'user', 1000 + index));
+  await mount();
+  await act(async () => { await app.openMessage('c1', 'm10'); });
+  expect(app.activeConversationId).toBe('c1');
+  expect(app.messages[0].id).toBe('m6');
+  expect(app.messages[app.messages.length - 1].id).toBe('m199');
+  expect(app.hasOlderMessages).toBe(true);
+  expect(app.jumpRequest).toMatchObject({ messageId: 'm10' });
 });

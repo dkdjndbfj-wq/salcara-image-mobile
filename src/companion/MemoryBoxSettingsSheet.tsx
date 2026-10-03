@@ -4,13 +4,14 @@ import { StyleSheet, Text, View } from 'react-native';
 import { ToggleRow } from '../components/SettingsParts';
 import { Group, Sheet, showToast } from '../components/ui';
 import { updateMemoryBoxSettings, useMemoryBoxSettings, type MemoryBoxSettings } from '../memorybox/settings';
-import { colors } from '../theme';
+import { colors, themed } from '../theme';
 
 /**
  * 设置 → 聊天记忆. Two switches; everything else is automatic: memory work uses the app's chat model,
  * and semantic recall uses the chat API's embeddings when that vendor has them (keywords otherwise).
  */
 export function MemoryBoxSettingsSheet({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  const styles = useStyles();
   const settings = useMemoryBoxSettings();
   const save = (patch: Partial<MemoryBoxSettings>) => void updateMemoryBoxSettings(patch).catch(() => showToast('没有保存成功', 'alert'));
   return <Sheet visible={visible} title="聊天记忆" onClose={onClose} presentation="page">
@@ -25,8 +26,8 @@ export function MemoryBoxSettingsSheet({ visible, onClose }: { visible: boolean;
   </Sheet>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 28 },
   lead: { color: colors.textMuted, fontSize: 14, lineHeight: 21, marginVertical: 12, marginHorizontal: 6 },
   note: { color: colors.subtle, fontSize: 12.5, lineHeight: 19, marginTop: 12, marginHorizontal: 6 },
-});
+}));

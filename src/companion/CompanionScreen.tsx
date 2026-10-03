@@ -1,6 +1,7 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { BackHandler, FlatList, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { BackHandler, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { KeyboardSafeView } from '../components/KeyboardSafeView';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Composer } from '../components/Composer';
@@ -11,11 +12,11 @@ import { VoiceSettingsSheet } from '../components/VoiceSettingsSheet';
 import type { ChatMessage, ReferenceImage } from '../domain';
 import { pickFromGallery, takePhoto } from '../image-inputs';
 import { CHARACTER_TEMPLATES } from '../memorybox/characters';
-import { scheduleMemoryWork, usePipelineStatus } from '../memorybox/pipeline';
+import { forgetTurnsFrom, usePipelineStatus } from '../memorybox/pipeline';
 import { useCharacters } from '../memorybox/store';
 import type { Character } from '../memorybox/types';
 import { useApp, useElapsedSeconds } from '../state/AppContext';
-import { listRecentMessages } from '../storage/database';
+import { getSetting, listRecentMessages, setSetting } from '../storage/database';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
 import { useDictation } from '../voice/useDictation';
 import { CharacterAvatar } from './CharacterAvatar';
@@ -29,11 +30,13 @@ import { SettingsCenter } from '../components/SettingsCenter';
 import { MemoryCanvas } from './MemoryCanvas';
 import { SpaceSwitch } from './SpaceSwitch';
 import { warm } from './theme';
+import { themed } from '../theme';
 
 type Dialog = { title: string; message?: string; actions?: DialogAction[]; icon?: IconName };
 
 /** The chat space: a list of characters, and each character's endless thread. */
 export function CompanionScreen() {
+  const styles = useStyles();
   const app = useApp();
   const characters = useCharacters();
   const character = characters.find((item) => item.id === app.activeCharacterId) ?? null;
@@ -79,6 +82,7 @@ function relativeTime(time: number) {
 }
 
 function CharacterList({ characters, onOpen, onCreate, onSettings, onAppSettings }: { characters: Character[]; onOpen: (id: string) => void; onCreate: () => void; onSettings: () => void; onAppSettings: () => void }) {
+  const styles = useStyles();
   const app = useApp();
   const [previews, setPreviews] = useState<Record<string, string>>({});
   // Reload only when a thread actually changed, not on every character update (memory work touches them often).
@@ -115,11 +119,11 @@ function CharacterList({ characters, onOpen, onCreate, onSettings, onAppSettings
   };
   return <View style={{ flex: 1 }}>
     <View style={styles.listHeader}>
-      <SpaceSwitch space="companion" onSwitch={app.switchSpace} />
+      <View pointerEvents="box-none" style={styles.headerCenter}><SpaceSwitch space="companion" onSwitch={app.switchSpace} /></View>
+      <Pressable accessibilityRole="button" accessibilityLabel="设置" hitSlop={6} onPress={onAppSettings} style={styles.headerIcon}><Icon name="settings" size={21} color={warm.text} /></Pressable>
       <View style={{ flex: 1 }} />
       <Pressable accessibilityRole="button" accessibilityLabel="记忆匣设置" hitSlop={6} onPress={onSettings} style={styles.headerIcon}><Icon name="memory" size={21} color={warm.text} /></Pressable>
       <Pressable accessibilityRole="button" accessibilityLabel="新的聊天伙伴" hitSlop={6} onPress={onCreate} style={styles.headerIcon}><Icon name="plus" size={22} color={warm.text} /></Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="设置" hitSlop={6} onPress={onAppSettings} style={styles.headerIcon}><Icon name="settings" size={21} color={warm.text} /></Pressable>
     </View>
     <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
       <Appear distance={10}><Text style={styles.bigTitle}>聊天</Text></Appear>
@@ -170,6 +174,7 @@ function timeLabel(message: ChatMessage, previous: ChatMessage | undefined): str
 }
 
 function Thread({ character, covered, onEdit, report }: { character: Character; covered: boolean; onEdit: () => void; report: (title: string, error: unknown) => void }) {
+  const styles = useStyles();
   const app = useApp();
   const elapsedSeconds = useElapsedSeconds();
   const status = usePipelineStatus(character.id);
@@ -181,7 +186,23 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
   const [live, setLive] = useState(false);
   const [voice, setVoice] = useState(false);
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  /** Editing a sent message: `stash` is the unsent draft it pushed aside. */
+  const [editing, setEditing] = useState<{ message: ChatMessage; stash: { prompt: string; images: ReferenceImage[] } } | null>(null);
   const inputRef = React.useRef<TextInput>(null);
+  // The unsent text survives a restart (photos don't: unsent files are swept on start).
+  const draftKey = `draft.companion.${character.id}`;
+  const draftLoaded = React.useRef(false);
+  useEffect(() => {
+    let alive = true;
+    void getSetting(draftKey).then((saved) => { if (alive && saved) setPrompt((current) => current || saved); })
+      .catch(() => undefined).finally(() => { if (alive) draftLoaded.current = true; });
+    return () => { alive = false; };
+  }, [draftKey]);
+  useEffect(() => {
+    if (editing || !draftLoaded.current) return;
+    const timer = setTimeout(() => void setSetting(draftKey, prompt.trim() ? prompt : null).catch(() => undefined), 700);
+    return () => clearTimeout(timer);
+  }, [prompt, editing, draftKey]);
   const dictation = useDictation({ providers: app.providers, chatProvider: app.chatProvider, onText: setPrompt, onError: (error) => report('语音输入没有完成', error) });
   const data = useMemo(() => [...app.messages].reverse(), [app.messages]);
   const lastId = app.messages[app.messages.length - 1]?.id;
@@ -189,13 +210,33 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
   const messagesRef = React.useRef(app.messages);
   messagesRef.current = app.messages;
   const onRetry = useCallback((message: ChatMessage) => {
-    // The regenerated reply keeps its old time, which memory may already have read past: re-read from its question.
+    // The regenerated reply keeps its old time, which memory may already have read past. What memory took
+    // from the old reply is forgotten and the turn is read again from its question.
     const all = messagesRef.current;
     const question = all[all.findIndex((item) => item.id === message.id) - 1];
-    const rewindTo = (question?.createdAt ?? message.createdAt) - 1;
+    const since = question?.createdAt ?? message.createdAt;
     void retry(message).catch((error) => report('没有重新回复', error))
-      .finally(() => { void scheduleMemoryWork(character.id, { rewindTo }).catch(() => undefined); });
+      .finally(() => { void forgetTurnsFrom(character.id, message.conversationId, since).catch(() => undefined); });
   }, [retry, report, character.id]);
+  const { deleteMessage: removeMessage } = app;
+  const confirmDelete = useCallback((message: ChatMessage) => setDialog({
+    title: message.role === 'user' ? '删除这条消息？' : '删除这条回复？',
+    message: message.role === 'user' ? '这条消息和 TA 的回复会一起删除，记忆匣里由它们记下的内容也会一起忘掉。' : '记忆匣里由这条回复记下的内容也会一起忘掉。',
+    icon: 'trash',
+    actions: [
+      { label: '取消', tone: 'secondary', onPress: () => setDialog(null) },
+      { label: '删除', tone: 'danger', onPress: () => { setDialog(null); void removeMessage(message.id).then(() => showToast('已删除')).catch((error) => report('没有删除', error)); } },
+    ],
+  }), [removeMessage, report]);
+  const promptRef = React.useRef({ prompt, images });
+  promptRef.current = { prompt, images };
+  const startEditing = useCallback((message: ChatMessage) => {
+    if (appRef.current.busy) { showToast('等 TA 回复完再编辑', 'hourglass'); return; }
+    setEditing((current) => current ?? { message, stash: promptRef.current });
+    setPrompt(message.prompt);
+    setImages(message.references ?? []);
+    setTimeout(() => inputRef.current?.focus(), 80);
+  }, []);
   const onTrail = useCallback((message: ChatMessage) => setCanvas({ trail: message.agent?.recalled?.map((item) => item.id) ?? null }), []);
   const reactions = useReactions(character.conversationId);
   const [menu, setMenu] = useState<{ message: ChatMessage; y: number } | null>(null);
@@ -214,9 +255,9 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
     const body = message.role === 'user' ? message.prompt : (message.text ?? '');
     const copy: MenuAction = { icon: 'copy', label: '复制', onPress: () => { setMenu(null); void Clipboard.setStringAsync(body).then(() => showToast('已复制')); } };
     return message.role === 'user'
-      ? [copy, { icon: 'edit', label: '编辑后重发', onPress: () => { setMenu(null); setPrompt(body); setTimeout(() => inputRef.current?.focus(), 80); } }]
-      : [copy, { icon: 'regenerate', label: '重新回复', onPress: () => { setMenu(null); onRetry(message); } }];
-  }, [menu, onRetry]);
+      ? [copy, { icon: 'edit', label: '编辑后重发', onPress: () => { setMenu(null); if (!editing) startEditing(message); } }, { icon: 'trash', label: '删除', onPress: () => { setMenu(null); confirmDelete(message); } }]
+      : [copy, { icon: 'regenerate', label: '重新回复', onPress: () => { setMenu(null); onRetry(message); } }, { icon: 'trash', label: '删除', onPress: () => { setMenu(null); confirmDelete(message); } }];
+  }, [menu, onRetry, editing, startEditing, confirmDelete]);
   const letItRain = useCallback((text: string | null | undefined) => {
     const emoji = rainFor(text);
     if (emoji) setRain({ id: Date.now(), emoji });
@@ -244,13 +285,32 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
   }, [report]);
   const headerTap = useTaps(poke, onEdit);
 
+  const ownedByEdit = (uri: string | null | undefined) => Boolean(uri && editing?.message.references.some((item) => item.uri === uri));
   const send = () => {
     const text = prompt.trim();
     if (!text && !images.length) return;
     const sent = { text, images };
-    setPrompt(''); setImages([]);
     letItRain(text);
+    const edit = editing;
+    if (edit) {
+      setEditing(null);
+      setPrompt(edit.stash.prompt); setImages(edit.stash.images);
+      void app.editAndResend(edit.message.id, sent).catch((error) => {
+        if (!promptRef.current.prompt) { setPrompt(text); setImages(sent.images); }
+        report('没有发出去', error);
+      });
+      return;
+    }
+    setPrompt(''); setImages([]);
+    void setSetting(draftKey, null).catch(() => undefined);
     void app.send(sent).catch((error) => { setPrompt(text); setImages(sent.images); report('没有发出去', error); });
+  };
+  const cancelEditing = () => {
+    const edit = editing;
+    if (!edit) return;
+    images.forEach((item) => { if (!ownedByEdit(item.uri)) deleteLocalFile(item.uri); });
+    setEditing(null);
+    setPrompt(edit.stash.prompt); setImages(edit.stash.images);
   };
   const addImages = async (source: 'gallery' | 'camera') => {
     setAttach(false);
@@ -289,7 +349,7 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
         <Text style={styles.liveText}>Live</Text>
       </MotionPressable>
     </View>
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={{ flex: 1 }}>
       <AmbientLight color={character.color} paused={Boolean(covered || canvas || live || voice || preview || attach || menu || dialog)} />
       <FlatList
         inverted
@@ -318,7 +378,8 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
         onSend={send}
         onStop={stop}
         onOpenAttach={() => { dismissKeyboardAndBlur(); setAttach(true); }}
-        onRemoveImage={(id) => { const target = images.find((item) => item.id === id); deleteLocalFile(target?.uri); setImages((current) => current.filter((item) => item.id !== id)); }}
+        editing={editing ? { onCancel: cancelEditing } : null}
+        onRemoveImage={(id) => { const target = images.find((item) => item.id === id); if (!ownedByEdit(target?.uri)) deleteLocalFile(target?.uri); setImages((current) => current.filter((item) => item.id !== id)); }}
         onRemoveDocument={() => undefined}
         onEditMask={() => undefined}
         placeholder={dictation.state !== 'idle' ? '正在听…' : `给 ${character.name} 发消息`}
@@ -326,7 +387,7 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
         onOpenLive={openLive}
         tone="warm"
       />
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
     <Sheet visible={attach} onClose={() => setAttach(false)} background={warm.background}>
       <View style={styles.attachRow}>
         {([['camera', '相机', 'camera'], ['gallery', '照片', 'image']] as const).map(([source, label, icon]) => <MotionPressable key={source} wrapperStyle={{ flex: 1 }} scaleTo={0.94} accessibilityRole="button" accessibilityLabel={label}
@@ -349,13 +410,14 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: warm.background },
-  listHeader: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, gap: 4 },
+  listHeader: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, gap: 0 },
+  headerCenter: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
   headerIcon: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   listContent: { paddingHorizontal: 16, paddingBottom: 32, gap: 10 },
-  bigTitle: { color: warm.text, fontSize: 32, fontWeight: '700', letterSpacing: -0.8, marginTop: 6, marginLeft: 4 },
-  subtitle: { color: warm.muted, fontSize: 14.5, lineHeight: 21, marginLeft: 4, marginBottom: 10 },
+  bigTitle: { color: warm.text, fontSize: 24, lineHeight: 31, fontWeight: '700', letterSpacing: -0.5, marginTop: 6, marginLeft: 4 },
+  subtitle: { color: warm.muted, fontSize: 12.5, lineHeight: 18, marginLeft: 4, marginTop: 2, marginBottom: 10 },
   notice: { flexDirection: 'row', gap: 8, padding: 12, borderRadius: 16, backgroundColor: warm.accentSoft, alignItems: 'flex-start' },
   noticeText: { flex: 1, color: warm.textSecondary, fontSize: 13.5, lineHeight: 19 },
   card: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 14, borderRadius: 22, backgroundColor: warm.card, borderWidth: StyleSheet.hairlineWidth, borderColor: warm.border },
@@ -380,4 +442,4 @@ const styles = StyleSheet.create({
   attachRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 18, paddingTop: 8, paddingBottom: 12 },
   attachTile: { height: 96, borderRadius: 22, backgroundColor: warm.card, alignItems: 'center', justifyContent: 'center', gap: 10 },
   attachLabel: { color: warm.text, fontSize: 14, fontWeight: '500' },
-});
+}));

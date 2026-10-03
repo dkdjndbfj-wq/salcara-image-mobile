@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { colors, prettyModel, radius } from '../theme';
+import { colors, prettyModel, radius, themed } from '../theme';
 import { Icon } from './Icon';
 import { PrimaryButton, Sheet } from './ui';
 
@@ -10,6 +10,7 @@ export function ModelSelect({ visible, title, value, models, loading = false, er
   visible: boolean; title: string; value: string; models: string[]; loading?: boolean; error?: string | null;
   onClose: () => void; onSelect: (model: string) => void; onRefresh: () => void;
 }) {
+  const styles = useStyles();
   const [query, setQuery] = useState('');
   const [manual, setManual] = useState(false);
   const [customModel, setCustomModel] = useState('');
@@ -54,7 +55,7 @@ export function ModelSelect({ visible, title, value, models, loading = false, er
   </Sheet>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 12, gap: 8, flexShrink: 1 },
   refresh: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
   search: { flexDirection: 'row', alignItems: 'center', gap: 8, height: 44, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.surfaceStrong },
@@ -71,4 +72,4 @@ const styles = StyleSheet.create({
   manualText: { color: colors.textMuted, fontSize: 14.5 },
   manualBody: { gap: 12, paddingTop: 8 },
   manualInput: { height: 50, borderRadius: 16, backgroundColor: colors.surfaceStrong, color: colors.text, fontSize: 15.5, paddingHorizontal: 16 },
-});
+}));

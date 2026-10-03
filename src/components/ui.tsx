@@ -1,13 +1,14 @@
-import React, { useEffect, useRef, useState, type ReactNode } from 'react';
+import React, { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import {
-  ActivityIndicator, Animated, Easing, Keyboard, KeyboardAvoidingView, Modal, PanResponder, Platform, Pressable,
+  ActivityIndicator, Animated, Easing, Keyboard, Modal, PanResponder, Platform, Pressable,
   ScrollView, StyleSheet, Text, TextInput, View, type StyleProp, type ViewStyle,
 } from 'react-native';
+import { KeyboardSafeView } from './KeyboardSafeView';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 
-import { brandGradient, colors, motion, radius, shadow } from '../theme';
+import { brandGradient, colors, motion, radius, shadow, useDesk, desk, themed } from '../theme';
 import { Icon, type IconName } from './Icon';
 import { MotionPressable, useReducedMotion } from './MotionPressable';
 
@@ -23,14 +24,17 @@ export function dismissKeyboardAndBlur() {
 
 export function IconButton({ icon, onPress, label, disabled = false, variant = 'ghost', size = 40, iconSize = 22, color }: {
   icon: IconName; onPress: () => void; label: string; disabled?: boolean;
-  variant?: 'ghost' | 'soft' | 'solid' | 'glass'; size?: number; iconSize?: number; color?: string;
+  /** 'ink': the 编程 space's near-black button (desktop look). */
+  variant?: 'ghost' | 'soft' | 'solid' | 'glass' | 'ink'; size?: number; iconSize?: number; color?: string;
 }) {
-  const tint = color ?? (variant === 'solid' ? colors.onPrimary : colors.text);
+  const styles = useStyles();
+  const dk = useDesk();
+  const tint = color ?? (variant === 'solid' ? colors.onPrimary : variant === 'ink' ? dk.onInk : colors.text);
   return <MotionPressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} scaleTo={0.88} hitSlop={slopFor(size)}
     onPress={() => { dismissKeyboardAndBlur(); onPress(); }}
     style={({ pressed }: { pressed: boolean }) => [styles.iconButton, { width: size, height: size, borderRadius: size / 2 },
       variant === 'ghost' && pressed && styles.iconPressed, variant === 'soft' && styles.iconSoft, variant === 'glass' && styles.iconGlass,
-      variant === 'solid' && styles.iconSolid, disabled && styles.disabled]}>
+      variant === 'solid' && styles.iconSolid, variant === 'ink' && { backgroundColor: dk.ink }, disabled && styles.disabled]}>
     {variant === 'solid' && <View pointerEvents="none" style={[StyleSheet.absoluteFill, { borderRadius: size / 2, overflow: 'hidden' }]}><BrandFill /><Sheen /></View>}
     <Icon name={icon} size={iconSize} color={tint} />
   </MotionPressable>;
@@ -42,6 +46,7 @@ export function slopFor(size: number, target = 48) {
 }
 
 export function Chip({ label, selected = false, onPress, disabled = false, icon }: { label: string; selected?: boolean; onPress: () => void; disabled?: boolean; icon?: IconName }) {
+  const styles = useStyles();
   return <MotionPressable accessibilityRole="button" accessibilityState={{ selected, disabled }} disabled={disabled} scaleTo={0.94} onPress={() => { dismissKeyboardAndBlur(); onPress(); }}
     style={[styles.chip, selected && styles.chipSelected, disabled && styles.disabled]}>
     {selected ? <View style={styles.chipDot} /> : icon ? <Icon name={icon} size={15} color={colors.textMuted} /> : null}
@@ -52,6 +57,7 @@ export function Chip({ label, selected = false, onPress, disabled = false, icon 
 export function PrimaryButton({ label, onPress, loading = false, disabled = false, icon, tone = 'primary', style }: {
   label: string; onPress: () => void; loading?: boolean; disabled?: boolean; icon?: IconName; tone?: 'primary' | 'secondary' | 'danger'; style?: StyleProp<ViewStyle>;
 }) {
+  const styles = useStyles();
   const fg = tone === 'primary' ? colors.onPrimary : tone === 'danger' ? colors.danger : colors.text;
   return <MotionPressable scaleTo={0.965} accessibilityRole="button" accessibilityState={{ disabled: disabled || loading }} disabled={disabled || loading}
     onPress={() => { dismissKeyboardAndBlur(); onPress(); }}
@@ -106,31 +112,34 @@ function useOverlay(visible: boolean) {
 }
 
 /** Bottom sheet (drag to dismiss) or a pushed full page. */
-export function Sheet({ visible, title, subtitle, onClose, children, scroll = true, footer, presentation = 'sheet', headerRight, background }: {
+export function Sheet({ visible, title, subtitle, onClose, children, scroll = true, footer, presentation = 'sheet', headerRight, background, surfaceRef, dismissible = true }: {
   visible: boolean; title?: string; subtitle?: string; onClose: () => void; children: ReactNode; scroll?: boolean;
   footer?: ReactNode; presentation?: 'sheet' | 'page'; headerRight?: ReactNode; background?: string;
+  surfaceRef?: RefObject<View | null>; dismissible?: boolean;
 }) {
+  const styles = useStyles();
   const insets = useSafeAreaInsets();
   const { mounted, progress } = useOverlay(visible);
   const drag = useRef(new Animated.Value(0)).current;
   const page = presentation === 'page';
-  const close = () => { dismissKeyboardAndBlur(); onClose(); };
+  const dismissibleRef = useRef(dismissible); dismissibleRef.current = dismissible;
+  const close = () => { if (dismissibleRef.current) { dismissKeyboardAndBlur(); onClose(); } };
   const closeRef = useRef(close); closeRef.current = close;
   useEffect(() => { if (visible) drag.setValue(0); }, [visible, drag]);
   const pan = useRef(PanResponder.create({
-    onMoveShouldSetPanResponder: (_, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
+    onMoveShouldSetPanResponder: (_, g) => dismissibleRef.current && g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
     onPanResponderMove: (_, g) => drag.setValue(Math.max(0, g.dy)),
     onPanResponderRelease: (_, g) => {
-      if (g.dy > 110 || g.vy > 0.9) closeRef.current();
+      if (dismissibleRef.current && (g.dy > 110 || g.vy > 0.9)) closeRef.current();
       else Animated.spring(drag, { toValue: 0, damping: 22, stiffness: 280, useNativeDriver: true }).start();
     },
     onPanResponderTerminate: () => Animated.spring(drag, { toValue: 0, useNativeDriver: true }).start(),
   })).current;
   const pagePan = useRef(PanResponder.create({
-    onMoveShouldSetPanResponder: (e, g) => g.dx > 12 && Math.abs(g.dx) > Math.abs(g.dy) * 2 && e.nativeEvent.pageX - g.dx < 40,
+    onMoveShouldSetPanResponder: (e, g) => dismissibleRef.current && g.dx > 12 && Math.abs(g.dx) > Math.abs(g.dy) * 2 && e.nativeEvent.pageX - g.dx < 40,
     onPanResponderMove: (_, g) => drag.setValue(Math.max(0, g.dx)),
     onPanResponderRelease: (_, g) => {
-      if (g.dx > 120 || g.vx > 0.8) closeRef.current();
+      if (dismissibleRef.current && (g.dx > 120 || g.vx > 0.8)) closeRef.current();
       else Animated.spring(drag, { toValue: 0, useNativeDriver: true }).start();
     },
   })).current;
@@ -142,8 +151,8 @@ export function Sheet({ visible, title, subtitle, onClose, children, scroll = tr
     <View style={styles.overlay} accessibilityViewIsModal>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, page ? { backgroundColor: 'rgba(11,18,32,0.12)' } : styles.scrim, { opacity: progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolate: 'clamp' }) }]} />
       {!page && <Pressable style={StyleSheet.absoluteFill} accessible={false} importantForAccessibility="no" onPress={close} />}
-      <KeyboardAvoidingView pointerEvents="box-none" style={styles.placement} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <Animated.View {...(page ? pagePan.panHandlers : {})} style={[styles.sheet, page && styles.page, {
+      <KeyboardSafeView pointerEvents="box-none" style={styles.placement}>
+        <Animated.View ref={surfaceRef} collapsable={surfaceRef ? false : undefined} {...(page ? pagePan.panHandlers : {})} style={[styles.sheet, page && styles.page, {
           backgroundColor: bg, paddingTop: page ? insets.top : 0, marginTop: page ? 0 : Math.max(insets.top, 24),
           paddingBottom: footer ? 0 : Math.max(insets.bottom, 12), opacity: page ? progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolate: 'clamp' }) : 1,
           transform,
@@ -162,7 +171,7 @@ export function Sheet({ visible, title, subtitle, onClose, children, scroll = tr
             : <View style={[styles.body, page && { flex: 1 }]}>{children}</View>}
           {footer && <View style={[styles.footer, { backgroundColor: bg, paddingBottom: Math.max(insets.bottom, 14) }]}>{footer}</View>}
         </Animated.View>
-      </KeyboardAvoidingView>
+      </KeyboardSafeView>
       <ToastHost />
     </View>
   </Modal>;
@@ -171,33 +180,36 @@ export function Sheet({ visible, title, subtitle, onClose, children, scroll = tr
 export function AppDialog({ visible, title, message, icon, actions, children, dismissible = true, onClose }: {
   visible: boolean; title: string; message?: string; icon?: IconName | string; actions?: DialogAction[]; children?: ReactNode; dismissible?: boolean; onClose: () => void;
 }) {
+  const styles = useStyles();
   const { mounted, progress } = useOverlay(visible);
   const resolved = actions?.length ? actions : [{ label: '好的', tone: 'primary' as const, onPress: onClose }];
   const close = () => { if (dismissible) { dismissKeyboardAndBlur(); onClose(); } };
   const danger = resolved.some((action) => action.tone === 'danger');
   const glyph = normalizeIcon(icon);
   return <Modal visible={mounted} transparent animationType="none" statusBarTranslucent onRequestClose={close}>
-    <KeyboardAvoidingView style={styles.dialogBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.dialogBackdrop}>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.scrim, { opacity: progress }]} />
       {dismissible && <Pressable accessible={false} importantForAccessibility="no" style={StyleSheet.absoluteFill} onPress={close} />}
       <Animated.View accessibilityViewIsModal style={[styles.dialog, { opacity: progress, transform: [{ scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] }) }] }]}>
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.dialogContent}>
-          {glyph && <View style={[styles.dialogIcon, danger && styles.dialogIconDanger]}><Icon name={glyph} size={24} color={danger ? colors.danger : colors.primary} /></View>}
-          <Text style={styles.dialogTitle}>{title}</Text>
+          <View style={styles.dialogHead}>
+            {glyph && <View style={[styles.dialogIcon, danger && styles.dialogIconDanger]}><Icon name={glyph} size={18} color={danger ? colors.danger : colors.primary} /></View>}
+            <Text style={styles.dialogTitle}>{title}</Text>
+          </View>
           {message ? <Text selectable style={styles.dialogMessage}>{message}</Text> : null}
           {children}
         </ScrollView>
-        <View style={styles.dialogActions}>{resolved.map((action, index) => {
-          const tone = action.tone ?? (index === resolved.length - 1 ? 'primary' : 'secondary');
+        <View style={[styles.dialogActions, resolved.length > 2 && styles.dialogActionsStacked]}>{resolved.map((action, index) => {
+          const quiet = resolved.length > 2 && /^(关闭|取消)$/.test(action.label);
+          const tone = quiet ? 'secondary' : action.tone ?? (index === resolved.length - 1 ? 'primary' : 'secondary');
           return <Pressable key={`${action.label}-${index}`} accessibilityRole="button" disabled={action.disabled}
             onPress={() => { dismissKeyboardAndBlur(); action.onPress?.(); }}
-            style={({ pressed }) => [styles.dialogAction, tone === 'primary' && styles.actionPrimary, tone === 'danger' && styles.actionDanger, pressed && { opacity: 0.82, transform: [{ scale: 0.97 }] }, action.disabled && styles.disabled]}>
-            {tone === 'primary' && <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.buttonFill]}><BrandFill /><Sheen /></View>}
-            <Text style={[styles.actionText, (tone === 'primary' || tone === 'danger') && { color: colors.onPrimary }]}>{action.label}</Text>
+            style={({ pressed }) => [styles.dialogAction, resolved.length <= 2 && { flex: 1 }, tone === 'primary' && styles.dialogPrimary, tone === 'danger' && styles.dialogDanger, quiet && styles.dialogQuiet, pressed && { opacity: 0.8 }, action.disabled && styles.disabled]}>
+            <Text numberOfLines={1} style={[styles.dialogActionText, tone === 'primary' && { color: colors.onPrimary }, tone === 'danger' && { color: colors.danger }, quiet && { color: colors.textMuted, fontWeight: '500' }]}>{action.label}</Text>
           </Pressable>;
         })}</View>
       </Animated.View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   </Modal>;
 }
 
@@ -213,6 +225,7 @@ function normalizeIcon(icon?: string): IconName | null {
 
 /** Inset-grouped list container, like iOS settings. */
 export function Group({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
+  const styles = useStyles();
   return <View style={[styles.group, style]}>{children}</View>;
 }
 export const Card = Group;
@@ -220,6 +233,7 @@ export const Card = Group;
 export function ListRow({ icon, title, detail, value, onPress, right, danger = false, first = false }: {
   icon?: IconName; title: string; detail?: string; value?: string; onPress?: () => void; right?: ReactNode; danger?: boolean; first?: boolean;
 }) {
+  const styles = useStyles();
   return <Pressable accessibilityRole={onPress ? 'button' : undefined} disabled={!onPress} onPress={onPress}
     style={({ pressed }) => [styles.row, pressed && { backgroundColor: colors.surfaceStrong }]}>
     {icon && <View style={[styles.rowIcon, danger && { backgroundColor: colors.dangerSurface }]}><Icon name={icon} size={18} color={danger ? colors.danger : colors.primary} /></View>}
@@ -235,6 +249,7 @@ export function ListRow({ icon, title, detail, value, onPress, right, danger = f
 }
 
 export function SectionLabel({ children }: { children: ReactNode }) {
+  const styles = useStyles();
   return <Text style={styles.sectionLabel}>{children}</Text>;
 }
 
@@ -250,6 +265,7 @@ let toastId = 0;
 export function showToast(text: string, icon: IconName = 'checkCircle', onPress?: () => void) { toastListeners[toastListeners.length - 1]?.({ id: ++toastId, text, icon, onPress }); }
 
 export function ToastHost() {
+  const styles = useStyles();
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const progress = useRef(new Animated.Value(0)).current;
   const insets = useSafeAreaInsets();
@@ -284,11 +300,11 @@ export function ToastHost() {
   </Animated.View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   iconButton: { alignItems: 'center', justifyContent: 'center' },
   iconPressed: { backgroundColor: colors.surfaceStrong },
   iconSoft: { backgroundColor: colors.surfaceStrong },
-  iconGlass: { backgroundColor: 'rgba(255,255,255,0.92)', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.soft },
+  iconGlass: { backgroundColor: c.glass, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.soft },
   iconSolid: { backgroundColor: colors.primary, ...shadow.glow },
   disabled: { opacity: 0.35 },
   chip: { height: 36, paddingHorizontal: 14, flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', borderRadius: radius.pill, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
@@ -318,15 +334,20 @@ const styles = StyleSheet.create({
   content: { paddingBottom: 18 },
   body: { flexShrink: 1, paddingBottom: 8 },
   footer: { paddingHorizontal: 20, paddingTop: 10 },
-  dialogBackdrop: { flex: 1, padding: 32, justifyContent: 'center', alignItems: 'center' },
-  dialog: { maxHeight: '80%', width: '100%', maxWidth: 360, padding: 24, borderRadius: 30, backgroundColor: colors.card, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.float },
+  dialogBackdrop: { flex: 1, padding: 28, justifyContent: 'center', alignItems: 'center' },
+  dialog: { maxHeight: '80%', width: '100%', maxWidth: 320, padding: 20, borderRadius: 22, backgroundColor: colors.card, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.float },
   dialogContent: { gap: 8 },
-  dialogIcon: { width: 52, height: 52, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft, borderWidth: 1, borderColor: 'rgba(61,123,250,0.18)', marginBottom: 8 },
-  dialogIconDanger: { backgroundColor: colors.dangerSurface, borderColor: 'rgba(229,72,77,0.2)' },
-  dialogTitle: { color: colors.text, fontSize: 18, lineHeight: 26, fontWeight: '600', letterSpacing: -0.2 },
-  dialogMessage: { color: colors.textMuted, fontSize: 14.5, lineHeight: 22 },
-  dialogActions: { marginTop: 22, flexDirection: 'row', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8 },
-  dialogAction: { minHeight: 44, paddingHorizontal: 22, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', backgroundColor: colors.surfaceStrong },
+  dialogHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 2 },
+  dialogIcon: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
+  dialogIconDanger: { backgroundColor: colors.dangerSurface },
+  dialogTitle: { flex: 1, color: colors.text, fontSize: 16, lineHeight: 22, fontWeight: '600', letterSpacing: -0.1 },
+  dialogMessage: { color: colors.textMuted, fontSize: 13.5, lineHeight: 20 },
+  dialogActions: { marginTop: 18, flexDirection: 'row', gap: 8 },
+  dialogActionsStacked: { flexDirection: 'column' },
+  dialogQuiet: { backgroundColor: 'transparent', minHeight: 36 },
+  dialogAction: { minHeight: 42, paddingHorizontal: 16, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
+  dialogPrimary: { backgroundColor: colors.primary }, dialogDanger: { backgroundColor: colors.dangerSurface },
+  dialogActionText: { color: colors.text, fontSize: 14, fontWeight: '600' },
   actionPrimary: { backgroundColor: colors.primary },
   actionDanger: { backgroundColor: colors.danger },
   actionText: { color: colors.text, fontSize: 14.5, fontWeight: '600' },
@@ -343,4 +364,4 @@ const styles = StyleSheet.create({
   toastPress: { flexDirection: 'row', alignItems: 'center', gap: 9, flexShrink: 1 },
   toastIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(124,198,255,0.28)' },
   toastText: { color: '#FFFFFF', fontSize: 14, fontWeight: '500', flexShrink: 1, lineHeight: 19 },
-});
+}));

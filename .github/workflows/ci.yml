@@ -18,6 +18,7 @@ jobs:
       - run: node scripts/verify-release-version.mjs
       - run: npm run typecheck
       - run: npm test
+      - run: node --test scripts/update-manifest-core.test.mjs
       - name: Expo Doctor (retry transient API failures)
         shell: bash
         run: |

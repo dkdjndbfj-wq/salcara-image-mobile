@@ -10,6 +10,7 @@ import { LogoArt } from './Logo';
 import { Icon } from './Icon';
 import { MotionPressable, useReducedMotion } from './MotionPressable';
 
+import { themed } from '../theme';
 /**
  * Live voice conversation, in the spirit of Gemini Live: a dark stage, an
  * aurora that listens, thinks and speaks with you, big captions, and every
@@ -106,6 +107,7 @@ const Aurora = React.memo(function Aurora({ phase, energy, warmth, muted }: { ph
 });
 
 export function Dots({ color = 'rgba(255,255,255,0.62)' }: { color?: string } = {}) {
+  const styles = useStyles();
   const [count, setCount] = useState(0);
   useEffect(() => { const timer = setInterval(() => setCount((value) => (value + 1) % 4), 380); return () => clearInterval(timer); }, []);
   return <Text style={[styles.status, { color }]}>{'.'.repeat(count)}<Text style={{ opacity: 0 }}>{'.'.repeat(3 - count)}</Text></Text>;
@@ -113,6 +115,7 @@ export function Dots({ color = 'rgba(255,255,255,0.62)' }: { color?: string } = 
 
 /** Ripple where the user tapped to interrupt. */
 export function Ripple({ x, y, onDone, color = '#FFFFFF' }: { x: number; y: number; onDone: () => void; color?: string }) {
+  const styles = useStyles();
   const value = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(value, { toValue: 1, duration: 650, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(onDone);
@@ -128,6 +131,7 @@ export function RoundButton({ label, icon, onPress, tone = 'glass', ring, theme 
   label: string; icon: React.ComponentProps<typeof Icon>['name']; onPress: () => void; tone?: 'glass' | 'light' | 'danger'; ring?: Animated.Value;
   theme?: 'dark' | 'light'; accent?: string;
 }) {
+  const styles = useStyles();
   const light = theme === 'light';
   const background = tone === 'danger' ? '#FF4D5E' : tone === 'light' ? (light ? '#1B2150' : '#FFFFFF') : light ? 'rgba(255,255,255,0.78)' : 'rgba(255,255,255,0.1)';
   const color = tone === 'light' ? (light ? '#FFFFFF' : STAGE) : tone === 'danger' ? '#FFFFFF' : light ? '#1B2150' : '#FFFFFF';
@@ -225,6 +229,7 @@ export function useLiveEnergy(live: ReturnType<typeof useVoiceConversation>, red
 let introPlayed = false;
 
 function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean; enter: Animated.Value; onClose: () => void; onOpenSettings: () => void }) {
+  const styles = useStyles();
   const live = useVoiceConversation(active);
   const { height } = useWindowDimensions();
   const reduced = useReducedMotion();
@@ -325,7 +330,7 @@ function LiveStage({ active, enter, onClose, onOpenSettings }: { active: boolean
   </Animated.View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   stage: { ...StyleSheet.absoluteFill, backgroundColor: STAGE, overflow: 'hidden' },
   safe: { flex: 1 },
   top: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingTop: 6 },
@@ -350,4 +355,4 @@ const styles = StyleSheet.create({
   buttonLight: { borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(27,33,80,0.12)', shadowColor: '#1B2150', shadowOpacity: 0.1, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 3 },
   buttonLabel: { color: 'rgba(255,255,255,0.72)', fontSize: 12.5 },
   ripple: { position: 'absolute', width: 120, height: 120, borderRadius: 60, backgroundColor: '#FFFFFF' },
-});
+}));

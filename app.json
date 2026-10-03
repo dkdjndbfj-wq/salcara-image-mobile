@@ -2,17 +2,17 @@
   "expo": {
     "name": "Salcara AI",
     "slug": "salcara-image-mobile",
-    "version": "1.7.0",
+    "version": "1.8.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "top.salcara.image",
-      "buildNumber": "20",
+      "buildNumber": "21",
       "supportsTablet": true,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Salcara AI 需要使用麦克风来听你说话，录音只用于语音输入和语音对话。",
-        "NSCameraUsageDescription": "允许 Salcara AI 拍摄参考图片。",
+        "NSCameraUsageDescription": "允许 Salcara AI 拍摄参考图片和扫描电脑配对二维码。",
         "NSPhotoLibraryUsageDescription": "允许 Salcara AI 读取你选择的图片。",
         "NSPhotoLibraryAddUsageDescription": "允许 Salcara AI 将生成图片保存到相册。",
         "NSCalendarsUsageDescription": "你确认日程卡片后，Salcara AI 会把这条日程添加到系统日历。",
@@ -23,10 +23,11 @@
     },
     "android": {
       "package": "top.salcara.image",
-      "versionCode": 20,
+      "versionCode": 21,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.CAMERA",
+        "android.permission.VIBRATE",
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.REQUEST_INSTALL_PACKAGES",
         "android.permission.RECORD_AUDIO",
@@ -47,12 +48,19 @@
     "plugins": [
       "expo-sqlite",
       "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "允许 Salcara AI 扫描电脑配对二维码和拍摄参考图片。",
+          "recordAudioAndroid": false
+        }
+      ],
       "expo-sharing",
       [
         "expo-image-picker",
         {
           "photosPermission": "允许 Salcara AI 读取你选择的图片。",
-          "cameraPermission": "允许 Salcara AI 拍摄参考图片。"
+          "cameraPermission": "允许 Salcara AI 拍摄参考图片和扫描电脑配对二维码。"
         }
       ],
       [
@@ -70,7 +78,11 @@
           "backgroundColor": "#FFFFFF",
           "image": "./assets/splash-icon.png",
           "imageWidth": 150,
-          "resizeMode": "contain"
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#0F1116",
+            "image": "./assets/splash-icon.png"
+          }
         }
       ]
     ]

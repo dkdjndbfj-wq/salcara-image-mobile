@@ -4,12 +4,13 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-
 import { AGENT_COLORS, AGENT_TEMPLATES, CAPABILITY_LABELS, deleteAgent, saveAgent, useAgents, type AgentDraft } from '../agent/agents';
 import { ALL_CAPABILITIES, type AgentCapability, type CustomAgent } from '../agent/types';
 import { useApp } from '../state/AppContext';
-import { colors, prettyModel, radius } from '../theme';
+import { colors, prettyModel, radius, themed } from '../theme';
 import { Icon } from './Icon';
 import { ToggleRow } from './SettingsParts';
 import { AppDialog, Chip, Group, MotionPressable, PrimaryButton, SectionLabel, Sheet, showToast } from './ui';
 
 export function AgentAvatar({ agent, size = 36 }: { agent: Pick<CustomAgent, 'icon' | 'color'>; size?: number }) {
+  const styles = useStyles();
   return <View style={[styles.avatar, { width: size, height: size, borderRadius: size / 2, backgroundColor: `${agent.color}1F` }]}>
     <Text numberOfLines={1} adjustsFontSizeToFit style={[styles.avatarText, { color: agent.color, fontSize: size * 0.46 }]}>{agent.icon}</Text>
   </View>;
@@ -19,6 +20,7 @@ const EMPTY: AgentDraft = { name: '', icon: '', color: AGENT_COLORS[0], descript
 
 /** 智能体: custom assistants with their own instructions and tools. */
 export function AgentsSheet({ visible, onClose, onStart }: { visible: boolean; onClose: () => void; onStart: (agent: CustomAgent) => void }) {
+  const styles = useStyles();
   const agents = useAgents();
   const [draft, setDraft] = useState<AgentDraft | null>(null);
   const [menu, setMenu] = useState<CustomAgent | null>(null);
@@ -69,6 +71,7 @@ export function AgentsSheet({ visible, onClose, onStart }: { visible: boolean; o
 }
 
 function AgentEditor({ draft, onClose }: { draft: AgentDraft | null; onClose: () => void }) {
+  const styles = useStyles();
   const { providers } = useApp();
   const [value, setValue] = useState<AgentDraft>(EMPTY);
   const [starters, setStarters] = useState('');
@@ -139,7 +142,7 @@ function AgentEditor({ draft, onClose }: { draft: AgentDraft | null; onClose: ()
   </Sheet>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   body: { paddingHorizontal: 16, paddingBottom: 28 },
   lead: { color: colors.textMuted, fontSize: 14, lineHeight: 21, marginTop: 6, marginHorizontal: 4 },
   avatar: { alignItems: 'center', justifyContent: 'center' },
@@ -165,4 +168,4 @@ const styles = StyleSheet.create({
   multiline: { minHeight: 150, lineHeight: 21 },
   multilineSmall: { minHeight: 84, lineHeight: 21 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-});
+}));

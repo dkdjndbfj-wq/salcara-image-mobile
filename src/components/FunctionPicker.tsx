@@ -5,7 +5,7 @@ import { refreshServiceModels, useServiceModels } from '../api/services';
 import { capabilityOf, defaultModel, KIND_TITLE, modelsFor, supports, vendorForService, voicesFor, type ServiceKind, type Vendor } from '../api/vendors';
 import type { ProviderProfile } from '../domain';
 import { useApp } from '../state/AppContext';
-import { colors, prettyModel, radius } from '../theme';
+import { colors, prettyModel, radius, themed } from '../theme';
 import { Icon } from './Icon';
 import { ModelSelect } from './ModelSelect';
 import { MotionPressable } from './MotionPressable';
@@ -21,6 +21,7 @@ export interface FunctionChoice { serviceId: string | null; model: string; voice
 
 /** Initial-letter badge standing in for a vendor logo. */
 export function VendorBadge({ vendor, size = 36 }: { vendor: Vendor; size?: number }) {
+  const styles = useStyles();
   const hue = [...vendor.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 6;
   const tint = ['#3D7BFA', '#7B6CF6', '#12A150', '#E0822B', '#2A9DC4', '#D2477A'][hue];
   return <View style={[styles.badge, { width: size, height: size, borderRadius: size * 0.32, backgroundColor: `${tint}1A` }]}>
@@ -59,6 +60,7 @@ export function FunctionPicker({ kind, value, onChange, onAddService, offLabel, 
   followChat?: boolean;
   hideLabel?: boolean;
 }) {
+  const styles = useStyles();
   const { providers, chatProvider } = useApp();
   const options = servicesFor(kind, providers);
   const fallback = followChat && !value.serviceId && chatProvider && supports(vendorForService(chatProvider), kind) ? chatProvider : null;
@@ -136,7 +138,7 @@ export function FunctionPicker({ kind, value, onChange, onAddService, offLabel, 
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   wrap: { gap: 10 },
   label: { color: colors.text, fontSize: 13.5, fontWeight: '600' },
   step: { color: colors.subtle, fontSize: 12, fontWeight: '600', letterSpacing: 0.2 },
@@ -150,4 +152,4 @@ const styles = StyleSheet.create({
   input: { minHeight: 44, borderRadius: 12, paddingHorizontal: 12, backgroundColor: colors.surface, color: colors.text, fontSize: 14.5, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   badge: { alignItems: 'center', justifyContent: 'center' },
   badgeText: { fontWeight: '800' },
-});
+}));

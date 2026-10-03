@@ -1,5 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createUpdateManifest, assertManifestAdvance } from './update-manifest-core.mjs';
 
 // Run only after gh release create succeeds. Never derive availability from app.json.
 const repository = process.env.GITHUB_REPOSITORY;
@@ -10,11 +13,18 @@ if (!repository || !/^v\d+\.\d+\.\d+$/.test(tag ?? '') || !commit) {
 }
 function api(path, method = 'GET', body) {
   const args = ['api', `repos/${repository}/${path}`, '--method', method];
-  if (body) args.push('--input', '-');
-  return JSON.parse(execFileSync('gh', args, {
-    encoding: 'utf8', input: body ? JSON.stringify(body) : undefined,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  }));
+  const requestDir = body ? mkdtempSync(join(tmpdir(), 'salcara-update-publish-')) : null;
+  const requestFile = requestDir ? join(requestDir, 'request.json') : null;
+  try {
+    if (body) {
+      writeFileSync(requestFile, JSON.stringify(body), { flag: 'wx' });
+      args.push('--input', requestFile);
+    }
+    return JSON.parse(execFileSync('gh', args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 }));
+  } finally {
+    if (requestFile) unlinkSync(requestFile);
+    if (requestDir) rmdirSync(requestDir);
+  }
 }
 const release = api(`releases/tags/${tag}`);
 const apk = release.assets.find((asset) => asset.name === `salcara-image-android-${tag}.apk`);
@@ -27,31 +37,19 @@ const mirrorBase = (process.env.SALCARA_APK_MIRROR_BASE_URL ?? '').trim().replac
 if (mirrorBase && !/^https:\/\/(?:[a-z0-9-]+\.)*salcara\.top(?::\d+)?(?:\/[^\s]*)?$/i.test(mirrorBase)) {
   throw new Error('SALCARA_APK_MIRROR_BASE_URL must be an HTTPS Salcara host');
 }
-const manifest = {
-  version: tag.slice(1), tagName: tag, title: release.name,
-  notes: release.body ?? '', pageUrl: release.html_url, publishedAt: release.published_at,
-  apk: {
-    name: apk.name,
-    url: apk.browser_download_url,
-    apiUrl: apk.url,
-    ...(mirrorBase ? { mirrorUrl: `${mirrorBase}/${encodeURIComponent(apk.name)}` } : {}),
-    size: apk.size,
-    digest: `sha256:${checksum}`,
-  },
-};
-let existing;
-try { existing = api('contents/latest.json?ref=updates'); } catch {
-  // Create a dedicated branch once. If it already exists, the following read
-  // and write will surface a real permissions/connection failure instead.
-  try { api('git/refs', 'POST', { ref: 'refs/heads/updates', sha: commit }); } catch {}
-  try { existing = api('contents/latest.json?ref=updates'); } catch {}
+const manifest = createUpdateManifest(repository, tag, release, checksum, mirrorBase);
+function optional(path) {
+  try { return api(path); }
+  catch (error) {
+    if (/\(HTTP 404\)/.test(String(error.stderr ?? ''))) return undefined;
+    throw error; // Never turn auth/rate-limit/network failures into first-time publication.
+  }
 }
+if (!optional('git/ref/heads/updates')) api('git/refs', 'POST', { ref: 'refs/heads/updates', sha: commit });
+const existing = optional('contents/latest.json?ref=updates');
 if (existing?.content) {
   const previous = JSON.parse(Buffer.from(existing.content, 'base64').toString('utf8'));
-  const parts = (value) => value.split('.').map(Number);
-  const [a, b] = [parts(previous.version), parts(manifest.version)];
-  const firstDifference = a.map((value, index) => value - b[index]).find((value) => value !== 0);
-  if (firstDifference > 0) throw new Error('Refusing to replace the update manifest with an older release');
+  assertManifestAdvance(previous, manifest);
 }
 api('contents/latest.json', 'PUT', {
   message: `Publish update manifest for ${tag}`, branch: 'updates',

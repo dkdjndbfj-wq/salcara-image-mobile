@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
-import { colors } from '../theme';
+import { colors, themed } from '../theme';
 import { Icon, type IconName } from './Icon';
 
 /** A settings row with a switch. */
 export function ToggleRow({ icon, title, detail, value, onChange, first = false, disabled = false }: {
   icon?: IconName; title: string; detail?: string; value: boolean; onChange: (value: boolean) => void; first?: boolean; disabled?: boolean;
 }) {
+  const styles = useStyles();
   return <Pressable accessibilityRole="switch" accessibilityState={{ checked: value, disabled }} disabled={disabled} onPress={() => onChange(!value)}
     style={({ pressed }) => [styles.row, pressed && { backgroundColor: colors.surfaceStrong }, disabled && { opacity: 0.45 }]}>
     {icon ? <Icon name={icon} size={21} color={colors.textSecondary} /> : null}
@@ -23,6 +24,7 @@ export function ToggleRow({ icon, title, detail, value, onChange, first = false,
 
 /** A radio option row. */
 export function RadioRow({ title, detail, selected, onPress, first = false }: { title: string; detail?: string; selected: boolean; onPress: () => void; first?: boolean }) {
+  const styles = useStyles();
   return <Pressable accessibilityRole="radio" accessibilityState={{ selected }} onPress={onPress}
     style={({ pressed }) => [styles.row, pressed && { backgroundColor: colors.surfaceStrong }]}>
     <View style={[styles.rowBody, !first && styles.divider]}>
@@ -42,6 +44,7 @@ export function RadioRow({ title, detail, selected, onPress, first = false }: { 
 export function DraftField({ label, hint, value, onSave, placeholder, multiline = false, secure = false, maxLength }: {
   label?: string; hint?: string; value: string; onSave: (value: string) => void; placeholder?: string; multiline?: boolean; secure?: boolean; maxLength?: number;
 }) {
+  const styles = useStyles();
   const [draft, setDraft] = useState(value);
   const [focused, setFocused] = useState(false);
   const saved = useRef(value);
@@ -59,7 +62,7 @@ export function DraftField({ label, hint, value, onSave, placeholder, multiline 
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   row: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 14, paddingLeft: 16 },
   rowBody: { flex: 1, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 10, paddingRight: 14, paddingVertical: 10 },
   divider: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
@@ -73,4 +76,4 @@ const styles = StyleSheet.create({
   input: { minHeight: 44, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: colors.card, color: colors.text, fontSize: 15, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   inputMultiline: { minHeight: 104, lineHeight: 21 },
   hint: { color: colors.subtle, fontSize: 12, lineHeight: 17 },
-});
+}));

@@ -5,7 +5,7 @@ import { ACTION_ICONS, ACTION_VERBS } from '../agent/actions';
 import { extensionOf } from '../agent/files';
 import type { AgentStep, AgentTrace, GeneratedFile, PhoneAction, PlanItem, Source, StepKind } from '../agent/types';
 import { hostOf } from '../agent/web';
-import { colors, radius } from '../theme';
+import { colors, radius, themed } from '../theme';
 import { Icon, type IconName } from './Icon';
 import { Appear, MotionPressable, useReducedMotion } from './MotionPressable';
 
@@ -34,6 +34,7 @@ export function summarizeSteps(steps: AgentStep[]): string {
 
 /** The steps the assistant took, live while it works and collapsible afterwards. */
 export function AgentActivity({ trace, pending }: { trace: AgentTrace; pending: boolean }) {
+  const styles = useStyles();
   const [open, setOpen] = useState(false);
   const steps = trace.steps;
   if (!steps.length) return null;
@@ -59,6 +60,7 @@ export function AgentActivity({ trace, pending }: { trace: AgentTrace; pending: 
 }
 
 function StepRow({ step, last }: { step: AgentStep; last: boolean }) {
+  const styles = useStyles();
   return <Appear distance={4} duration={220}>
     <View style={styles.stepRow}>
       <View style={styles.rail}>
@@ -83,6 +85,7 @@ function StepRow({ step, last }: { step: AgentStep; last: boolean }) {
 }
 
 function Pulse() {
+  const styles = useStyles();
   const reduced = useReducedMotion();
   const value = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -100,6 +103,7 @@ function Pulse() {
 function openUrl(url: string) { void Linking.openURL(url).catch(() => undefined); }
 
 function SourcePill({ source, index }: { source: Source; index?: number }) {
+  const styles = useStyles();
   return <Pressable accessibilityRole="link" accessibilityLabel={`打开来源：${source.title}`} onPress={() => openUrl(source.url)}
     style={({ pressed }) => [styles.pill, pressed && { backgroundColor: colors.surfaceStrong }]}>
     {index !== undefined ? <Text style={styles.pillIndex}>{index}</Text> : <Icon name="globe" size={11} color={colors.subtle} strokeWidth={2} />}
@@ -109,6 +113,7 @@ function SourcePill({ source, index }: { source: Source; index?: number }) {
 
 /** Numbered sources under the answer; tap to expand titles. */
 export function SourcesRow({ sources }: { sources: Source[] }) {
+  const styles = useStyles();
   const [open, setOpen] = useState(false);
   if (!sources.length) return null;
   return <View style={styles.sources}>
@@ -134,6 +139,7 @@ export function SourcesRow({ sources }: { sources: Source[] }) {
 }
 
 export function PlanCard({ plan, pending }: { plan: PlanItem[]; pending: boolean }) {
+  const styles = useStyles();
   if (!plan.length) return null;
   const done = plan.filter((item) => item.done).length;
   return <View style={styles.plan}>
@@ -155,6 +161,7 @@ export function PlanCard({ plan, pending }: { plan: PlanItem[]; pending: boolean
 }
 
 export function FileCards({ files, onOpen }: { files: GeneratedFile[]; onOpen: (file: GeneratedFile) => void }) {
+  const styles = useStyles();
   if (!files.length) return null;
   return <View style={styles.cards}>
     {files.map((file) => {
@@ -175,6 +182,7 @@ export function FileCards({ files, onOpen }: { files: GeneratedFile[]; onOpen: (
 export function ActionCards({ actions, disabled, onRun, onDismiss }: {
   actions: PhoneAction[]; disabled: boolean; onRun: (action: PhoneAction) => void; onDismiss: (action: PhoneAction) => void;
 }) {
+  const styles = useStyles();
   if (!actions.length) return null;
   return <View style={styles.cards}>
     {actions.map((action) => {
@@ -208,6 +216,7 @@ export function ActionCards({ actions, disabled, onRun, onDismiss }: {
 
 /** Follow-up questions the model suggested, one tap to ask. */
 export function SuggestionList({ items, onPick }: { items: string[]; onPick: (text: string) => void }) {
+  const styles = useStyles();
   if (!items.length) return null;
   return <View style={styles.suggestions}>
     {items.map((item, index) => <Appear key={`${index}-${item}`} delay={260 + index * 70} distance={6}>
@@ -221,6 +230,7 @@ export function SuggestionList({ items, onPick }: { items: string[]; onPick: (te
 
 /** Earlier drafts replaced by a self-check redraw. */
 export function DraftStrip({ drafts, onPreview }: { drafts: string[]; onPreview: (uri: string) => void }) {
+  const styles = useStyles();
   if (!drafts.length) return null;
   return <View style={styles.drafts}>
     <Text style={styles.draftLabel}>初稿</Text>
@@ -234,7 +244,7 @@ function formatBytes(bytes: number) {
   return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   activity: { alignSelf: 'stretch', gap: 6 },
   activityHead: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'flex-start', maxWidth: '100%', minHeight: 28 },
   activityTitle: { color: colors.textMuted, fontSize: 14, fontWeight: '500', flexShrink: 1 },
@@ -297,4 +307,4 @@ const styles = StyleSheet.create({
   draftLabel: { color: colors.subtle, fontSize: 12.5 },
   draftFrame: { width: 44, height: 44, borderRadius: 10, overflow: 'hidden', backgroundColor: colors.surface },
   draftImage: { width: 44, height: 44 },
-});
+}));

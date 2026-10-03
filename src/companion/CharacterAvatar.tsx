@@ -4,6 +4,7 @@ import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
 
 import type { Character } from '../memorybox/types';
 
+import { themed } from '../theme';
 let ringSeed = 0;
 
 /**
@@ -13,6 +14,7 @@ let ringSeed = 0;
 export function CharacterAvatar({ character, size = 40, ring = false, online = false }: {
   character: Pick<Character, 'icon' | 'color' | 'name'> & { avatarUri?: string | null }; size?: number; ring?: boolean; online?: boolean;
 }) {
+  const styles = useStyles();
   const id = useRef(`avatarRing${(ringSeed += 1)}`).current;
   const icon = character.icon.trim() || [...character.name][0] || '·';
   const inset = ring ? Math.max(2.5, size * 0.07) : 0;
@@ -37,8 +39,8 @@ export function CharacterAvatar({ character, size = 40, ring = false, online = f
   </View>;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   avatar: { position: 'absolute', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   text: { fontWeight: '700', textAlign: 'center' },
-  online: { position: 'absolute', right: 0, bottom: 0, backgroundColor: '#35C77B', borderColor: '#FFFFFF' },
-});
+  online: { position: 'absolute', right: 0, bottom: 0, backgroundColor: '#35C77B', borderColor: c.border },
+}));

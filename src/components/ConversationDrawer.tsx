@@ -2,23 +2,21 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { useAgents } from '../agent/agents';
 import type { CustomAgent, HistoryHit } from '../agent/types';
 import type { Conversation } from '../domain';
-import { usePendingApprovalCount } from '../remote/store';
+import { shareConversationMarkdown } from '../storage/backup';
 import { searchMessages } from '../storage/database';
 import { useApp } from '../state/AppContext';
-import { colors, prettyModel, radius, shadow } from '../theme';
+import { colors, prettyModel, radius, shadow, themed } from '../theme';
 import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { AppDialog, dismissKeyboardAndBlur, MotionPressable, useReducedMotion, type DialogAction } from './ui';
 
-export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings, onOpenAgents, onStartAgent, onOpenRemote }: {
-  visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void; onOpenAgents: () => void; onStartAgent: (agent: CustomAgent) => void; onOpenRemote: () => void;
+export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings, onOpenAgents, onStartAgent }: {
+  visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void; onOpenAgents: () => void; onStartAgent: (agent: CustomAgent) => void;
 }) {
-  const pendingApprovals = usePendingApprovalCount();
-  const { conversations, activeConversationId, chatProvider, imageProvider, openConversation, deleteConversation, renameConversation, runningConversationIds } = useApp();
-  const agents = useAgents();
+  const styles = useStyles();
+  const { conversations, activeConversationId, chatProvider, imageProvider, openConversation, openMessage, deleteConversation, renameConversation, runningConversationIds } = useApp();
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<HistoryHit[]>([]);
   // Full-text search over messages, a moment after typing stops.
@@ -111,12 +109,6 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
               <BrandMark size={30} />
               <Text style={styles.brand}>Salcara</Text>
             </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel={`远程编程${pendingApprovals ? `，${pendingApprovals} 个待批准` : ''}`} onPress={() => { dismissKeyboardAndBlur(); onClose(); onOpenRemote(); }}
-              style={({ pressed }) => [styles.agentRow, pressed && { backgroundColor: colors.surface }]}>
-              <View style={styles.agentIcon}><Icon name="code" size={17} color={colors.textSecondary} /></View>
-              <Text style={styles.agentName}>远程编程</Text>
-              {pendingApprovals ? <View style={styles.badge}><Text style={styles.badgeText}>{pendingApprovals > 99 ? '99+' : pendingApprovals}</Text></View> : null}
-            </Pressable>
           </> : null}
 
           <ScrollView style={styles.list} contentContainerStyle={{ paddingBottom: 16 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
@@ -126,8 +118,8 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
             </View>}
             {hits.length > 0 && <View>
               <Text style={styles.groupLabel}>消息</Text>
-              {hits.map((hit) => <Pressable key={hit.messageId} accessibilityRole="button" accessibilityLabel={`打开对话：${hit.title}`}
-                onPress={() => { const target = conversations.find((item) => item.id === hit.conversationId); if (target) open(target); }}
+              {hits.map((hit) => <Pressable key={hit.messageId} accessibilityRole="button" accessibilityLabel={`打开对话“${hit.title}”里的这条消息`}
+                onPress={() => { dismissKeyboardAndBlur(); void openMessage(hit.conversationId, hit.messageId).then(onClose).catch((error) => report('暂时无法打开', error)); }}
                 style={({ pressed }) => [styles.hit, pressed && { backgroundColor: colors.surface }]}>
                 <Text style={styles.hitTitle} numberOfLines={1}>{hit.title}</Text>
                 <Text style={styles.hitSnippet} numberOfLines={2}>{hit.role === 'user' ? '你：' : ''}{hit.snippet}</Text>
@@ -158,6 +150,7 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
 
     <AppDialog visible={Boolean(menuFor)} title={menuFor?.title ?? ''} icon="chat" onClose={() => setMenuFor(null)} actions={[
       { label: '重命名', tone: 'secondary', onPress: () => { const c = menuFor; setMenuFor(null); if (c) { setRenameText(c.title); setRenaming(c); } } },
+      { label: '导出为 Markdown', tone: 'secondary', onPress: () => { const c = menuFor; setMenuFor(null); if (c) void shareConversationMarkdown(c).catch((error) => report('没有导出', error)); } },
       { label: '删除', tone: 'danger', onPress: () => { const c = menuFor; setMenuFor(null); if (c) confirmDelete(c); } },
     ]} />
     <AppDialog visible={Boolean(renaming)} title="重命名对话" icon="edit" onClose={() => setRenaming(null)} actions={[
@@ -171,6 +164,7 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
 }
 
 function DrawerRow({ title, active, running, delay, onPress, onMore }: { title: string; active: boolean; running: boolean; delay: number; onPress: () => void; onMore: () => void }) {
+  const styles = useStyles();
   const appear = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(appear, { toValue: 1, duration: 260, delay, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
@@ -187,6 +181,7 @@ function DrawerRow({ title, active, running, delay, onPress, onMore }: { title: 
 
 /** Soft breathing dot: this conversation is still replying or drawing in the background. */
 function RunningDot() {
+  const styles = useStyles();
   const reduced = useReducedMotion();
   const pulse = useRef(new Animated.Value(1)).current;
   useEffect(() => {
@@ -201,7 +196,7 @@ function RunningDot() {
   return <Animated.View accessibilityLabel="进行中" style={[styles.runningDot, { opacity: pulse }]} />;
 }
 
-const styles = StyleSheet.create({
+const useStyles = themed((c, d) => StyleSheet.create({
   overlay: { flex: 1 },
   shade: { backgroundColor: colors.scrim },
   panel: { flex: 1, backgroundColor: colors.card, ...shadow.float },
@@ -236,4 +231,4 @@ const styles = StyleSheet.create({
   settingsTitle: { color: colors.text, fontSize: 15, fontWeight: '600' },
   settingsHint: { color: colors.subtle, fontSize: 12, marginTop: 2 },
   renameInput: { minHeight: 48, borderRadius: 14, backgroundColor: colors.surfaceStrong, paddingHorizontal: 14, color: colors.text, fontSize: 15.5, marginTop: 8 },
-});
+}));
