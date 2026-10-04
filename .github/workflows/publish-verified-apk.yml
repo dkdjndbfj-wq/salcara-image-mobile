@@ -1,0 +1,102 @@
+name: Verify prior signed Android build and stage release
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful manual Android Release run ID
+        required: true
+      source_sha:
+        description: Exact tested source SHA
+        required: true
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: android-release-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  verify-and-stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Require exact successful signed production build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == dkdjndbfj-wq/salcara-image-mobile ]]
+          [[ "$BUILD_RUN" =~ ^[0-9]+$ && "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN" > run.json
+          jq -e --arg sha "$SOURCE_SHA" '.status == "completed" and .conclusion == "success" and .head_sha == $sha and .event == "workflow_dispatch" and .path == ".github/workflows/release.yml"' run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/artifacts" > artifacts.json
+          jq -e '[.artifacts[] | select(.name == "salcara-image-android" and .expired == false and (.digest | test("^sha256:[a-f0-9]{64}$")))] | length == 1' artifacts.json
+          gh run download "$BUILD_RUN" --repo "$GITHUB_REPOSITORY" --name salcara-image-android --dir verified-artifact
+          jq -r '.artifacts[] | select(.name == "salcara-image-android") | "Artifact ID=\(.id) digest=\(.digest)"' artifacts.json
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: tested-source
+          persist-credentials: false
+      - name: Verify exact bytes, ZIP, native ABIs and official overwrite signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./tested-source/package.json").version')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          name="salcara-image-android-v${version}.apk"
+          [[ "$(find verified-artifact -mindepth 1 -maxdepth 1 -type f | wc -l)" == 2 ]]
+          test -s "verified-artifact/$name"
+          test -s "verified-artifact/$name.sha256"
+          (cd verified-artifact && sha256sum --strict --check "$name.sha256")
+          unzip -t "verified-artifact/$name" > /tmp/apk-zip-check.txt
+          unzip -q "verified-artifact/$name" 'lib/*' -d verified-native
+          test -d verified-native/lib/arm64-v8a
+          test -d verified-native/lib/armeabi-v7a
+          [[ "$(find verified-native/lib -mindepth 1 -maxdepth 1 -type d | wc -l)" == 2 ]]
+          for abi in arm64-v8a armeabi-v7a; do
+            libs=0
+            while IFS= read -r -d '' library; do
+              libs=$((libs + 1))
+              readelf -h "$library" > /tmp/apk-elf-check.txt
+              if [[ "$abi" == arm64-v8a ]]; then
+                grep -Eq 'Class:[[:space:]]+ELF64' /tmp/apk-elf-check.txt
+                grep -Eq 'Machine:[[:space:]]+AArch64' /tmp/apk-elf-check.txt
+              else
+                grep -Eq 'Class:[[:space:]]+ELF32' /tmp/apk-elf-check.txt
+                grep -Eq 'Machine:[[:space:]]+ARM' /tmp/apk-elf-check.txt
+              fi
+            done < <(find "verified-native/lib/$abi" -type f -name '*.so' -print0)
+            (( libs > 0 ))
+          done
+          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease | jq -r 'map(select(.isDraft == false and .isPrerelease == false))[0].tagName // empty')"
+          [[ "$previous_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir previous-release
+          gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" --pattern "salcara-image-android-${previous_tag}.apk" --dir previous-release
+          bash tested-source/scripts/verify-apk-upgrade.sh "verified-artifact/$name" "previous-release/salcara-image-android-${previous_tag}.apk"
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          badging="$("$build_tools/aapt" dump badging "verified-artifact/$name" | sed -n '1p')"
+          [[ "$badging" == *"versionName='$version'"* ]]
+          echo "Verified exact APK SHA256, ZIP CRC, both native ELF ABIs, production package/version and unchanged official signing certificate."
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Stage verified original APK (no rebuild or private key)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          gh release create "v$RELEASE_VERSION" verified-artifact/*.apk verified-artifact/*.sha256 --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "Salcara AI v$RELEASE_VERSION" --notes-file "tested-source/docs/RELEASE-v$RELEASE_VERSION.md" --draft
+          # Root task verifies the draft, publishes it and only then announces
+          # the released APK via publish-update-manifest.mjs. Never clobber.
