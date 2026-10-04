@@ -1,42 +1,34 @@
-# 在 Mac 上构建 Salcara AI（iOS 源码包）
+# iOS 开发构建
 
-这个 ZIP 是 Expo / React Native 源码，**没有证书、描述文件、最终签名或现成 IPA**。它需要在 Mac 上用 Xcode 编译。
+[开发指南](DEVELOPMENT.md) · [产品首页](../README.md)
+
+当前正式发行的是 Android APK，没有面向普通用户的 iPhone / TestFlight 安装包。源码、未签名 IPA 和模拟器 App 都不能直接作为正式 iPhone 安装包使用；此页仅说明开发者如何从完整仓库生成 iOS 工程。
 
 ## 准备
 
-- 安装 Xcode、iOS Simulator、Node.js 22 和 CocoaPods。
-- 解压 `salcara-ai-ios-source-v1.7.0.zip`，在终端进入其中的 `salcara-image-mobile` 文件夹。
+使用 macOS、兼容当前 Expo / React Native 的 Xcode、Node.js 22 和 CocoaPods。克隆正式仓库，进入根目录；iOS 与 Android 使用同一套手机源码。当前应用身份为 top.salcara.image，1.8.0 / buildNumber 21，实际值以检出的 app.json 为准。
 
-## 生成 Xcode 工程
+## 生成与运行
 
-```sh
+~~~bash
 npm ci --legacy-peer-deps
+node scripts/verify-release-version.mjs
+npm run typecheck
 npx expo prebuild --platform ios
-open ios/*.xcworkspace
-```
+~~~
 
-在 Xcode 顶部选择 Salcara AI 的 scheme 和一个 iPhone **模拟器**，点 Run。第一次生成原生工程和安装 CocoaPods 可能需要一些时间。不要用 `.xcodeproj` 替代 `.xcworkspace`，否则 CocoaPods 依赖可能缺失。
+生成后用 Xcode 打开 ios 目录中的 .xcworkspace，选择实际 scheme 和 iPhone 模拟器，再运行。也可以使用：
 
-## 编译不带签名的模拟器 `.app`
+~~~bash
+npx expo run:ios
+~~~
 
-先在 Xcode 中确认 scheme 名称，或运行 `xcodebuild -list -workspace ios/*.xcworkspace` 查看。把以下命令的 `<scheme>` 换成实际名称：
+本地原生模块在 modules 中，与手机主代码统一维护。使用 CocoaPods 时不要用 .xcodeproj 替代 .xcworkspace。prebuild 会生成或更新原生项目，先保存已有原生改动；不要在有未提交修改的工程随意使用 clean。
 
-```sh
-xcodebuild \
-  -workspace ios/*.xcworkspace \
-  -scheme '<scheme>' \
-  -configuration Release \
-  -sdk iphonesimulator \
-  -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath build/ios-unsigned \
-  CODE_SIGNING_ALLOWED=NO \
-  build
-```
+## 真机与用户分发
 
-产物位于 `build/ios-unsigned/Build/Products/Release-iphonesimulator/` 中，是**只能给模拟器使用**的未签名 `.app`。本项目的 iOS 原生模块源码已包含在 `modules/`，但打包 ZIP 时没有 Mac 环境，无法代替你验证 Xcode 编译结果。
+真机运行需要适当的 Apple 开发签名与描述文件；在 Xcode 选择自己的开发团队和设备。公开长期分发还需要正确的 Apple 分发配置，不能把关闭代码签名的构建当作可安装正式包。
 
-## 如果要在真机上安装
+现有 Unsigned iOS IPA workflow 仅供检查源码构建，手动运行时选择想核验的确切标签；它不会创建正式签名身份或提供普通用户安装渠道。其默认历史标签不代表当前最新版本。
 
-iPhone 不能安装未签名的模拟器 `.app`。你可以在 Xcode 的 **Signing & Capabilities** 里选择自己的 Apple Account / Personal Team，连接自己的 iPhone，再用 Xcode Run 安装。这是开发测试签名，不是本 ZIP 附带的最终分发签名；免费 Personal Team 的配置文件有效期为 7 天，到期后需要重新编译安装。要向其他用户长期分发，则需要合适的 Apple 开发者分发方式和签名。
-
-本项目的 iOS 包名是 `top.salcara.image`，版本为 `1.7.0 (20)`。如果你的 Personal Team 提示该包名不可注册，可以在 `app.json` 修改 `ios.bundleIdentifier` 为你自己的唯一值，再重新运行 `npx expo prebuild --platform ios --clean`；这样它将是另一款应用，不能覆盖原包名安装。
+没有在本轮执行 Xcode / iPhone 实机验收。语音、通知、系统操作与后台行为存在平台差异，Android 测试通过不能替代 iOS 验收。未经签名与设备验证，不在 README 宣布 iPhone 正式可用。
