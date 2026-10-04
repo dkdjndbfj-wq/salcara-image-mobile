@@ -1,4 +1,4 @@
-name: Verify prior signed Android build and stage release
+name: Verify prior signed Android build and prepare release
 on:
   workflow_dispatch:
     inputs:
@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
 permissions:
-  contents: write
+  contents: read
   actions: read
 concurrency:
   group: android-release-${{ github.repository }}
@@ -110,12 +110,14 @@ jobs:
           [[ "$badging" == *"versionName='$version'"* ]]
           echo "Verified exact APK SHA256, ZIP CRC, both native ELF ABIs, production package/version and unchanged official signing certificate."
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
-      - name: Stage verified original APK (no rebuild or private key)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          set -euo pipefail
-          gh release create "v$RELEASE_VERSION" verified-artifact/*.apk verified-artifact/*.sha256 --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "Salcara AI v$RELEASE_VERSION" --notes-file "tested-source/docs/RELEASE-v$RELEASE_VERSION.md" --draft
-          # Root task verifies the draft, publishes it and only then announces
-          # the released APK via publish-update-manifest.mjs. Never clobber.
+      - name: Preserve verified original release assets (no rebuild or private key)
+        uses: actions/upload-artifact@v4
+        with:
+          name: salcara-verified-release-v${{ env.RELEASE_VERSION }}
+          path: |
+            verified-artifact/*.apk
+            verified-artifact/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+          # This helper only verifies/prepares. The release owner creates the
+          # exact-source release and then the released-only update manifest.
