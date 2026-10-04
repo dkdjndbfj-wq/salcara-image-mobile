@@ -8,6 +8,10 @@ on:
       source_sha:
         description: Exact tested source SHA
         required: true
+      repair_legacy_name:
+        description: Normalize the verified v1.8.0 historical artifact name without rebuilding its bytes
+        type: boolean
+        default: false
 permissions:
   contents: write
   actions: read
@@ -52,12 +56,27 @@ jobs:
       - name: Verify exact bytes, ZIP, native ABIs and official overwrite signature
         env:
           GH_TOKEN: ${{ github.token }}
+          REPAIR_LEGACY_NAME: ${{ inputs.repair_legacy_name }}
+          BUILD_RUN: ${{ inputs.run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           version="$(node -p 'require("./tested-source/package.json").version')"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           name="salcara-image-android-v${version}.apk"
           [[ "$(find verified-artifact -mindepth 1 -maxdepth 1 -type f | wc -l)" == 2 ]]
+          if [[ "$REPAIR_LEGACY_NAME" == true ]]; then
+            # A one-time, source/run/hash-bound migration, not a wildcard APK
+            # selector or permission to relabel another version/debug build.
+            [[ "$BUILD_RUN" == 37141556903 && "$SOURCE_SHA" == c47d0a481d8e372f37098651cedc8a73fac9697d && "$version" == 1.8.0 ]]
+            test -s verified-artifact/salcara-image-android-v.apk
+            test -s verified-artifact/salcara-image-android-v.apk.sha256
+            (cd verified-artifact && sha256sum --strict --check salcara-image-android-v.apk.sha256)
+            [[ "$(sha256sum verified-artifact/salcara-image-android-v.apk | cut -d ' ' -f 1)" == 9f33363cda8abeeda83fa4a7a891fa89f97f308e315b15c0eac4fab933b3fea9 ]]
+            mv verified-artifact/salcara-image-android-v.apk "verified-artifact/$name"
+            rm verified-artifact/salcara-image-android-v.apk.sha256
+            (cd verified-artifact && sha256sum "$name" > "$name.sha256")
+          fi
           test -s "verified-artifact/$name"
           test -s "verified-artifact/$name.sha256"
           (cd verified-artifact && sha256sum --strict --check "$name.sha256")
