@@ -46,3 +46,13 @@ test('real bash version step writes the complete stable tag and fails closed on 
     }
   }
 });
+
+test('manual artifact verifier is read-only and excludes the target release from previous-version checks', () => {
+  const verifier = readFileSync(new URL('../.github/workflows/publish-verified-apk.yml', import.meta.url), 'utf8');
+  assert.match(verifier, /contents: read/);
+  assert.doesNotMatch(verifier, /contents: write|gh release (?:create|edit|upload)/);
+  assert.match(verifier, /--arg current "v\$version"/);
+  assert.match(verifier, /\.tagName != \$current/);
+  assert.match(verifier, /SOURCE_SHA.*c47d0a481d8e372f37098651cedc8a73fac9697d/);
+  assert.match(verifier, /9f33363cda8abeeda83fa4a7a891fa89f97f308e315b15c0eac4fab933b3fea9/);
+});

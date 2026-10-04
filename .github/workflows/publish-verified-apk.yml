@@ -100,7 +100,7 @@ jobs:
             done < <(find "verified-native/lib/$abi" -type f -name '*.so' -print0)
             (( libs > 0 ))
           done
-          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease | jq -r 'map(select(.isDraft == false and .isPrerelease == false))[0].tagName // empty')"
+          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease | jq -r --arg current "v$version" 'map(select(.isDraft == false and .isPrerelease == false and .tagName != $current))[0].tagName // empty')"
           [[ "$previous_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mkdir previous-release
           gh release download "$previous_tag" --repo "$GITHUB_REPOSITORY" --pattern "salcara-image-android-${previous_tag}.apk" --dir previous-release
