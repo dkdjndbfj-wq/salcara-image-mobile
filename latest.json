@@ -1,15 +1,15 @@
 {
-  "version": "1.7.0",
-  "tagName": "v1.7.0",
-  "title": "Salcara AI v1.7.0",
-  "notes": "# Salcara AI v1.7.0\n\nAndroid `versionCode` 从 19 递增到 20，可覆盖安装 v1.6.2。应用包名和发布签名保持不变；本地会话、文件及服务商设置不会因覆盖安装而清除。\n\n## 本次更新\n\n- 统一对话、图片创作与工具调用的交互，补充文件预览、语音服务与远程会话入口。\n- 改进图片和对话请求的错误处理、网络诊断以及应用更新体验。\n- 补齐 iOS 原生语音、PDF 渲染、日历模块的源码，准备独立的 Mac/Xcode 源码包；iOS 尚未在本次 Android 发布流水线中编译或签名。\n- 维护 Expo SDK 57 依赖版本，修正 Android / iOS 版本信息不一致的问题。\n\n## 验证\n\n- TypeScript 类型检查与 Expo Doctor 通过。\n- 自动化测试通过；Android APK 由 GitHub Actions 使用原有发布证书签名，并在发布前检查旧版覆盖安装兼容性。\n\n应用不内置 API 密钥。iOS 源码包只用于在 Mac 上构建，不是可直接安装到 iPhone 的无签名 IPA。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.7.0",
-  "publishedAt": "2026-09-29T15:51:01Z",
+  "version": "1.8.0",
+  "tagName": "v1.8.0",
+  "title": "Salcara AI v1.8.0",
+  "notes": "# Salcara AI v1.8.0\n\nAndroid 正式应用，包名保持 `top.salcara.image`，版本号 1.8.0 / versionCode 21。沿用上一版本签名身份，保留已有应用数据。\n\n- 发布 Claude 已完成的手机代码，包括远程编程、浅深主题和通知模块；本次没有重新设计界面或动画。\n- 补齐自动更新的下载入口超时切换、取消保护、正式 APK 精确选择和已发布清单校验。\n- 更新包先完成大小与 SHA-256 校验，再交给 Android 安装器；安装仍需用户同意系统提示。\n\nFirebase 配置为可选项；本包没有包含 Firebase 服务账号。iOS 尚无正式签名发行身份，本次不提供可安装 iPhone 包。\n\n远程能力受 Agent 原生接口和用户授权限制。Claude Desktop 原生 Chat/Cowork 发送与停止不应被视为已实现；Codex 桌面适配仍需目标电脑验收。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.0",
+  "publishedAt": "2026-10-04T07:46:55Z",
   "apk": {
-    "name": "salcara-image-android-v1.7.0.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.7.0/salcara-image-android-v1.7.0.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/598592198",
-    "size": 130290643,
-    "digest": "sha256:bb80a84b3ba466e9bdf2d080238fd458361128922168cd79b49ae3e738f90ba2"
+    "name": "salcara-image-android-v1.8.0.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.0/salcara-image-android-v1.8.0.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/609379744",
+    "size": 97780873,
+    "digest": "sha256:9f33363cda8abeeda83fa4a7a891fa89f97f308e315b15c0eac4fab933b3fea9"
   }
 }
