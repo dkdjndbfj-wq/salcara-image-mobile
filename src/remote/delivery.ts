@@ -66,6 +66,21 @@ export async function pendingDelivery(scope: string, deviceId: string, sessionKe
   });
 }
 
+/**
+ * Lists every outstanding message receipt for one active station/computer.
+ * The session directory is allowed to be cold or partially loaded, so callers
+ * that are about to change the station must not rely on a UI timeline to find
+ * all receipts.
+ */
+export async function pendingDeliveriesForDevice(scope: string, deviceId: string): Promise<PendingDelivery[]> {
+  await queue;
+  if (!(await records()).some((item) => item.scope === scope && item.deviceId === deviceId)) return [];
+  return edit((list) => list.filter((item) => item.scope === scope && item.deviceId === deviceId).map((item) => {
+    observe(item);
+    return { ...item, ...(item.sendOptions ? { sendOptions: { ...item.sendOptions } } : {}) };
+  }));
+}
+
 /** Observation cannot renew a retry deadline, and a blocked deadline remains blocked across restarts. */
 function observe(item: PendingDelivery) {
   const now = Date.now();

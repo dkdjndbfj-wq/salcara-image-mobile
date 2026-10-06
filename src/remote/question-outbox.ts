@@ -89,6 +89,10 @@ export function prepareQuestionReceipt(input: Target & Pick<QuestionReceipt, 'ap
 export function pendingQuestionReceipts(target: Target): Promise<QuestionReceipt[]> {
   return edit(records => records.filter(value => same(value, target)).map(value => { observe(value); return clone(value); }));
 }
+/** Station handover guard: the approval UI may not have loaded every thread. */
+export function pendingQuestionReceiptsForDevice(scope: string, deviceId: string): Promise<QuestionReceipt[]> {
+  return edit(records => records.filter(value => value.scope === scope && value.deviceId === deviceId).map(value => { observe(value); return clone(value); }));
+}
 /** Journal attempted=true before any network side effect, including retries. */
 export function markQuestionAttempt(receipt: QuestionReceipt): Promise<void> {
   return edit(records => {

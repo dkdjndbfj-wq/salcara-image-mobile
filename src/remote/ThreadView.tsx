@@ -144,6 +144,7 @@ export function ThreadView({ visible, deviceId, sessionKey, agent, onClose, onCr
   const [questionProblem, setQuestionProblem] = useState('');
   const answerDraft = useRef<{ scope: string; id: string; answers?: QuestionAnswers } | null>(null);
   const approvalRequest = useRef<{ scope: string; id: string; controller?: AbortController } | null>(null);
+  const historyReadController = useRef<AbortController | null>(null);
   const [inputSpace, setInputSpace] = useState<number>();
   const [approvalClock, setApprovalClock] = useState(Date.now());
   const listRef = useRef<FlatList<ConversationBlock>>(null);
@@ -241,6 +242,14 @@ export function ThreadView({ visible, deviceId, sessionKey, agent, onClose, onCr
   useEffect(() => {
     if (!visible) return;
     let alive = true;
+    // The initial authoritative read can be a long-poll/native desktop
+    // command. Cancel it when backgrounded, closed or replaced so a hidden
+    // screen cannot keep a transport occupied (or publish into the next
+    // thread). This mirrors the live-sync cancellation path below.
+    let controller = new AbortController();
+    let initialReadFinished = false;
+    historyReadController.current?.abort();
+    historyReadController.current = null;
     const prefsRequest = ++prefsRevision.current, prefsApi = apiIdentityRef.current;
     setText(''); setSending(false); setPendingDelivery(null); setDenying(null); setModel(''); setEffort(''); setImages([]); setApiError(null); setDismissedError(''); setPicker(null);
     setQueued(null); setSearchOpen(false); setSearchQuery(''); setSearchPos(0); setDiffFile(null); setViewImage(null); setRenaming(null);
@@ -251,6 +260,16 @@ export function ThreadView({ visible, deviceId, sessionKey, agent, onClose, onCr
     if (deviceId) setModels(cachedModels(deviceId, agent?.tool ?? 'codex') ?? { models: [] });
     followRef.current = true;
     void loadRemoteDraft(draftKey).then((saved) => { if (alive && draftRef.current === draftKey) setText((current) => current || saved); }).catch(() => undefined);
+    const readInitialHistory = () => {
+      if (!alive || !deviceId || !sessionKey || controller.signal.aborted) return;
+      const reading = controller;
+      void openSession(deviceId, sessionKey, { signal: reading.signal }).then(() => {
+        if (alive && !reading.signal.aborted && controller === reading && draftRef.current === draftKey) {
+          initialReadFinished = true;
+          freshSnapshot.current = draftKey; setRestoreGeneration(value => value + 1);
+        }
+      }).catch(() => undefined);
+    };
     if (deviceId && sessionKey) {
       void getPendingRemoteMessage(deviceId, sessionKey).then((pending) => {
         if (!alive || !pending) return;
@@ -258,11 +277,18 @@ export function ThreadView({ visible, deviceId, sessionKey, agent, onClose, onCr
         setPendingDelivery({ text: pending.text, retryable: policy.retryable, message: policy.message });
       }).catch(() => undefined);
       void hydrateCachedThread(deviceId, sessionKey);
-      void openSession(deviceId, sessionKey).then(() => {
-        if (alive && draftRef.current === draftKey) { freshSnapshot.current = draftKey; setRestoreGeneration(value => value + 1); }
-      }).catch(() => undefined);
     }
-    return () => { alive = false; };
+    const subscription = AppState.addEventListener('change', (next: string) => {
+      if (!alive) return;
+      if (next !== 'active') {
+        controller.abort(); historyReadController.current?.abort(); historyReadController.current = null;
+      } else if (!initialReadFinished && controller.signal.aborted) {
+        controller = new AbortController(); readInitialHistory();
+      }
+    });
+    if (AppState.currentState === 'background' || AppState.currentState === 'inactive') controller.abort();
+    else readInitialHistory();
+    return () => { alive = false; subscription.remove(); controller.abort(); historyReadController.current?.abort(); historyReadController.current = null; };
   }, [visible, deviceId, sessionKey, draftKey, operationScope]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const textRef = useRef(text); textRef.current = text;
@@ -375,10 +401,11 @@ export function ThreadView({ visible, deviceId, sessionKey, agent, onClose, onCr
   }, [visible, deviceId, sessionKey]);
   // Live updates: one held request while something is happening; nothing while idle.
   const needLive = Boolean(visible && deviceId && sessionKey) && (running || Date.now() < watchUntil || Boolean(pendingDelivery?.retryable));
-  useLiveSync(Boolean(visible && deviceId && sessionKey), needLive, !desktopLive && !readOnly && hubSupportsWait(), async (wait) => {
-    if (!deviceId || !sessionKey) return;
+  useLiveSync(Boolean(visible && deviceId && sessionKey), needLive, !desktopLive && !readOnly && hubSupportsWait(), async (wait, signal) => {
+    if (!deviceId || !sessionKey || signal?.aborted) return;
     if (pendingDelivery?.retryable) await deliver(pendingDelivery.text, true);
-    await syncSessionEvents(deviceId, sessionKey, wait);
+    if (signal?.aborted) return;
+    await syncSessionEvents(deviceId, sessionKey, wait, signal);
   }, watchUntil);
 
   const refresh = async () => {
@@ -771,7 +798,12 @@ export function ThreadView({ visible, deviceId, sessionKey, agent, onClose, onCr
             disabled={timeline.loadingEarlier || !online} onPress={() => {
               if (!visible || !deviceId || !sessionKey || !online) return;
               followRef.current = false;
-              void loadEarlierHistory(deviceId, sessionKey).catch(() => undefined);
+               historyReadController.current?.abort();
+               const controller = new AbortController();
+               historyReadController.current = controller;
+               void loadEarlierHistory(deviceId, sessionKey, controller.signal).catch(() => undefined).finally(() => {
+                 if (historyReadController.current === controller) historyReadController.current = null;
+               });
             }} style={{ minHeight: 42, alignItems: 'center', justifyContent: 'center' }}>
             {timeline.loadingEarlier ? <ActivityIndicator size="small" color={dk.muted} /> : <Text style={{ color: dk.muted, fontSize: 12 }}>{timeline.earlierError ? '加载失败，重试' : '更早记录'}</Text>}
           </Pressable> : null}

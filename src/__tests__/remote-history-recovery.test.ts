@@ -40,6 +40,21 @@ async function pair() {
 beforeEach(() => { resetRemoteForTests(); mockSettings.clear(); mockSecrets.clear(); commands.length = 0; device.online = true; });
 afterEach(() => { resetRemoteForTests(); setHubFetch(null); device.online = true; });
 
+test('initial open and live sync share the in-flight snapshot without losing history', async () => {
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  setHubFetch(transport(async (_url, command) => {
+    if (command?.type === 'session.open') { await gate; return { ok: true, result: { session, events: [event('shared', 10)], lastSeq: 0 } }; }
+    return { events: [], nextSeq: 0, lastSeq: 0 };
+  }));
+  await pair(); const opened = openSession('pc', key);
+  await Promise.resolve(); await Promise.resolve();
+  const synced = syncSessionEvents('pc', key);
+  release?.(); await Promise.all([opened, synced]);
+  expect(commands.filter(type => type === 'session.open')).toHaveLength(1);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual(expect.arrayContaining([expect.objectContaining({ text: 'shared' })]));
+});
+
 test('scoped directory reads more than 100 chats, keeps other Agents and deduplicates overlap', async () => {
   const writes: Record<string, unknown>[] = [];
   setHubFetch(transport((_url, command) => {
@@ -75,6 +90,49 @@ test('a failed earlier page retains the cursor, current content and a retry affo
   await pair(); await openSession('pc', key); await expect(loadEarlierHistory('pc', key)).rejects.toThrow('fixture page unavailable');
   expect(getRemoteState().timelines[timelineKey('pc', key)]).toMatchObject({ nextCursor: 'older', loadingEarlier: false, earlierError: 'fixture page unavailable' });
   expect(getRemoteState().timelines[timelineKey('pc', key)].items.map(item => item.id)).toEqual(['current']);
+});
+
+test('cancelling an earlier page releases its spinner and retains the cursor for retry', async () => {
+  let release!: (value: unknown) => void; let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let pages = 0;
+  setHubFetch(transport((_url, command) => {
+    if (!command) return { events: [], lastSeq: 0, nextSeq: 0 };
+    if (!command.cursor) return { ok: true, result: { session, events: [event('recent', 10)], nextCursor: 'older' } };
+    if (++pages === 1) { entered(); return new Promise(resolve => { release = resolve; }); }
+    return { ok: true, result: { session, events: [event('old', 1)] } };
+  }));
+  await pair(); await openSession('pc', key);
+  const controller = new AbortController();
+  const reading = loadEarlierHistory('pc', key, controller.signal); await started;
+  controller.abort();
+  release({ ok: true, result: { session, events: [event('cancelled', 1)] } }); await reading;
+  expect(getRemoteState().timelines[timelineKey('pc', key)]).toMatchObject({ nextCursor: 'older', loadingEarlier: false });
+  expect(getRemoteState().timelines[timelineKey('pc', key)].earlierError).toBeUndefined();
+  await loadEarlierHistory('pc', key);
+  expect(pages).toBe(2);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items.map(item => item.id)).toEqual(['old', 'recent']);
+});
+
+test('a cancelled stale page cannot clear the spinner owned by a newer history read', async () => {
+  const releases: Array<(value: unknown) => void> = [];
+  setHubFetch(transport((_url, command) => {
+    if (!command) return { events: [], lastSeq: 0, nextSeq: 0 };
+    if (!command.cursor) return { ok: true, result: { session, events: [event('recent', 10)], nextCursor: 'older' } };
+    return new Promise(resolve => { releases.push(resolve); });
+  }));
+  await pair(); await openSession('pc', key);
+  const controller = new AbortController();
+  const stale = loadEarlierHistory('pc', key, controller.signal);
+  await Promise.resolve(); await Promise.resolve();
+  await openSession('pc', key);
+  const current = loadEarlierHistory('pc', key);
+  await Promise.resolve(); await Promise.resolve();
+  expect(releases).toHaveLength(2);
+  controller.abort(); releases[0]({ ok: true, result: { session, events: [] } }); await stale;
+  expect(getRemoteState().timelines[timelineKey('pc', key)].loadingEarlier).toBe(true);
+  releases[1]({ ok: true, result: { session, events: [event('old', 1)] } }); await current;
+  expect(getRemoteState().timelines[timelineKey('pc', key)].loadingEarlier).toBe(false);
 });
 
 test('automatic directory head refresh preserves older pages and their continuation cursor', async () => {

@@ -26,7 +26,7 @@ import {
   AGENT_CHOICES, agentApiLabel, agentApiSourceLabel, fallbackAgentProfiles,
 } from './projection';
 import {
-  connectStation, getRemoteState, hydrateCachedThread, lastAgent, loadAgentProfiles, loadSessions, pairRemote, pairRemoteQr, parseRemoteQr, rememberAgent,
+  connectStation, getRemoteState, hydrateCachedThread, lastAgent, loadAgentProfiles, loadSessions, pairRemote, pairScannedRemoteQr, parseScannedRemoteQr, rememberAgent,
   revokeRemoteConnection, setRemoteFocus, setRemoteScreenOpen, useRemote, type RemoteState,
 } from './store';
 import { ThreadView, type ContinueSeed } from './ThreadView';
@@ -141,7 +141,17 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
     if (navigation.current.route === 'connect' || navigation.current.route === 'opening' || navigation.current.route === 'workspace') navigate('home');
   }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (deviceId || remote.phase !== 'ready') return;
+    if (remote.phase !== 'ready') return;
+    // A station handover may assign a different credential-scoped device ID.
+    // Do not keep sending the old station's ID just because the local React
+    // state was already populated before the handover completed.  At the same
+    // time, keep a valid selection untouched during ordinary refreshes.
+    const activeDeviceExists = Boolean(deviceId && remote.devices.some((item) => item.deviceId === deviceId));
+    if (deviceId && !activeDeviceExists && profile?.deviceId) {
+      setDeviceId(profile.deviceId);
+      return;
+    }
+    if (deviceId) return;
     const preferred = remote.devices.find((item) => item.deviceId === profile?.deviceId) ?? (remote.devices.length === 1 ? remote.devices[0] : undefined);
     if (preferred) setDeviceId(preferred.deviceId);
   }, [deviceId, remote.phase, remote.devices, profile?.deviceId]);
@@ -155,7 +165,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
   }, [visible, remote.focus]);
 
   const back = () => {
-    if (route === 'pairing') { navigate('setup'); return true; }
+    if (route === 'pairing') { navigate('devices'); return true; }
     if (route === 'setup') { navigate('devices'); return true; }
     if (route === 'workspace') { navigate('home'); return true; }
     if (route === 'connect' && connectFrom.current === 'workspace') { connectFrom.current = 'home'; navigate('workspace'); return true; }
@@ -187,13 +197,11 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
         ? <RemoteHome visible={visible && !apiLibrary && !menu} remote={remote} device={device}
           onComputer={() => navigate('devices')} onApi={() => setApiLibrary(true)} onAgent={openAgent} onProjects={() => openAgent(agentId)} onSession={openRecent} onDownload={() => void openDesktopGithub()} />
         : step === 'devices'
-          ? <RemoteComputers remote={remote} onBind={() => navigate('setup')} onSelected={(id) => { if (!stillHere('devices', revision)) return; setDeviceId(id); navigate(getRemoteState().phase === 'pairing' ? 'pairing' : 'home'); }} />
+          ? <RemoteComputers remote={remote} onBind={() => navigate('pairing')} onSelected={(id) => { if (!stillHere('devices', revision)) return; setDeviceId(id); navigate(getRemoteState().phase === 'pairing' ? 'pairing' : 'home'); }} />
         : step === 'setup'
           ? <Setup remote={remote} stillWanted={() => stillHere('setup', revision, scope)} onConnected={() => { if (stillHere('setup', revision)) navigate(getRemoteState().phase === 'pairing' ? 'pairing' : 'home'); }} />
           : step === 'pairing'
-            ? remote.selectedHubUrl
-              ? <QrPairing key={remote.selectedHubUrl} visible={visible} remote={remote} onChangeStation={() => { if (stillHere('pairing', revision)) navigate('setup'); }} onPaired={() => { if (stillHere('pairing', revision)) navigate('home'); }} />
-              : <LegacyPairing onPaired={() => { if (stillHere('pairing', revision)) navigate('home'); }} />
+            ? <QrPairing visible={visible} remote={remote} autoScan onChangeStation={() => { if (stillHere('pairing', revision)) navigate('setup'); }} onPaired={() => { if (stillHere('pairing', revision)) navigate('home'); }} />
             : step === 'opening'
               ? <View style={styles.center}><ActivityIndicator color={dk.muted} /></View>
             : step === 'workspace' && deviceId && agent
@@ -283,7 +291,7 @@ function Setup({ remote, onConnected, stillWanted }: { remote: RemoteState; onCo
 
 // ——— step 2: QR pairing ———
 
-export function QrPairing({ visible, remote, onChangeStation, onPaired }: { visible: boolean; remote: RemoteState; onChangeStation: () => void; onPaired?: () => void }) {
+export function QrPairing({ visible, remote, onChangeStation, onPaired, autoScan = false }: { visible: boolean; remote: RemoteState; onChangeStation: () => void; onPaired?: () => void; autoScan?: boolean }) {
   const p = useProgrammingStyles();
   const dk = useDesk();
   const styles = useStyles();
@@ -294,34 +302,42 @@ export function QrPairing({ visible, remote, onChangeStation, onPaired }: { visi
   const [error, setError] = useState<string | null>(null);
   const scanGate = useRef(false);
   const confirmGate = useRef(false);
+  const startGate = useRef(false);
+  const autoStarted = useRef(false);
   const isVisible = useRef(visible); isVisible.current = visible;
   useEffect(() => () => { isVisible.current = false; scanGate.current = true; }, []);
-  useEffect(() => { if (!visible) { setScanning(false); setPending(null); scanGate.current = true; } }, [visible]);
+  useEffect(() => { if (!visible) { setScanning(false); setPending(null); scanGate.current = true; autoStarted.current = false; } }, [visible]);
   const start = async () => {
-    if (!isVisible.current || confirmGate.current) return;
-    const allowed = permission?.granted ? permission : await requestPermission();
-    if (!isVisible.current) return;
-    if (!allowed.granted) { setError('请允许相机权限，用来扫描电脑上的二维码'); return; }
-    setError(null); setPending(null); scanGate.current = false; setScanning(true);
+    if (!isVisible.current || confirmGate.current || startGate.current) return;
+    startGate.current = true;
+    try {
+      const allowed = permission?.granted ? permission : await requestPermission();
+      if (!isVisible.current) return;
+      if (!allowed.granted) { setError('请允许相机权限，用来扫描电脑上的二维码'); return; }
+      setError(null); setPending(null); scanGate.current = false; setScanning(true);
+    } catch { if (isVisible.current) setError('相机无法启动，请检查权限或重试'); }
+    finally { startGate.current = false; }
   };
+  useEffect(() => { if (visible && autoScan && !autoStarted.current) { autoStarted.current = true; void start(); } }, [visible, autoScan]); // eslint-disable-line react-hooks/exhaustive-deps
   const scan = ({ data, type }: { data: string; type?: string }) => {
     if (type && type !== 'qr') return;
     if (scanGate.current || !visible) return;
     scanGate.current = true; setScanning(false);
-    try { setPending(parseRemoteQr(data)); } catch (reason) { setError((reason as Error).message); }
+    try { setPending(parseScannedRemoteQr(data)); } catch (reason) { setError((reason as Error).message); }
   };
   const confirm = async () => {
     if (!isVisible.current || !pending || confirmGate.current) return;
     confirmGate.current = true;
     setBusy(true); setError(null);
-    try { await pairRemoteQr(pending); if (!isVisible.current) return; setPending(null); showToast('电脑配对成功', 'check'); onPaired?.(); }
+    try { await pairScannedRemoteQr(pending, () => isVisible.current); if (!isVisible.current) return; setPending(null); showToast('电脑配对成功', 'check'); onPaired?.(); }
     catch (reason) { setPending(null); setError((reason as Error).message); }
     finally { confirmGate.current = false; setBusy(false); }
   };
-  const host = remote.selectedHubUrl ? new URL(remote.selectedHubUrl).host : '';
+  const station = pending?.hubUrl || (autoScan ? '' : remote.selectedHubUrl);
+  const host = station ? new URL(station).host : '';
   return <>
     <ScrollView contentContainerStyle={p.page}>
-      <ProgrammingHeading title="扫码连接" subtitle="打开电脑端「手机远程」，扫描它的二维码" step="02 / 02" />
+      <ProgrammingHeading title="扫码连接" subtitle="打开电脑端「手机远程」，扫描它的二维码" step={autoScan ? '01 / 01' : '02 / 02'} />
       <ProgrammingCard soft><View style={styles.scanPreview}>
         <View style={styles.scanFrame}>
           {(['tl', 'tr', 'bl', 'br'] as const).map(corner => <View key={corner} style={[styles.scanCorner, styles[corner]]} />)}

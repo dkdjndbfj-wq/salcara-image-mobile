@@ -18,6 +18,9 @@ export function isDesktopClient(client?: string): boolean { return /Claude Deskt
 const label = (value: unknown) => typeof value === 'string' && value.length <= 200
   && !/[\r\n\x00]/.test(value) && !/(?:https?:\/\/|sk-|bearer\s|[\\]|[a-f0-9]{32,})/i.test(value) ? value : '';
 const handle = (value: unknown) => typeof value === 'string' && /^api_[a-f0-9]{8,64}$/.test(value) ? value : undefined;
+const stationUrl = (value: unknown) => typeof value === 'string' && value.length <= 512 && !/[\\\s?#\u0000-\u001f]/.test(value)
+  && /^https?:\/\/[^/]+(?:\/[^/]*)*\/?$/i.test(value) ? value : undefined;
+const stationDevice = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : undefined;
 
 const THREAD = /^codex:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function liveMode(value: unknown, now = Date.now()): Pick<AgentProfile, 'desktopLive'> {
@@ -77,7 +80,10 @@ export function parseAgentStatus(result: unknown, device?: DeviceStatus): AgentS
     const id = handle(item.id); const name = label(item.name);
     if (!id || !name) return [];
     const models = Array.isArray(item.models) ? item.models.map(label).filter(Boolean).slice(0, 80) : [];
-    return [{ id, name, models }];
+    const stationRaw = item.station && typeof item.station === 'object' ? item.station as Record<string, unknown> : undefined;
+    const stationHubUrl = stationUrl(stationRaw?.hubUrl);
+    const stationDeviceId = stationDevice(stationRaw?.deviceId);
+    return [{ id, name, models, ...(stationHubUrl && stationDeviceId ? { station: { hubUrl: stationHubUrl, deviceId: stationDeviceId } } : {}) }];
   }).slice(0, 64) : [];
   const policy = (result as unknown as { policy?: { autoAll?: unknown } }).policy;
   // Older Bridges did not restrict it; newer ones report the computer's switch.

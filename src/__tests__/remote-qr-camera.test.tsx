@@ -14,7 +14,7 @@ jest.mock('expo-camera', () => ({
 }));
 jest.mock('../state/AppContext', () => ({ useApp: () => ({ providers: [] }) }));
 jest.mock('../remote/ThreadView', () => ({ ThreadView: () => null }));
-jest.mock('../remote/store', () => ({ parseRemoteQr: (...args: unknown[]) => mockParse(...args), pairRemoteQr: (...args: unknown[]) => mockPair(...args) }));
+jest.mock('../remote/store', () => ({ parseScannedRemoteQr: (...args: unknown[]) => mockParse(...args), pairScannedRemoteQr: (...args: unknown[]) => mockPair(...args) }));
 jest.mock('../components/ui', () => {
   const React = require('react'); const { View, Text, Pressable } = require('react-native');
   return {
@@ -45,7 +45,7 @@ test('camera is QR-only, repeated scan is gated and no ticket exchange occurs be
   expect(view.getByText(/My PC/)).toBeTruthy();
   await fireEvent.press(view.getByText('连接'));
   expect(mockPair).toHaveBeenCalledTimes(1);
-  expect(mockPair).toHaveBeenCalledWith(mockQr);
+  expect(mockPair).toHaveBeenCalledWith(mockQr, expect.any(Function));
 });
 
 test('denied camera permission never mounts a camera or sends a ticket', async () => {

@@ -5,7 +5,7 @@ import { useLiveSync } from '../remote/useLiveSync';
 
 let change: ((next: string) => void) | undefined;
 let subscription: jest.SpyInstance;
-function Harness({ sync, enabled = true, wake = 0 }: { sync: (wait: number) => Promise<void>; enabled?: boolean; wake?: number }) {
+function Harness({ sync, enabled = true, wake = 0 }: { sync: (wait: number, signal?: AbortSignal) => Promise<void>; enabled?: boolean; wake?: number }) {
   useLiveSync(enabled, enabled, false, sync, wake);
   return null;
 }
@@ -20,6 +20,19 @@ beforeEach(() => {
 });
 afterEach(() => { subscription.mockRestore(); jest.useRealTimers(); });
 async function advance(ms: number) { await act(async () => { jest.advanceTimersByTime(ms); }); }
+
+test('wake/effect restart cannot overlap an old held network read', async () => {
+  let release: (() => void) | undefined;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const sync = jest.fn<Promise<void>, [number]>().mockImplementationOnce(() => held).mockResolvedValue(undefined);
+  const view = await render(<Harness sync={sync} wake={0} />);
+  expect(sync).toHaveBeenCalledTimes(1);
+  await view.rerender(<Harness sync={sync} wake={1} />);
+  await advance(10_000); expect(sync).toHaveBeenCalledTimes(1);
+  await act(async () => { release?.(); });
+  expect(sync).toHaveBeenCalledTimes(2);
+  await view.unmount();
+});
 
 test('background and hidden threads do not keep retrying, foreground tries immediately', async () => {
   const sync = jest.fn(async () => { throw new Error('offline fixture'); });
@@ -64,4 +77,17 @@ test('one successful synchronization resets failed-request backoff', async () =>
   await advance(3999); expect(sync).toHaveBeenCalledTimes(3);
   await advance(1); expect(sync).toHaveBeenCalledTimes(4);
   await view.unmount();
+});
+
+test('leaving a thread aborts its held read instead of retaining a long-poll request', async () => {
+  let aborted = false;
+  const sync = jest.fn((_wait: number, signal?: AbortSignal) => new Promise<void>(resolve => {
+    signal?.addEventListener('abort', () => { aborted = true; resolve(); }, { once: true });
+  }));
+  const view = await render(<Harness sync={sync} />);
+  expect(sync).toHaveBeenCalledTimes(1);
+  await view.unmount();
+  expect(aborted).toBe(true);
+  await advance(600_000);
+  expect(sync).toHaveBeenCalledTimes(1);
 });

@@ -29,8 +29,13 @@ export interface AgentProfile {
   desktopHistory?: { available: true; readOnly: true; identity: string; scopes: ClaudeDesktopScope[] };
 }
 export interface DesktopCapabilities { list: boolean; read: boolean; send: boolean; interrupt: boolean; approval: boolean; attachments: boolean; modelOverride: boolean }
-/** One API in the computer's vault the phone may pick. No address or key ever leaves the computer. */
-export interface RemoteApiOption { id: string; name: string; models: string[] }
+/** One API in the computer's vault the phone may pick. No key ever leaves the computer. */
+export interface RemoteApiOption {
+  id: string; name: string; models: string[];
+  /** Present only when the computer can unambiguously tie this API origin to
+   * an already-paired station. It is public routing metadata, not a secret. */
+  station?: { hubUrl: string; deviceId: string };
+}
 /** Missing capability fields mean unknown, not inferred from a model name. */
 export interface ModelCapability {
   source: 'codex-model-list' | 'relay-model-list' | 'unknown';
@@ -80,6 +85,8 @@ export type HubEvent = Base & (
 export type Command =
   | { type: 'agents.status' }
   | { type: 'agents.api.set'; agent: AgentId; accountId: string; model?: string; sessionKey?: string }
+  | { type: 'remote.station.switch'; targetHubUrl: string; targetDeviceId: string; targetComputerId: string; agent?: AgentId; accountId?: string; model?: string; sessionKey?: string; operationId: string }
+  | { type: 'remote.station.receipt'; operationId: string }
   | { type: 'sessions.list'; tool?: ToolId; client?: 'code' | 'desktop-code' | ClaudeDesktopScope; cursor?: string; limit?: number; controlSurface?: 'read-only'; historyIdentity?: string }
   | { type: 'desktop.sessions.list'; tool: 'codex'; controlSurface: 'desktop' }
   | { type: 'desktop.session.open'; sessionKey: string; controlSurface: 'desktop'; cursor?: string }
@@ -142,9 +149,14 @@ function checkResponseScope(response: Awaited<ReturnType<FetchLike>>, hubUrl: st
   if (response.redirected || (response.url && !response.url.startsWith(`${hubUrl}/`))) throw new HubError('中转站接口发生重定向，已停止连接以保护配对凭证');
 }
 
-async function request(hub: Hub | { url: string; key?: string }, path: string, init: { method?: string; body?: unknown; timeoutMs?: number } = {}) {
+async function request(hub: Hub | { url: string; key?: string }, path: string, init: { method?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? 20_000);
+  const forwardAbort = () => controller.abort();
+  if (init.signal) {
+    if (init.signal.aborted) controller.abort();
+    else init.signal.addEventListener('abort', forwardAbort, { once: true });
+  }
   let response: Awaited<ReturnType<FetchLike>>;
   try {
     response = await fetchImpl(`${hub.url}${path}`, {
@@ -159,8 +171,12 @@ async function request(hub: Hub | { url: string; key?: string }, path: string, i
     return json;
   } catch (error) {
     if (error instanceof HubError) throw error;
+    if (init.signal?.aborted) throw new HubError('请求已取消', 499, 'aborted');
     throw new HubError(controller.signal.aborted ? '中转站响应超时，请稍后再试' : '连不上中转站，请检查网络');
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    init.signal?.removeEventListener('abort', forwardAbort);
+  }
 }
 
 /** True when this origin runs a Salcara Hub (no key needed). */
@@ -182,9 +198,11 @@ export async function discoverStation(stationUrl: string): Promise<HubDiscovery>
   return { url, service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, capabilities };
 }
 
-export async function confirmQrPair(qr: PairQr): Promise<{ token: string; device: DeviceStatus }> {
-  const result = await request({ url: qr.hubUrl }, '/app/pair/qr', { method: 'POST', body: { deviceId: qr.deviceId, ticket: qr.ticket } });
+export async function confirmQrPair(qr: PairQr, phoneId?: string): Promise<{ token: string; device: DeviceStatus }> {
+  if (qr.computerId && (!phoneId || !/^[a-f0-9]{64}$/.test(phoneId))) throw new HubError('请更新手机端后重新扫码');
+  const result = await request({ url: qr.hubUrl }, '/app/pair/qr', { method: 'POST', body: { deviceId: qr.deviceId, ticket: qr.ticket, ...(phoneId ? { phoneId } : {}) } });
   const device = result.device as DeviceStatus | undefined;
+  if (qr.computerId && result.computerId !== qr.computerId) throw new HubError('二维码的电脑身份与中转站不一致，请重新生成');
   if (typeof result.pair_token !== 'string' || !/^[a-f0-9]{64}$/.test(result.pair_token) || !device
     || device.deviceId !== qr.deviceId || typeof device.name !== 'string' || !Array.isArray(device.tools) || !Array.isArray(device.projects)) {
     throw new HubError('中转站返回的电脑配对信息无效');
@@ -221,9 +239,50 @@ export async function devices(hub: Hub): Promise<DeviceStatus[]> {
 }
 
 /** Runs one command on a computer; the hub waits up to 45 s for the reply. */
-export async function command<T = Record<string, unknown>>(hub: Hub, deviceId: string, cmd: Command, requestId?: string): Promise<T> {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new HubError('请求已取消', 499, 'aborted');
+}
+
+function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new HubError('请求已取消', 499, 'aborted'));
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    const cancel = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      reject(new HubError('请求已取消', 499, 'aborted'));
+    };
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      resolve();
+    }
+    signal?.addEventListener('abort', cancel, { once: true });
+  });
+}
+
+export async function command<T = Record<string, unknown>>(hub: Hub, deviceId: string, cmd: Command, requestId?: string, signal?: AbortSignal): Promise<T> {
   if (hub.deviceId && hub.deviceId !== deviceId) throw new HubError('这台电脑不属于当前配对连接');
-  const reply = await request(hub, '/app/commands', { method: 'POST', body: { deviceId, command: cmd, ...(requestId ? { requestId } : {}) }, timeoutMs: 55_000 });
+  throwIfAborted(signal);
+  const readOnly = ['agents.status', 'sessions.list', 'desktop.sessions.list', 'session.open', 'desktop.session.open', 'session.describe', 'projects.list', 'models.list', 'remote.station.receipt'].includes(cmd.type);
+  let reply: Record<string, unknown> = {};
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      reply = await request(hub, '/app/commands', { method: 'POST', body: { deviceId, command: cmd, ...(requestId ? { requestId } : {}) }, timeoutMs: 55_000, signal });
+      throwIfAborted(signal);
+      break;
+    } catch (error) {
+      // Reconnect may replace the Bridge stream between an online check and a
+      // history read. Retry only reads, never a task, API change or approval.
+      if (!readOnly || requestId || attempt >= 2 || !(error instanceof HubError)
+        || !(error.status === 0 || error.status === 409 && !error.code || error.status >= 500)) throw error;
+      await waitForRetry(attempt === 0 ? 600 : 1200, signal);
+    }
+  }
+  throwIfAborted(signal);
   if (reply.ok === false) throw new HubError(typeof reply.error === 'string' && reply.error ? reply.error : '电脑没有完成这个操作', 200, typeof reply.code === 'string' ? reply.code : undefined);
   if (reply.ok !== true || (reply.result !== undefined && (!reply.result || typeof reply.result !== 'object' || Array.isArray(reply.result)))) throw new HubError('未收到完整送达确认，保留原请求等待重试');
   return (reply.result ?? {}) as T;
@@ -234,11 +293,11 @@ export async function sessionEvents(hub: Hub, deviceId: string, sessionKey: stri
 }
 export interface SessionEventsPage { events: HubEvent[]; nextSeq: number; lastSeq: number; hasMore: boolean; resetRequired: boolean }
 /** With waitSeconds > 0 (Hub capability events.wait.v1) the Hub holds an empty read until a new event arrives. */
-export async function sessionEventsPage(hub: Hub, deviceId: string, sessionKey: string, after = 0, waitSeconds = 0, limit = 100): Promise<SessionEventsPage> {
+export async function sessionEventsPage(hub: Hub, deviceId: string, sessionKey: string, after = 0, waitSeconds = 0, limit = 100, signal?: AbortSignal): Promise<SessionEventsPage> {
   if (hub.deviceId && hub.deviceId !== deviceId) throw new HubError('这台电脑不属于当前配对连接');
   const wait = Math.max(0, Math.min(25, Math.floor(waitSeconds)));
   const query = `deviceId=${encodeURIComponent(deviceId)}&sessionKey=${encodeURIComponent(sessionKey)}&after=${after}&limit=${Math.max(1, Math.min(500, limit))}${wait ? `&wait=${wait}` : ''}`;
-  const result = await request(hub, `/app/events?${query}`, { timeoutMs: wait ? (wait + 15) * 1000 : 20_000 });
+  const result = await request(hub, `/app/events?${query}`, { timeoutMs: wait ? (wait + 15) * 1000 : 20_000, signal });
   const events = Array.isArray(result.events) ? result.events as HubEvent[] : [];
   return { events, nextSeq: typeof result.nextSeq === 'number' && Number.isSafeInteger(result.nextSeq) && result.nextSeq >= after
     ? result.nextSeq : events.reduce((seq, event) => Math.max(seq, event.seq ?? 0), after),
@@ -261,6 +320,10 @@ export interface StreamOptions {
 export interface StreamHandle { close: () => void; lastSeq: () => number }
 
 const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal.aborted) {
+    resolve();
+    return;
+  }
   const timer = setTimeout(done, ms);
   function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
   signal.addEventListener('abort', done, { once: true });

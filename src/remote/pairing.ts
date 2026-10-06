@@ -3,6 +3,7 @@ export const HUB_PATH = '/salcara-hub/v1';
 export interface PairQr {
   type: 'salcara-remote-pair'; version: 1; hubUrl: string; deviceId: string;
   deviceName: string; ticket: string; expiresAt: number;
+	computerId?: string;
 }
 
 function isPrivateHost(hostname: string): boolean {
@@ -29,7 +30,7 @@ export function canonicalHubUrl(input: string, allowLoopback = false): string {
   return `${url.origin}${HUB_PATH}`;
 }
 
-export function readPairQr(raw: string, selectedHubUrl: string, now = Date.now(), allowLoopback = false): PairQr {
+export function readPairQr(raw: string, selectedHubUrl: string | null, now = Date.now(), allowLoopback = false): PairQr {
   if (raw.length > 4096) throw new Error('二维码内容无效');
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw new Error('这不是 Salcara 电脑配对二维码'); }
@@ -37,8 +38,9 @@ export function readPairQr(raw: string, selectedHubUrl: string, now = Date.now()
   const qr = value as Partial<PairQr>;
   if (qr.type !== 'salcara-remote-pair' || qr.version !== 1 || typeof qr.hubUrl !== 'string') throw new Error('这不是支持的 Salcara 电脑配对二维码');
   const endpoint = canonicalHubUrl(qr.hubUrl, allowLoopback);
-  if (qr.hubUrl !== endpoint || endpoint !== canonicalHubUrl(selectedHubUrl, allowLoopback)) throw new Error('二维码的中转站与当前选择不一致，请先连接该中转站');
+  if (qr.hubUrl !== endpoint || selectedHubUrl && endpoint !== canonicalHubUrl(selectedHubUrl, allowLoopback)) throw new Error('二维码的中转站与当前选择不一致，请先连接该中转站');
   if (typeof qr.deviceId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(qr.deviceId)) throw new Error('二维码的电脑标识无效');
+  if (qr.computerId !== undefined && (typeof qr.computerId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(qr.computerId))) throw new Error('二维码的本机标识无效');
   if (typeof qr.ticket !== 'string' || !/^[a-f0-9]{64}$/.test(qr.ticket)) throw new Error('二维码的配对凭证无效');
   if (typeof qr.expiresAt !== 'number' || !Number.isSafeInteger(qr.expiresAt) || qr.expiresAt <= now) throw new Error('二维码已过期，请在电脑上重新生成');
   if (qr.expiresAt > now + 10 * 60_000) throw new Error('二维码有效期异常，请重新生成');

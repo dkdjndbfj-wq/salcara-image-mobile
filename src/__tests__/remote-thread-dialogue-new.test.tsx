@@ -198,7 +198,7 @@ test('opening a listed computer conversation reads its original history without 
     ]);
   });
   const view = await render(viewThread());
-  expect(mockOpen).toHaveBeenCalledWith('pc', 'codex:original');
+  expect(mockOpen).toHaveBeenCalledWith('pc', 'codex:original', expect.objectContaining({ signal: expect.any(Object) }));
   expect(view.getByText('正在从电脑读取对话…')).toBeTruthy();
   await act(async () => { release(); await read; });
   await view.rerender(viewThread());
@@ -630,7 +630,7 @@ test('ThreadView model API entry switches the original session without dropping 
   await closeModels(view);
   expect(view.getByLabelText('给电脑上的 Agent 发消息').props.value).toBe('尚未发送的任务');
   expect(view.getByText('原来的回复')).toBeTruthy();
-  expect(mockOpen).toHaveBeenCalledTimes(1); expect(mockOpen).toHaveBeenCalledWith('pc', 'codex:original');
+  expect(mockOpen).toHaveBeenCalledTimes(1); expect(mockOpen).toHaveBeenCalledWith('pc', 'codex:original', expect.objectContaining({ signal: expect.any(Object) }));
   expect(created).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled(); expect(mockSend).not.toHaveBeenCalled();
   await act(async () => { jest.advanceTimersByTime(450); });
   expect(mockSaveDraft).toHaveBeenLastCalledWith('paired|pc|codex:original', '尚未发送的任务');
@@ -1412,7 +1412,46 @@ test('an expired native lease cannot silently turn the same screen into a backgr
 test('earlier-history action reads the same thread without moving the scroll to the live tail', async () => {
   mockRemote.timelines['pc|codex:original'].nextCursor = 'older';
   const view = await render(viewThread()); await fireEvent.press(view.getByLabelText('加载更早记录'));
-  expect(mockLoadEarlier).toHaveBeenCalledWith('pc', 'codex:original'); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled();
+  expect(mockLoadEarlier).toHaveBeenCalledWith('pc', 'codex:original', expect.any(Object)); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled();
+});
+
+test('backgrounding cancels the first history read and foreground retries without resetting the draft', async () => {
+  let release!: () => void;
+  const pending = new Promise<undefined>(resolve => { release = () => resolve(undefined); });
+  mockOpen.mockImplementationOnce(() => pending);
+  const view = await render(viewThread());
+  await fireEvent.changeText(view.getByPlaceholderText('随心输入'), '未发送的文字');
+  const signal = (mockOpen.mock.calls[0][2] as { signal: AbortSignal }).signal;
+  const listeners = (AppState.addEventListener as jest.Mock).mock.calls.map((call) => call[1] as (state: string) => void);
+  await act(async () => { jest.replaceProperty(AppState, 'currentState', 'background'); listeners.forEach(change => change('background')); });
+  expect(signal.aborted).toBe(true);
+  await act(async () => { release(); await pending; });
+  await act(async () => { jest.replaceProperty(AppState, 'currentState', 'active'); listeners.forEach(change => change('active')); });
+  expect(mockOpen).toHaveBeenCalledTimes(2);
+  expect((mockOpen.mock.calls[1][2] as { signal: AbortSignal }).signal.aborted).toBe(false);
+  expect(view.getByPlaceholderText('随心输入').props.value).toBe('未发送的文字');
+  expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled();
+});
+
+test('an initially backgrounded thread defers its first history read until foreground', async () => {
+  jest.replaceProperty(AppState, 'currentState', 'background');
+  const view = await render(viewThread());
+  expect(mockOpen).not.toHaveBeenCalled();
+  const listeners = (AppState.addEventListener as jest.Mock).mock.calls.map((call) => call[1] as (state: string) => void);
+  await act(async () => { jest.replaceProperty(AppState, 'currentState', 'active'); listeners.forEach(change => change('active')); });
+  expect(mockOpen).toHaveBeenCalledTimes(1);
+  await view.unmount();
+});
+
+test('backgrounding cancels an earlier-history read as well as the initial snapshot', async () => {
+  mockRemote.timelines['pc|codex:original'].nextCursor = 'older';
+  mockLoadEarlier.mockImplementationOnce(() => new Promise(() => undefined));
+  const view = await render(viewThread()); await fireEvent.press(view.getByLabelText('加载更早记录'));
+  const signal = mockLoadEarlier.mock.calls[0][2] as AbortSignal;
+  const listeners = (AppState.addEventListener as jest.Mock).mock.calls.map((call) => call[1] as (state: string) => void);
+  await act(async () => { jest.replaceProperty(AppState, 'currentState', 'background'); listeners.forEach(change => change('background')); });
+  expect(signal.aborted).toBe(true);
+  await view.unmount();
 });
 
 test('native Claude readonly history shows its original replies without composer, models, stop or approval actions', async () => {

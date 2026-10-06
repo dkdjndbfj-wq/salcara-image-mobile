@@ -87,7 +87,7 @@ jest.mock('../remote/store', () => ({
   setRemoteScreenOpen: (...args: unknown[]) => mockScreenOpen(...args),
   setRemoteFocus: (focus: RemoteState['focus']) => { mockRemote.focus = focus; },
   connectStation: (...args: unknown[]) => mockConnectStation(...args),
-  pairRemote: jest.fn(), pairRemoteQr: (...args: unknown[]) => mockPairQr(...args), parseRemoteQr: () => mockQr,
+  pairRemote: jest.fn(), pairScannedRemoteQr: (...args: unknown[]) => mockPairQr(...args), parseScannedRemoteQr: () => mockQr,
   revokeRemoteConnection: (...args: unknown[]) => mockRevoke(...args),
   signOutRemote: (...args: unknown[]) => mockSignOut(...args),
   useSavedConnection: (...args: unknown[]) => mockUseConnection(...args),
@@ -286,16 +286,13 @@ test('computer entry is separate from binding, and pairing completion returns to
   expect(view.getByText('绑定新电脑')).toBeTruthy();
   expect(view.queryByLabelText('中转站地址')).toBeNull();
   await fireEvent.press(view.getByText('绑定新电脑'));
-  await fireEvent.changeText(view.getByLabelText('中转站地址'), 'https://station.example');
-  await fireEvent.press(view.getByText('下一步'));
-  expect(mockConnectStation).toHaveBeenCalledWith('https://station.example', expect.any(Function));
-  await view.rerender(<RemoteScreen visible />);
-  expect(view.getByText('扫描二维码')).toBeTruthy();
-  await fireEvent.press(view.getByText('扫描二维码'));
+  expect(view.queryByLabelText('中转站地址')).toBeNull();
+  expect(mockConnectStation).not.toHaveBeenCalled();
+  expect(view.getByTestId('remote-qr-camera')).toBeTruthy();
   await act(async () => view.getByTestId('remote-qr-camera').props.onBarcodeScanned({ data: 'fixture', type: 'qr' }));
   await fireEvent.press(view.getByText('连接'));
   await view.rerender(<RemoteScreen visible />);
-  expect(mockPairQr).toHaveBeenCalledWith(mockQr);
+  expect(mockPairQr).toHaveBeenCalledWith(mockQr, expect.any(Function));
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
   expect(view.queryByText('扫描二维码')).toBeNull();
   expect(view.queryByText('准备连接')).toBeNull();
@@ -313,18 +310,14 @@ test('computer management preserves saved paired records even without an active 
   expect(mockRevoke).not.toHaveBeenCalled();
 });
 
-test('binding screens return through station entry and computer management without unpairing saved computers', async () => {
+test('direct scanner returns to computer management without unpairing saved computers', async () => {
   mockRemote = { ...unpairedState(), connections: readyState().connections };
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('连接电脑'));
   await fireEvent.press(view.getByText('绑定新电脑'));
-  await fireEvent.changeText(view.getByLabelText('中转站地址'), 'https://station.example');
-  await fireEvent.press(view.getByText('下一步'));
-  await view.rerender(<RemoteScreen visible />);
-  expect(view.getByText('扫描二维码')).toBeTruthy();
+  expect(view.getByTestId('remote-qr-camera')).toBeTruthy();
   await fireEvent.press(view.getByLabelText('返回'));
-  expect(view.getByLabelText('中转站地址')).toBeTruthy();
-  await fireEvent.press(view.getByLabelText('返回'));
+  expect(view.queryByLabelText('中转站地址')).toBeNull();
   expect(view.getByText('绑定新电脑')).toBeTruthy();
   expect(view.getByText('工作电脑')).toBeTruthy();
   await fireEvent.press(view.getByLabelText('返回'));
@@ -381,12 +374,13 @@ test('computer API entry can be opened and closed before pairing without phone l
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
 });
 
-test('binding address page does not repeat the saved computer list from management', async () => {
+test('direct binding scanner does not repeat the saved computer list from management', async () => {
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('连接电脑'));
   expect(view.getByLabelText('选择电脑 工作电脑')).toBeTruthy();
   await fireEvent.press(view.getByText('绑定新电脑'));
-  expect(view.getByLabelText('中转站地址')).toBeTruthy();
+  expect(view.queryByLabelText('中转站地址')).toBeNull();
+  expect(view.getByTestId('remote-qr-camera')).toBeTruthy();
   expect(view.queryByLabelText('选择电脑 工作电脑')).toBeNull();
   expect(view.queryByText('已配对的电脑')).toBeNull();
   expect(mockUseConnection).not.toHaveBeenCalled();
@@ -560,6 +554,25 @@ test('a cold recent-session request is cancelled when the station changes even i
   expect(mockThreadProps.visible).toBe(false);
   expect(view.queryByText('桌面 Claude 项目')).toBeNull();
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
+});
+
+test('a station handover with a new credential-scoped device id follows the new computer', async () => {
+  const view = await render(<RemoteScreen visible />);
+  const next = readyState();
+  next.connectionId = 'station-b';
+  next.selectedHubUrl = 'https://station-b.example/salcara-hub/v1';
+  next.connections = [{ ...next.connections[0], id: 'station-b', hubUrl: next.selectedHubUrl, deviceId: 'pc-b' }];
+  next.devices = [{ ...next.devices[0], deviceId: 'pc-b' }];
+  next.agents = { 'pc-b': { ...next.agents['pc-1'] } };
+  next.sessions = { 'pc-b': { ...next.sessions['pc-1'] } };
+  mockRemote = next;
+  await view.rerender(<RemoteScreen visible />);
+
+  // If the old local device ID survived the scope change, opening an Agent
+  // would incorrectly fall back to the empty “等待电脑上线” state.
+  await fireEvent.press(view.getByLabelText('打开 Codex'));
+  expect(view.getByText('准备连接')).toBeTruthy();
+  expect(view.queryByText('等待电脑上线')).toBeNull();
 });
 
 test('cold focused Desktop session loads metadata before entering and ignores a late saved Agent', async () => {

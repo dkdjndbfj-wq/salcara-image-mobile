@@ -29,6 +29,13 @@ function transport(handler: (url: URL, command?: Record<string, unknown>) => unk
     return response(await handler(new URL(endpoint), endpoint.endsWith('/app/commands') ? JSON.parse(String(init.body)).command : undefined));
   }) as FetchLike;
 }
+async function waitForReady(check: () => boolean): Promise<void> {
+  for (let i = 0; i < 100; i += 1) {
+    if (check()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error('fixture did not reach the expected command');
+}
 
 test('question retry carries the same receipt UUID and exact answers to the durable Hub', async () => {
   const writes: Array<Record<string, unknown>> = [];
@@ -144,6 +151,7 @@ test('a status read begun during the mutation cannot later restore the old API c
   const mutation = setAgentApi('pc', 'codex', 'api_22222222');
   await Promise.resolve();
   const read = loadAgentProfiles('pc'); await Promise.resolve();
+  await waitForReady(() => typeof releaseMutation === 'function' && typeof releaseStatus === 'function');
   releaseMutation({ ok: true, result: status('备用') }); await mutation;
   releaseStatus({ ok: true, result: status() }); await read;
   expect(getRemoteState().agents.pc.list.find((item) => item.id === 'codex')?.api.name).toBe('备用');
@@ -154,11 +162,13 @@ test('API changes on one computer are serialized across Agent families', async (
   setHubFetch(transport((_url, command) => new Promise((resolve) => { releases.set(String(command?.agent), resolve); })));
   await pair();
   const first = setAgentApi('pc', 'codex', 'api_22222222').catch((error) => error); await Promise.resolve();
+  await waitForReady(() => releases.has('codex'));
   await expect(setAgentApi('pc', 'claude', 'api_33333333')).rejects.toThrow('API 正在切换');
   expect(releases.has('claude')).toBe(false);
   releases.get('codex')!({ ok: true, result: status('备用', '原 Claude') });
   await first;
   const second = setAgentApi('pc', 'claude', 'api_33333333'); await Promise.resolve();
+  await waitForReady(() => releases.has('claude'));
   releases.get('claude')!({ ok: true, result: status('备用', '新 Claude') }); await second;
   expect(getRemoteState().agents.pc.list.find((item) => item.id === 'claude')?.api.name).toBe('新 Claude');
 });
@@ -255,8 +265,11 @@ test('API mutation during image upload prevents a new task from dispatching with
   }));
   await pair(); const start = startSession('pc', { tool: 'codex', cwd: 'C:\\fixture', prompt: 'task fixture', approval: 'ask',
     images: [{ uri: 'fixture://photo', base64: 'AQID', mime: 'image/jpeg', width: 1, height: 1 }] }); await uploaded;
-  const mutation = setAgentApi('pc', 'codex', 'api_22222222'); releaseImage({ ok: true, result: {} });
-  await expect(start).rejects.toThrow('API 正在切换');
+  const mutation = setAgentApi('pc', 'codex', 'api_22222222');
+  const startFailure = expect(start).rejects.toThrow('API 正在切换');
+  releaseImage({ ok: true, result: {} });
+  await startFailure;
+  await waitForReady(() => typeof releaseApi === 'function');
   releaseApi({ ok: true, result: status('备用') }); await mutation;
   expect(writes).toEqual(['attachment.put', 'agents.api.set']);
 });

@@ -2,13 +2,13 @@
   "expo": {
     "name": "Salcara AI",
     "slug": "salcara-image-mobile",
-    "version": "1.8.0",
+    "version": "1.8.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "top.salcara.image",
-      "buildNumber": "21",
+      "buildNumber": "22",
       "supportsTablet": true,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Salcara AI 需要使用麦克风来听你说话，录音只用于语音输入和语音对话。",
@@ -23,7 +23,7 @@
     },
     "android": {
       "package": "top.salcara.image",
-      "versionCode": 21,
+      "versionCode": 22,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.CAMERA",

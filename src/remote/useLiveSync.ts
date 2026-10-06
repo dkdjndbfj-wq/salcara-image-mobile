@@ -15,8 +15,9 @@ export function liveDelay(attempt: number, failures: number, longPoll: boolean):
   return attempt < 3 ? 2000 : attempt < 8 ? 4000 : 8000;
 }
 
-export function useLiveSync(enabled: boolean, needed: boolean, longPoll: boolean, onSync: (waitSeconds: number) => Promise<void>, wakeKey: string | number = 0) {
+export function useLiveSync(enabled: boolean, needed: boolean, longPoll: boolean, onSync: (waitSeconds: number, signal?: AbortSignal) => Promise<void>, wakeKey: string | number = 0) {
   const callback = useRef(onSync); callback.current = onSync;
+  const inFlight = useRef<Promise<void> | null>(null);
   useEffect(() => {
     if (!enabled || !needed) return;
     let stopped = false;
@@ -24,21 +25,47 @@ export function useLiveSync(enabled: boolean, needed: boolean, longPoll: boolean
     let failures = 0;
     let busy = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let activeController: AbortController | undefined;
     const schedule = () => {
       if (stopped || AppState.currentState !== 'active') return;
+      if (timer) clearTimeout(timer);
       timer = setTimeout(() => void run(), liveDelay(attempts, failures, longPoll));
     };
     const run = async () => {
       if (stopped || busy || AppState.currentState !== 'active') return;
       busy = true;
-      try { await callback.current(longPoll ? 20 : 0); failures = 0; } catch { failures += 1; }
+      try {
+        // Effect restarts (foreground, long-poll capability, wakeKey) cannot
+        // overlap an old held read. Wait without invoking a stale callback.
+        if (inFlight.current) await inFlight.current.catch(() => undefined);
+        if (stopped || AppState.currentState !== 'active') return;
+        const controller = new AbortController();
+        activeController = controller;
+        const flight = Promise.resolve().then(() => callback.current(longPoll ? 20 : 0, controller.signal));
+        inFlight.current = flight;
+        try { await flight; } finally {
+          if (inFlight.current === flight) inFlight.current = null;
+          if (activeController === controller) activeController = undefined;
+        }
+        failures = 0;
+      } catch {
+        // Backgrounding/unmounting intentionally aborts the held read. It is
+        // not a network failure and must not increase the retry backoff.
+        if (!stopped && AppState.currentState === 'active') failures += 1;
+      }
       finally { attempts += 1; busy = false; schedule(); }
     };
     const listener = AppState.addEventListener('change', (next: string) => {
       if (timer) clearTimeout(timer);
+      if (next !== 'active') activeController?.abort();
       if (next === 'active') { failures = 0; attempts = 0; void run(); }
     });
     void run();
-    return () => { stopped = true; if (timer) clearTimeout(timer); listener?.remove?.(); };
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      activeController?.abort();
+      listener?.remove?.();
+    };
   }, [enabled, needed, longPoll, wakeKey]);
 }
