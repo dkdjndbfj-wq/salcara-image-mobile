@@ -4,7 +4,7 @@
 
 Salcara 不提供模型账号或内置 API Key，不要求使用指定中转站。对话、图片和语音可以分别选择服务商；普通手机功能不需要部署服务器。
 
-[下载 Android 安装包](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.0/salcara-image-android-v1.8.0.apk) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [远程编程教程](docs/REMOTE-PROGRAMMING.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-image-mobile/issues)
+[下载 Android 安装包](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.1/salcara-image-android-v1.8.1.apk) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [远程编程教程](docs/REMOTE-PROGRAMMING.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-image-mobile/issues)
 
 ## 可以做什么
 
@@ -21,8 +21,8 @@ Salcara 不提供模型账号或内置 API Key，不要求使用指定中转站�
 
 当前正式提供 **Android APK**，支持 ARM64 与 ARMv7。下载文件是：
 
-- salcara-image-android-v1.8.0.apk：手机安装包。
-- [对应的 SHA-256 校验文件](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.0/salcara-image-android-v1.8.0.apk.sha256)：用于核对下载完整性。
+- salcara-image-android-v1.8.1.apk：手机安装包。
+- [对应的 SHA-256 校验文件](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.1/salcara-image-android-v1.8.1.apk.sha256)：用于核对下载完整性。
 
 在 Android 手机打开安装包，只为实际使用的下载来源授权“安装未知应用”，按系统提示安装。已经安装正式版时直接覆盖更新，不要先卸载；应用数据会继续沿用。不要用测试包或不同签名的包覆盖正式版。
 

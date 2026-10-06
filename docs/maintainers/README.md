@@ -3,6 +3,7 @@
 用户操作请看 [使用教程](../USER-GUIDE.zh.md)，开发请看 [开发指南](../DEVELOPMENT.md)。
 
 - [当前项目整理与正式 CI 记录](PROJECT-20261004-REVIEW.md)。
+- [1.8.1 发布与更新验收](RELEASE-1.8.1-VERIFICATION.md)。
 - [1.8.0 发布与更新验收](RELEASE-1.8.0-VERIFICATION.md)：包括完整 APK 身份、构建和公开资产证据；[测试适配](RELEASE-1.8.0-VERIFICATION.md#test-adaptation) 与 [更新内核复查](RELEASE-1.8.0-VERIFICATION.md#update-core) 已合并于同一记录。
 - [早期界面设计背景](DESIGN-1.4.0-HISTORY.md) 与 [1.2.0 验证背景](VALIDATION-1.2.0-HISTORY.md)：只作历史参考，不是当前实现要求。
 - [历史版本摘要](../CHANGELOG.md)。
