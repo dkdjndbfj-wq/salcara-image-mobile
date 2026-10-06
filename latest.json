@@ -1,15 +1,15 @@
 {
-  "version": "1.8.0",
-  "tagName": "v1.8.0",
-  "title": "Salcara AI v1.8.0",
-  "notes": "# Salcara AI v1.8.0\n\nAndroid 正式应用，包名保持 `top.salcara.image`，版本号 1.8.0 / versionCode 21。沿用上一版本签名身份，保留已有应用数据。\n\n- 发布 Claude 已完成的手机代码，包括远程编程、浅深主题和通知模块；本次没有重新设计界面或动画。\n- 补齐自动更新的下载入口超时切换、取消保护、正式 APK 精确选择和已发布清单校验。\n- 更新包先完成大小与 SHA-256 校验，再交给 Android 安装器；安装仍需用户同意系统提示。\n\nFirebase 配置为可选项；本包没有包含 Firebase 服务账号。iOS 尚无正式签名发行身份，本次不提供可安装 iPhone 包。\n\n远程能力受 Agent 原生接口和用户授权限制。Claude Desktop 原生 Chat/Cowork 发送与停止不应被视为已实现；Codex 桌面适配仍需目标电脑验收。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.0",
-  "publishedAt": "2026-10-04T07:46:55Z",
+  "version": "1.8.1",
+  "tagName": "v1.8.1",
+  "title": "Salcara AI v1.8.1",
+  "notes": "# Salcara AI v1.8.1\n\nAndroid ARM64 / ARMv7 正式修复版。包名保持 `top.salcara.image`，版本 1.8.1 / versionCode 22，沿用已有正式签名，可直接覆盖安装。\n\n- 绑定新电脑直接扫码，从二维码识别 Hub 地址。\n- 改善同一电脑跨中转站配对、解除绑定与 API/Hub 交接恢复。\n- 修复会话读取、历史分页、断线重试及旧请求覆盖新连接的问题。\n- 修复取消历史分页后一直转圈；切后台取消读取，回前台恢复，不清草稿或重复发送。\n- 保留原有界面与动效；其他功能保持不变。\n- 对齐 Expo SDK 57 的四个补丁依赖，恢复完整 SDK 兼容检查。\n\n建议配合 Salcara Desktop 1.6.2 和 Hub 0.5.1 使用。不要先卸载旧版，以免丢失本机数据。\n\n长离线后需要电脑恢复在线才能重新读取权威历史。切站要求目标 Hub 已配对；当前 Hub 在交接前彻底不可达时，尚不支持独立备用通道切站。远程不是屏幕投影，Claude Desktop 原生 Chat/Cowork 仍只读，Codex 原生发送需要有效授权。本次不提供正式 iOS 安装包。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.1",
+  "publishedAt": "2026-10-06T14:33:55Z",
   "apk": {
-    "name": "salcara-image-android-v1.8.0.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.0/salcara-image-android-v1.8.0.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/609379744",
-    "size": 97780873,
-    "digest": "sha256:9f33363cda8abeeda83fa4a7a891fa89f97f308e315b15c0eac4fab933b3fea9"
+    "name": "salcara-image-android-v1.8.1.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.1/salcara-image-android-v1.8.1.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/615753315",
+    "size": 97835269,
+    "digest": "sha256:649c3149e691b5c4d4e809464edde061727cfd3848a67cce4225b92be833fa3b"
   }
 }
