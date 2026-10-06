@@ -7,6 +7,12 @@ import { spawnSync } from 'node:child_process';
 
 const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
 
+test('update publication explicitly uses public noreply author and committer identities', () => {
+  const publisher = readFileSync(new URL('./publish-update-manifest.mjs', import.meta.url), 'utf8');
+  assert.match(publisher, /email: '284591649\+dkdjndbfj-wq@users\.noreply\.github\.com'/);
+  assert.match(publisher, /author: publisherIdentity, committer: publisherIdentity/);
+});
+
 test('all production update publications are serialized without cancelling a running release', () => {
   assert.match(workflow, /group: android-release-\$\{\{ github\.repository \}\}/);
   assert.match(workflow, /cancel-in-progress: false/);

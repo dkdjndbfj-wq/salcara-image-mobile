@@ -8,6 +8,9 @@ import { createUpdateManifest, assertManifestAdvance } from './update-manifest-c
 const repository = process.env.GITHUB_REPOSITORY;
 const tag = process.env.GITHUB_REF_NAME;
 const commit = process.env.GITHUB_SHA;
+// Contents API defaults can expose the human publisher's configured email.
+// Use the project's public GitHub noreply identity for automation and local runs.
+const publisherIdentity = { name: 'Salcara', email: '284591649+dkdjndbfj-wq@users.noreply.github.com' };
 if (!repository || !/^v\d+\.\d+\.\d+$/.test(tag ?? '') || !commit) {
   throw new Error('A published release tag, repository and commit are required');
 }
@@ -53,6 +56,7 @@ if (existing?.content) {
 }
 api('contents/latest.json', 'PUT', {
   message: `Publish update manifest for ${tag}`, branch: 'updates',
+  author: publisherIdentity, committer: publisherIdentity,
   content: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`).toString('base64'),
   ...(existing?.sha ? { sha: existing.sha } : {}),
 });
