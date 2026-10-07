@@ -7,10 +7,10 @@ import type { RemoteState } from '../remote/store';
 let mockRemote: RemoteState;
 const mockLoadSessions = jest.fn<Promise<void>, [string, string?, { preservePages?: boolean }?]>(async () => undefined);
 const mockLoadMore = jest.fn<Promise<void>, [string, string]>(async () => undefined);
-const mockLoadNative = jest.fn<Promise<void>, [string]>(async () => undefined);
-const mockLoadHistory = jest.fn<Promise<void>, [string, string, boolean?]>(async () => undefined);
+const mockLoadNative = jest.fn<Promise<void>, [string, boolean?, { preservePages?: boolean }?]>(async () => undefined);
+const mockLoadHistory = jest.fn<Promise<void>, [string, string, boolean?, { preservePages?: boolean }?]>(async () => undefined);
 const mockDemandSync = jest.fn();
-jest.mock('../remote/store', () => ({ useRemote: () => mockRemote, loadClaudeDesktopHistory: (id: string, scope: string, more?: boolean) => mockLoadHistory(id, scope, more), loadSessions: (id: string, agentId?: string, options?: { preservePages?: boolean }) => options ? mockLoadSessions(id, agentId, options) : mockLoadSessions(id, agentId), loadMoreSessions: (id: string, agentId: string) => mockLoadMore(id, agentId), loadNativeSessions: (id: string) => mockLoadNative(id), selectSessionDirectory: (id: string, surface: 'desktop' | 'all') => { mockRemote.sessions[id].directorySurface = surface; } }));
+jest.mock('../remote/store', () => ({ useRemote: () => mockRemote, loadClaudeDesktopHistory: (id: string, scope: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadHistory(id, scope, more, options) : mockLoadHistory(id, scope, more), loadSessions: (id: string, agentId?: string, options?: { preservePages?: boolean }) => options ? mockLoadSessions(id, agentId, options) : mockLoadSessions(id, agentId), loadMoreSessions: (id: string, agentId: string) => mockLoadMore(id, agentId), loadNativeSessions: (id: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadNative(id, more, options) : more ? mockLoadNative(id, more) : mockLoadNative(id), selectSessionDirectory: (id: string, surface: 'desktop' | 'all') => { mockRemote.sessions[id].directorySurface = surface; } }));
 jest.mock('../remote/useDemandSync', () => ({ useDemandSync: (...args: unknown[]) => mockDemandSync(...args) }));
 jest.mock('../components/Icon', () => ({ Icon: () => null }));
 jest.mock('../remote/parts', () => {
@@ -58,7 +58,7 @@ async function mount(extra: Partial<Props> = {}) {
   const view = await render(<RemoteWorkspace {...props} />);
   return { view, props };
 }
-beforeEach(() => { jest.clearAllMocks(); mockLoadSessions.mockImplementation(async () => undefined); mockRemote = ready(); });
+beforeEach(() => { jest.clearAllMocks(); mockLoadSessions.mockImplementation(async () => undefined); mockLoadNative.mockImplementation(async () => undefined); mockLoadHistory.mockImplementation(async () => undefined); mockRemote = ready(); });
 
 test('authorized native directory preserves pinned order and keeps all history explicitly selectable', async () => {
   const keys = ['codex:0199aaa1-1234-4678-9abc-000000000001', 'codex:0199aaa1-1234-4678-9abc-000000000002'];
@@ -243,6 +243,33 @@ test('a running task keeps demand updates active even when search hides it', asy
   expect(mockLoadSessions).toHaveBeenLastCalledWith('pc-1', 'codex', { preservePages: true });
   await act(async () => view.getByTestId('remote-workspace-list').props.onRefresh());
   expect(mockLoadSessions).toHaveBeenLastCalledWith('pc-1', 'codex');
+});
+
+test.each(['native', 'readonly'] as const)('a foreground more-page click is not swallowed by a %s background refresh', async surface => {
+  const nativeKey = 'codex:0199aaa1-1234-4678-9abc-000000000001', identity = 'c'.repeat(64);
+  const row = surface === 'native' ? session(nativeKey, { controlSurface: 'desktop', sidebarIndex: 1, status: 'running' })
+    : session('claude-desktop:local_0199aaa1-1234-4678-9abc-000000000001', { tool: 'claude', client: 'Claude Desktop', sessionScope: 'desktop-chat', controlSurface: 'read-only', controllable: false });
+  mockRemote = ready();
+  const agent: AgentProfile = surface === 'native' ? { ...profile(), desktopLive: { expiresAt: Date.now() + 60000, sessionKeys: [nativeKey], capabilities: { list: true, read: true, send: true, interrupt: false, approval: false, attachments: false, modelOverride: false } } }
+    : { ...profile('claude-desktop'), desktopHistory: { available: true, readOnly: true, identity, scopes: ['desktop-chat'] } };
+  if (surface === 'native') mockRemote.sessions['pc-1'].native = { list: [row], loaded: true, loading: false, nextCursor: 'older' };
+  else mockRemote.sessions['pc-1'].readOnly = { 'desktop-chat': { list: [row], loaded: true, loading: false, nextCursor: 'older', identity } };
+  const { view } = await mount({ agent });
+  let release!: () => void, background!: Promise<void>;
+  if (surface === 'native') mockLoadNative.mockImplementation((_id, _more, options) => options?.preservePages ? new Promise(resolve => { release = resolve; }) : Promise.resolve());
+  else mockLoadHistory.mockImplementation((_id, _scope, _more, options) => options?.preservePages ? new Promise(resolve => { release = resolve; }) : Promise.resolve());
+  const demand = mockDemandSync.mock.calls.at(-1)?.[2] as () => Promise<void>;
+  await act(async () => { background = demand(); await Promise.resolve(); });
+  await fireEvent.press(view.getByLabelText('更多对话'));
+  if (surface === 'native') {
+    expect(mockLoadNative).toHaveBeenCalledWith('pc-1', false, { preservePages: true });
+    expect(mockLoadNative).toHaveBeenLastCalledWith('pc-1', true);
+  } else {
+    expect(mockLoadHistory).toHaveBeenCalledWith('pc-1', 'desktop-chat', false, { preservePages: true });
+    expect(mockLoadHistory).toHaveBeenLastCalledWith('pc-1', 'desktop-chat', true);
+  }
+  await act(async () => { release(); await background; });
+  await view.unmount();
 });
 
 test('active child tasks retain foreground demand updates without appearing as separate main tasks', async () => {

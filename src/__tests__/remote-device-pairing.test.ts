@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { canonicalHubUrl, readPairQr } from '../remote/pairing';
 import { command, confirmQrPair, discoverStation, devices, openStream, setHubFetch, type DeviceStatus, type FetchLike } from '../remote/client';
 import { connectionId, connectionToken, deliveryCredentialId, forgetConnection, loadConnections, saveConnection, selectConnectionIf, selectedConnection } from '../remote/connections';
@@ -10,7 +11,7 @@ const mockSecrets = new Map<string, string>();
 const mockSettingWrite = jest.fn();
 const mockGetProviderKey = jest.fn(async (..._args: unknown[]) => 'never-needed');
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((yes) => { resolve = yes; }); return { promise, resolve }; }
-jest.mock('expo-crypto', () => ({ ...jest.requireActual('expo-crypto'), getRandomBytesAsync: async () => new Uint8Array(32).fill(23) }));
+jest.mock('expo-crypto', () => ({ ...jest.requireActual('expo-crypto'), randomUUID: () => jest.requireActual('node:crypto').randomUUID(), getRandomBytesAsync: async () => new Uint8Array(32).fill(23) }));
 jest.mock('../storage/database', () => ({
   getSetting: async (key: string) => mockSettings.get(key) ?? null,
   setSetting: (...args: unknown[]) => mockSettingWrite(...args),
@@ -284,14 +285,18 @@ test('rejects redirected discovery and mismatched pair response device before pe
 test('aborting a read-only command cancels the transport without a retry', async () => {
   let aborted = false;
   let calls = 0;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
   setHubFetch((async (_endpoint, init) => new Promise<Awaited<ReturnType<FetchLike>>>((_resolve, reject) => {
     calls += 1;
     const signal = init.signal as AbortSignal;
     if (signal.aborted) { aborted = true; reject(new Error('aborted')); return; }
     signal.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')); }, { once: true });
+    entered();
   })) as FetchLike);
   const controller = new AbortController();
   const pending = command({ url, pairToken: token, deviceId: 'pc-1' }, 'pc-1', { type: 'desktop.session.open', sessionKey: 'codex:one', controlSurface: 'desktop' }, undefined, controller.signal);
+  await started;
   controller.abort();
   await expect(pending).rejects.toMatchObject({ code: 'aborted', status: 499 });
   expect(aborted).toBe(true);
@@ -480,7 +485,7 @@ test('continuing a thread sends one CLI turn with phone-chosen model/effort and 
   await loadSessions('pc-1');
   await sendToSession('pc-1', 'codex:one', 'fix the tests', { model: 'gpt-5-codex', effort: 'high' });
   const sent = commands.find((item) => (item.command as { type: string }).type === 'session.send')!;
-  expect(sent.command).toEqual({ type: 'session.send', sessionKey: 'codex:one', text: 'fix the tests', controlSurface: 'cli', model: 'gpt-5-codex', effort: 'high' });
+  expect(sent.command).toEqual({ type: 'session.send', sessionKey: 'codex:one', text: 'fix the tests', controlSurface: 'cli', model: 'gpt-5-codex', effort: 'high', operationId: expect.stringMatching(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/) });
   expect(getRemoteState().timelines[timelineKey('pc-1', 'codex:one')].items).toEqual([expect.objectContaining({ kind: 'message', role: 'user', text: 'fix the tests', local: true })]);
 });
 
@@ -575,4 +580,56 @@ test('opening checks session identity and excludes other device/session history'
   mismatch = true;
   await expect(openSession('pc-1', 'codex:one')).rejects.toThrow('身份不一致');
   expect(getRemoteState().timelines[key].items).toHaveLength(1);
+});
+
+test.each(['success', 'no-capability', 'bad-receipt', 'busy'] as const)('offline A uses the same UUID through paired B standby: %s', async (scenario) => {
+  const other = 'https://backup.example/salcara-hub/v1';
+  let broken = false, activeB = false;
+  const attempts: Array<{ station: string; operationId?: string; requestId?: string; type?: string }> = [];
+  setHubFetch((async (endpoint, init) => {
+    const isB = endpoint.startsWith(other);
+    if (endpoint.endsWith('/ping')) return response({ ...discovery, capabilities: [...capabilities, 'pair.single-phone.v1', 'commands.idempotency.v1', ...(scenario === 'no-capability' ? [] : ['station.standby.v1'])] });
+    if (endpoint.endsWith('/app/pair/qr')) {
+      const body = JSON.parse(String(init.body));
+      return response({ pair_token: isB ? 'c'.repeat(64) : token, computerId: 'physical-pc', device: { ...device, deviceId: body.deviceId } });
+    }
+    if (endpoint.endsWith('/app/devices')) return response({ devices: [{ ...device, deviceId: isB ? 'pc-b' : 'pc-1', online: isB ? activeB : !broken }] });
+    if (endpoint.endsWith('/app/commands')) {
+      const body = JSON.parse(String(init.body));
+      const cmd = body.command;
+      attempts.push({ station: isB ? 'B' : 'A', operationId: cmd.operationId, requestId: body.requestId, type: cmd.type });
+      if (cmd.type === 'remote.station.switch' && broken && !isB) {
+        if (scenario === 'busy') return response({ ok: false, error: 'Agent 正在处理任务' });
+        throw new Error('synthetic source offline');
+      }
+      if (cmd.type === 'remote.station.switch' && broken && isB) {
+        const payloadHash = createHash('sha256').update([cmd.targetHubUrl, cmd.targetDeviceId, cmd.targetComputerId, cmd.agent ?? '', cmd.accountId ?? '', cmd.model ?? '', cmd.sessionKey ?? ''].join('\u0000')).digest('hex');
+        activeB = scenario === 'success';
+        return response({ ok: true, result: { switched: true, operationId: cmd.operationId, payloadHash: scenario === 'bad-receipt' ? 'f'.repeat(64) : payloadHash } });
+      }
+      return response({ ok: true, result: {} });
+    }
+    if (endpoint.includes('/app/events')) return response({ events: [], nextSeq: 0, lastSeq: 0, hasMore: false });
+    throw new Error('unexpected synthetic endpoint');
+  }) as FetchLike);
+  await bootRemote([]);
+  await pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify({ ...qr(), computerId: 'physical-pc' })));
+  const aId = getRemoteState().connectionId!;
+  await pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify({ ...qr(), hubUrl: other, deviceId: 'pc-b', computerId: 'physical-pc' })));
+  const bId = getRemoteState().connectionId!;
+  await useSavedConnection(aId);
+  attempts.length = 0; broken = true;
+  if (scenario === 'success') {
+    await useSavedConnection(bId);
+    expect(getRemoteState().connectionId).toBe(bId);
+    const writes = attempts.filter(item => item.type === 'remote.station.switch');
+    expect(writes.map(item => item.station)).toEqual(['A', 'B']);
+    expect(writes[1].operationId).toBe(writes[0].operationId);
+    expect(writes[1].requestId).toBe(writes[0].requestId);
+    expect(mockSettings.get('remote_station_handover_v1')).toBeUndefined();
+  } else {
+    await expect(useSavedConnection(bId)).rejects.toThrow(scenario === 'no-capability' ? '备用切换' : scenario === 'busy' ? '正在处理任务' : '回执不匹配');
+    expect(getRemoteState().connectionId).toBe(aId);
+    if (scenario !== 'bad-receipt') expect(attempts.some(item => item.station === 'B' && item.type === 'remote.station.switch')).toBe(false);
+  }
 });

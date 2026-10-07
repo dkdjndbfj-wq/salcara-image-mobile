@@ -128,11 +128,14 @@ export function projectName(cwd: string): string {
 
 export interface SessionProjectGroup { key: string; name: string; path: string; updatedAt: number; sessions: SessionInfo[] }
 /** Groups threads by workspace folder like the Codex sidebar; most recently active project first. */
-export function groupSessionsByProject(sessions: SessionInfo[], options?: { nativeOrder?: boolean }): SessionProjectGroup[] {
+export function groupSessionsByProject(sessions: SessionInfo[], options?: { nativeOrder?: boolean; nativeSessionOrder?: string[] }): SessionProjectGroup[] {
   if (options?.nativeOrder) {
     // The host already ordered this directory. Grouping it by cwd would move
     // pinned tasks and interleaved projects away from their real sidebar order.
-    const ordered = [...sessions].sort((a, b) => (a.sidebarIndex ?? Number.MAX_SAFE_INTEGER) - (b.sidebarIndex ?? Number.MAX_SAFE_INTEGER));
+    const ranks = new Map(options.nativeSessionOrder?.map((key, index) => [key, index]));
+    const ordered = [...sessions].sort((a, b) => options.nativeSessionOrder
+      ? (ranks.get(a.sessionKey) ?? Number.MAX_SAFE_INTEGER) - (ranks.get(b.sessionKey) ?? Number.MAX_SAFE_INTEGER)
+      : (a.sidebarIndex ?? Number.MAX_SAFE_INTEGER) - (b.sidebarIndex ?? Number.MAX_SAFE_INTEGER));
     return [
       { key: '__native_pinned', name: '置顶', path: '', sessions: ordered.filter(item => (item.pinnedIndex ?? 0) > 0) },
       { key: '__native_recent', name: '最近', path: '', sessions: ordered.filter(item => !(item.pinnedIndex ?? 0)) },

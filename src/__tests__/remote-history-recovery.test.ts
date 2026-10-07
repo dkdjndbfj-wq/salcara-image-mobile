@@ -1,6 +1,6 @@
 import { HubError, setHubFetch, type DeviceStatus, type FetchLike, type HubEvent, type SessionInfo } from '../remote/client';
 import { applyEvent, applyRecoveredEvent, bootRemote, connectStation, EMPTY_TIMELINE, getRemoteState, mergeHistory, openSession, pairRemoteQr,
-  parseRemoteQr, resetRemoteForTests, syncSessionEvents, timelineKey, loadEarlierHistory, loadSessions, loadMoreSessions } from '../remote/store';
+  parseRemoteQr, resetRemoteForTests, syncSessionEvents, timelineKey, loadEarlierHistory, loadSessions, loadMoreSessions, preloadRecentSessionMessages } from '../remote/store';
 
 const mockSettings = new Map<string, string>();
 const mockSecrets = new Map<string, string>();
@@ -67,7 +67,7 @@ test('scoped directory reads more than 100 chats, keeps other Agents and dedupli
   await pair(); await loadSessions('pc'); await loadSessions('pc', 'codex'); await loadMoreSessions('pc', 'codex');
   expect(getRemoteState().sessions.pc.list).toHaveLength(172);
   expect(getRemoteState().sessions.pc.pages?.codex?.nextCursor).toBeUndefined();
-  expect(writes[2]).toMatchObject({ type: 'sessions.list', tool: 'codex', cursor: 'next-page', limit: 100 });
+  expect(writes[2]).toMatchObject({ type: 'sessions.list', tool: 'codex', cursor: 'next-page', limit: 10 });
 });
 
 test('earlier history preserves current content and approvals without starting or sending anything', async () => {
@@ -82,6 +82,75 @@ test('earlier history preserves current content and approvals without starting o
   expect(timeline.items.map(item => item.id)).toEqual(['oldest', 'overlap', 'current']);
   expect(getRemoteState().approvals.current).toBeTruthy(); expect(getRemoteState().approvals.stale).toBeUndefined();
   expect(commands).toEqual(['session.open', 'session.open']); expect(timeline.nextCursor).toBeUndefined();
+});
+
+test('first snapshot asks for two real messages and older pages ask for ten without changing transport', async () => {
+  const writes: Record<string, unknown>[] = [];
+  setHubFetch(transport((_url, command) => {
+    if (!command) return { events: [], nextSeq: 0, lastSeq: 0 };
+    writes.push(command);
+    return { ok: true, result: { session, events: [event(command.cursor ? 'older' : 'current', command.cursor ? 1 : 10)], nextCursor: command.cursor ? '' : 'older' } };
+  }));
+  await pair(); await openSession('pc', key); await loadEarlierHistory('pc', key);
+  expect(writes).toEqual([
+    { type: 'session.open', sessionKey: key, limit: 400, messageLimit: 2 },
+    { type: 'session.open', sessionKey: key, limit: 400, messageLimit: 10, cursor: 'older' },
+  ]);
+});
+
+test('first-page message preloads publish independently, stay bounded to ten and never block a selected thread', async () => {
+  const writes: Record<string, unknown>[] = [], releases: Array<() => void> = [];
+  let active = 0, peak = 0;
+  const rows = Array.from({ length: 15 }, (_, index) => ({ ...session, sessionKey: `codex:preview-${index}`, title: `preview-${index}` }));
+  setHubFetch(transport(async (_url, command) => {
+    if (!command) return { events: [], nextSeq: 0, lastSeq: 0 };
+    writes.push(command); active += 1; peak = Math.max(peak, active);
+    await new Promise<void>(resolve => { releases.push(resolve); }); active -= 1;
+    const row = rows.find(item => item.sessionKey === command.sessionKey)!;
+    return { ok: true, result: { session: row, events: [{ ...event('answer', 1), sessionKey: row.sessionKey }] } };
+  }));
+  await pair();
+  const read = preloadRecentSessionMessages('pc', rows);
+  const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+  for (let i = 0; i < 25 && writes.length < 2; i++) await tick();
+  expect(writes).toHaveLength(2);
+  expect(getRemoteState().timelines[timelineKey('pc', rows[0].sessionKey)].loading).toBe(false);
+  releases.shift()!();
+  for (let i = 0; i < 25 && !getRemoteState().timelines[timelineKey('pc', rows[0].sessionKey)].snapshotAt; i++) await tick();
+  expect(getRemoteState().timelines[timelineKey('pc', rows[0].sessionKey)].items).toHaveLength(1);
+  for (let i = 0; i < 25 && writes.length < 10; i++) { while (releases.length) releases.shift()!(); await tick(); }
+  for (let i = 0; i < 10; i++) { while (releases.length) releases.shift()!(); await tick(); }
+  await read;
+  expect(writes).toHaveLength(10); expect(peak).toBeLessThanOrEqual(2);
+  expect(writes.every(command => command.messageLimit === 2)).toBe(true);
+  await preloadRecentSessionMessages('pc', rows);
+  expect(writes).toHaveLength(10); // the recently confirmed snapshots are reused
+});
+
+test('cancelling preloads releases the current requests and never drains the rest of the directory', async () => {
+  const writes: Record<string, unknown>[] = [];
+  const rows = Array.from({ length: 12 }, (_, index) => ({ ...session, sessionKey: `codex:cancel-${index}` }));
+  setHubFetch(transport(async (_url, command) => {
+    if (!command) return { events: [], nextSeq: 0, lastSeq: 0 };
+    writes.push(command); return new Promise(() => undefined); // transport intentionally ignores abort
+  }));
+  await pair(); const controller = new AbortController();
+  const read = preloadRecentSessionMessages('pc', rows, controller.signal);
+  for (let i = 0; i < 25 && writes.length < 2; i++) await new Promise<void>(resolve => setTimeout(resolve, 0));
+  controller.abort(); await read;
+  expect(writes).toHaveLength(2);
+  expect(Object.values(getRemoteState().timelines).every(timeline => !timeline.loading)).toBe(true);
+});
+
+test('a failed opportunistic preview cannot flip the whole computer into an offline-refresh loop', async () => {
+  setHubFetch(transport(() => ({ events: [], nextSeq: 0, lastSeq: 0 })));
+  await pair();
+  expect(getRemoteState().connection).toBe('open');
+  setHubFetch((async endpoint => endpoint.includes('/app/events?') ? response({ events: [], nextSeq: 0, lastSeq: 0 })
+    : { ok: false, status: 403, text: async () => JSON.stringify({ error: 'fixture rejection' }) }) as FetchLike);
+  await preloadRecentSessionMessages('pc', [session]);
+  expect(getRemoteState().connection).toBe('open');
+  expect(getRemoteState().devices.find(item => item.deviceId === 'pc')?.online).toBe(true);
 });
 
 test('a failed earlier page retains the cursor, current content and a retry affordance', async () => {
@@ -148,6 +217,24 @@ test('automatic directory head refresh preserves older pages and their continuat
   expect(entry.list).toHaveLength(2); expect(entry.list.find(item => item.sessionKey === key)?.status).toBe('running');
   expect(entry.pages?.codex?.nextCursor).toBe('third-page');
   await loadSessions('pc', 'codex'); expect(getRemoteState().sessions.pc.list).toHaveLength(1);
+});
+
+test('a foreground CLI page supersedes background refresh without losing its frontier or raising loading', async () => {
+  let release!: (value: unknown) => void, entered!: () => void, head = 0;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  setHubFetch(transport((_url, command) => {
+    if (!command) return {};
+    if (command.cursor) return { ok: true, result: { sessions: [{ ...session, sessionKey: 'codex:older' }], nextCursor: 'third-page' } };
+    return ++head === 1 ? { ok: true, result: { sessions: [session], nextCursor: 'second-page' } }
+      : (entered(), new Promise(resolve => { release = resolve; }));
+  }));
+  await pair(); await loadSessions('pc', 'codex');
+  const refresh = loadSessions('pc', 'codex', { preservePages: true }); await started;
+  expect(getRemoteState().sessions.pc).toMatchObject({ loading: false, pages: { codex: { loading: false, nextCursor: 'second-page' } } });
+  await loadMoreSessions('pc', 'codex');
+  release({ ok: true, result: { sessions: [{ ...session, title: 'stale background' }], nextCursor: 'second-page' } }); await refresh;
+  expect(getRemoteState().sessions.pc.pages?.codex?.nextCursor).toBe('third-page');
+  expect(getRemoteState().sessions.pc.list.map(item => item.title)).toEqual(['Original', 'Original']);
 });
 
 test('a failed snapshot refresh invalidates but cannot strand an older-page loading indicator', async () => {

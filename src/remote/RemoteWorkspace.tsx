@@ -43,7 +43,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, onOpen, onNew, onSet
   const desktopValid = desktopAvailable && (agent.desktopLive?.expiresAt ?? 0) > Date.now();
   const entry = readOnly ? historyEntry?.identity === history?.identity ? historyEntry : undefined : native ? stored?.native : stored;
   const scope = JSON.stringify([baseScope, readOnly ? [readOnly, history?.identity] : native ? 'desktop' : 'all']);
-  const page = readOnly ? historyEntry?.identity === history?.identity ? historyEntry : undefined : native ? undefined : stored?.pages?.[agent.id];
+  const page = readOnly ? historyEntry?.identity === history?.identity ? historyEntry : undefined : native ? stored?.native : stored?.pages?.[agent.id];
   // A selected desktop directory stays selected when its lease expires. Never
   // replace it with history/CLI merely because a timer or status update fires.
   useEffect(() => {
@@ -63,7 +63,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, onOpen, onNew, onSet
   const rendered = generation.current;
   const active = useRef({ visible, deviceId, online, scope, agentId: agent.id, native, desktopValid, readOnly, historyValid, loading: Boolean(entry?.loading), page });
   active.current = { visible, deviceId, online, scope, agentId: agent.id, native, desktopValid, readOnly, historyValid, loading: Boolean(entry?.loading), page };
-  const inFlight = useRef<{ scope: string; promise: Promise<void> } | null>(null);
+  const inFlight = useRef<{ scope: string; preservePages: boolean; promise: Promise<void> } | null>(null);
   const entranceRead = useRef<object | null>(null);
   useEffect(() => { active.current.visible = visible; return () => { active.current.visible = false; }; }, [visible]);
 
@@ -71,14 +71,15 @@ export function RemoteWorkspace({ visible, deviceId, agent, onOpen, onNew, onSet
   const load = (more = false, preservePages = false): Promise<void> => {
     const target = active.current;
     if (!canOperate() || !target.online || target.native && !target.desktopValid || target.readOnly && !target.historyValid) return Promise.resolve();
-    if (inFlight.current?.scope === target.scope) return inFlight.current.promise;
+    if (inFlight.current?.scope === target.scope && (preservePages || !inFlight.current.preservePages)) return inFlight.current.promise;
     if (target.loading || target.page?.loading || (more && !target.page?.nextCursor)) return Promise.resolve();
     const pending = Promise.resolve().then(() => {
       if (!canOperate() || !active.current.online || active.current.deviceId !== target.deviceId || active.current.scope !== target.scope) return;
-      return target.readOnly ? loadClaudeDesktopHistory(target.deviceId, target.readOnly, more) : target.native ? loadNativeSessions(target.deviceId) : more ? loadMoreSessions(target.deviceId, target.agentId)
+      return target.readOnly ? loadClaudeDesktopHistory(target.deviceId, target.readOnly, more, preservePages ? { preservePages: true } : undefined)
+        : target.native ? loadNativeSessions(target.deviceId, more, preservePages ? { preservePages: true } : undefined) : more ? loadMoreSessions(target.deviceId, target.agentId)
         : preservePages ? loadSessions(target.deviceId, target.agentId, { preservePages: true }) : loadSessions(target.deviceId, target.agentId);
     });
-    const request = { scope: target.scope, promise: pending };
+    const request = { scope: target.scope, preservePages, promise: pending };
     inFlight.current = request;
     void pending.finally(() => { if (inFlight.current === request) inFlight.current = null; }).catch(() => undefined);
     return pending;
@@ -95,7 +96,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, onOpen, onNew, onSet
   const directory = useMemo(() => agentSessions(entry?.list ?? [], agent), [entry?.list, agent.id, agent.tool]);
   const agentList = useMemo(() => directory.filter(item => !item.parentSessionKey && (readOnly ? item.sessionScope === readOnly : item.controlSurface !== 'read-only')), [directory, readOnly]);
   const list = useMemo(() => agentList.filter(item => matchesSearch(item, query)), [agentList, query]);
-  const groups = useMemo(() => groupSessionsByProject(list, { nativeOrder: native }), [list, native]);
+  const groups = useMemo(() => groupSessionsByProject(list, { nativeOrder: native, nativeSessionOrder: native ? list.map(item => item.sessionKey) : undefined }), [list, native]);
   const searching = Boolean(query.trim());
   const sections: ProjectSection[] = groups.map(group => ({ ...group, data: searching || expanded[group.key] ? group.sessions : group.sessions.slice(0, PER_PROJECT) }));
   // Retain the existing foreground demand refresh, including running tasks hidden by a search.
@@ -113,7 +114,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, onOpen, onNew, onSet
     <SectionList<SessionInfo, ProjectSection> testID="remote-workspace-list" sections={sections}
       keyExtractor={item => item.sessionKey} contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false} stickySectionHeadersEnabled={false} keyboardShouldPersistTaps="handled"
-      keyboardDismissMode="on-drag" refreshing={Boolean(entry?.loading && agentList.length)} onRefresh={refresh}
+      keyboardDismissMode="on-drag" refreshing={Boolean(entry?.loading && agentList.length && !page?.nextCursor)} onRefresh={refresh}
       ListHeaderComponent={<View>
         <ProgrammingHeading title={agent.name} subtitle={device?.name} />
         {agent.id === 'codex' && (desktopAvailable || stored?.native || native) ? <View style={styles.directoryTabs}>

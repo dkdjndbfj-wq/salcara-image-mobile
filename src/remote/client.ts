@@ -88,9 +88,9 @@ export type Command =
   | { type: 'remote.station.switch'; targetHubUrl: string; targetDeviceId: string; targetComputerId: string; agent?: AgentId; accountId?: string; model?: string; sessionKey?: string; operationId: string }
   | { type: 'remote.station.receipt'; operationId: string }
   | { type: 'sessions.list'; tool?: ToolId; client?: 'code' | 'desktop-code' | ClaudeDesktopScope; cursor?: string; limit?: number; controlSurface?: 'read-only'; historyIdentity?: string }
-  | { type: 'desktop.sessions.list'; tool: 'codex'; controlSurface: 'desktop' }
-  | { type: 'desktop.session.open'; sessionKey: string; controlSurface: 'desktop'; cursor?: string }
-  | { type: 'session.open'; sessionKey: string; cursor?: string; limit?: number; controlSurface?: 'read-only'; historyIdentity?: string; client?: ClaudeDesktopScope }
+  | { type: 'desktop.sessions.list'; tool: 'codex'; controlSurface: 'desktop'; cursor?: string; limit?: number }
+  | { type: 'desktop.session.open'; sessionKey: string; controlSurface: 'desktop'; cursor?: string; limit?: number; messageLimit?: number }
+  | { type: 'session.open'; sessionKey: string; cursor?: string; limit?: number; messageLimit?: number; controlSurface?: 'read-only'; historyIdentity?: string; client?: ClaudeDesktopScope }
   | { type: 'session.describe'; sessionKey: string; controlSurface: 'read-only'; historyIdentity: string }
   | { type: 'session.start'; tool: ToolId; cwd: string; prompt: string; model?: string; effort?: Effort; approval?: ApprovalMode; attachments?: string[]; entrypoint?: 'claude-desktop' }
   | { type: 'session.send'; sessionKey: string; text: string; model?: string; effort?: Effort; attachments?: string[]; controlSurface: 'cli' | 'desktop'; operationId?: string }
@@ -149,6 +149,20 @@ function checkResponseScope(response: Awaited<ReturnType<FetchLike>>, hubUrl: st
   if (response.redirected || (response.url && !response.url.startsWith(`${hubUrl}/`))) throw new HubError('中转站接口发生重定向，已停止连接以保护配对凭证');
 }
 
+// Some native transports stop the socket but leave a pending body read alive.
+// A request must release its UI owner even when that transport ignores abort.
+function withAbort<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const cancel = () => { signal.removeEventListener('abort', cancel); reject(new Error('request aborted')); };
+    if (signal.aborted) { cancel(); return; }
+    signal.addEventListener('abort', cancel, { once: true });
+    Promise.resolve().then(() => {
+      if (signal.aborted) throw new Error('request aborted');
+      return operation();
+    }).then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel));
+  });
+}
+
 async function request(hub: Hub | { url: string; key?: string }, path: string, init: { method?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? 20_000);
@@ -159,14 +173,14 @@ async function request(hub: Hub | { url: string; key?: string }, path: string, i
   }
   let response: Awaited<ReturnType<FetchLike>>;
   try {
-    response = await fetchImpl(`${hub.url}${path}`, {
+    response = await withAbort(controller.signal, () => fetchImpl(`${hub.url}${path}`, {
       method: init.method ?? 'GET',
       headers: { Accept: 'application/json', ...authHeaders(hub), ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
       body: init.body ? JSON.stringify(init.body) : undefined,
       signal: controller.signal, credentials: 'omit', redirect: 'error',
-    });
+    }));
     checkResponseScope(response, hub.url);
-    const json = response.ok ? await readJson(response) : await readJson(response).catch(() => ({} as Record<string, unknown>));
+    const json = await withAbort(controller.signal, () => response.ok ? readJson(response) : readJson(response).catch(() => ({} as Record<string, unknown>)));
     if (!response.ok) throw new HubError(httpMessage(response.status, json.error), response.status, typeof json.code === 'string' ? json.code : undefined);
     return json;
   } catch (error) {
@@ -268,18 +282,24 @@ export async function command<T = Record<string, unknown>>(hub: Hub, deviceId: s
   if (hub.deviceId && hub.deviceId !== deviceId) throw new HubError('这台电脑不属于当前配对连接');
   throwIfAborted(signal);
   const readOnly = ['agents.status', 'sessions.list', 'desktop.sessions.list', 'session.open', 'desktop.session.open', 'session.describe', 'projects.list', 'models.list', 'remote.station.receipt'].includes(cmd.type);
+  // A dead/slow read formerly occupied the spinner for 3 × 55 seconds. Keep
+  // reconnection retries, but share one wall-clock budget; task writes retain
+  // their original delivery/idempotency behavior and timeout.
+  const deadline = readOnly ? Date.now() + 30_000 : Infinity;
   let reply: Record<string, unknown> = {};
   for (let attempt = 0; ; attempt += 1) {
     try {
-      reply = await request(hub, '/app/commands', { method: 'POST', body: { deviceId, command: cmd, ...(requestId ? { requestId } : {}) }, timeoutMs: 55_000, signal });
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new HubError('读取超时，请重试', 408, 'read_timeout');
+      reply = await request(hub, '/app/commands', { method: 'POST', body: { deviceId, command: cmd, ...(requestId ? { requestId } : {}) }, timeoutMs: readOnly ? Math.min(20_000, remaining) : 55_000, signal });
       throwIfAborted(signal);
       break;
     } catch (error) {
       // Reconnect may replace the Bridge stream between an online check and a
       // history read. Retry only reads, never a task, API change or approval.
       if (!readOnly || requestId || attempt >= 2 || !(error instanceof HubError)
-        || !(error.status === 0 || error.status === 409 && !error.code || error.status >= 500)) throw error;
-      await waitForRetry(attempt === 0 ? 600 : 1200, signal);
+        || Date.now() >= deadline || !(error.status === 0 || error.status === 409 && !error.code || error.status >= 500)) throw error;
+      await waitForRetry(Math.min(attempt === 0 ? 600 : 1200, deadline - Date.now()), signal);
     }
   }
   throwIfAborted(signal);

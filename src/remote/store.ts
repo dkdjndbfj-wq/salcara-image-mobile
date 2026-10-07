@@ -36,6 +36,12 @@ export type ApprovalKind = 'command' | 'file_change' | 'tool' | 'permission' | '
 
 export interface Timeline { items: TimelineItem[]; session?: SessionInfo; loading: boolean; /** Shown from the on-device cache, not yet confirmed by the computer. */ cachedAt?: number; error?: string; snapshotAt?: number; snapshotStartedAt?: number; nextCursor?: string; loadingEarlier?: boolean; earlierError?: string; historyLease?: string; historyExpanded?: boolean }
 export const EMPTY_TIMELINE: Timeline = { items: [], loading: false };
+const SESSION_PAGE_SIZE = 10;
+const INITIAL_MESSAGE_COUNT = 2;
+const OLDER_HISTORY_PAGE_SIZE = 10;
+// Older Bridges still interpret limit as events; keep their bounded behavior.
+// Current Bridges count actual messages and retain their associated tool events.
+const HISTORY_EVENT_BUDGET = 400;
 const HISTORY_GAP_PREFIX = '[salcara:history-gap:v1]';
 const historyGap = (event: HubEvent) => event.type === 'notice' && event.text.startsWith(HISTORY_GAP_PREFIX);
 
@@ -138,7 +144,7 @@ export function mergeHistory(current: Timeline, session: SessionInfo | undefined
 export type Probe = 'checking' | 'ok' | 'no';
 export type Connection = 'idle' | 'connecting' | 'open' | 'retrying' | 'error';
 export interface PendingApproval { approvalId: string; deviceId: string; sessionKey: string; tool: ToolId; title: string; ts: number }
-export interface NativeDirectory { list: SessionInfo[]; loading: boolean; loaded: boolean; error?: string }
+export interface NativeDirectory { list: SessionInfo[]; loading: boolean; loaded: boolean; error?: string; nextCursor?: string }
 export interface DeviceSessions { list: SessionInfo[]; loading: boolean; loaded: boolean; error?: string; native?: NativeDirectory; readOnly?: Partial<Record<import('./client').ClaudeDesktopScope, NativeDirectory & { nextCursor?: string; identity: string }>>; directorySurface?: 'desktop' | 'all'; pages?: Partial<Record<AgentId, { nextCursor?: string; loading: boolean; error?: string }>> }
 export interface DeviceAgents { list: AgentProfile[]; apis: RemoteApiOption[]; loading: boolean; loaded: boolean; error?: string; autoAll?: boolean }
 
@@ -184,6 +190,7 @@ const sessionCursors = new Map<string, number>();
 const sessionApprovalSnapshots = new Map<string, number>();
 const sessionRequests = new Map<string, number>();
 const snapshotFlights = new Map<string, { owner: Hub; promise: Promise<void> }>();
+const directoryPreloads = new Map<string, AbortController>();
 const agentRequests = new Map<string, number>();
 const apiChanges = new Map<string, number>();
 const apiMutationOwners = new Map<Hub, Set<string>>();
@@ -370,6 +377,7 @@ export function getRemoteState() { return state; }
 
 export function setRemoteScreenOpen(open: boolean) {
   screenOpen = open;
+  if (!open) stopStream();
   if (open && hub?.pairToken) {
     void recoverPendingHandoverOnce();
     void refreshDevices(true);
@@ -444,7 +452,11 @@ function handleDevice(device: DeviceStatus) {
 
 // Pairing is persistent; an HTTP connection is not. No default SSE, watchdog or background polling.
 function startDemandConnection() { if (screenOpen && hub?.pairToken) void refreshDevices(true); }
-function stopStream() { /* Legacy callers pause networking; there is no permanent phone stream. */ }
+function stopStream() {
+  for (const controller of directoryPreloads.values()) controller.abort();
+  directoryPreloads.clear();
+  // There is no permanent phone stream to close.
+}
 
 function resetConnection(patch: Partial<RemoteState>) {
   stopStream(); connectionGeneration += 1; hub = null; lastSeq = 0;
@@ -747,6 +759,7 @@ export async function bootRemote(providers: ProviderProfile[]): Promise<void> {
 
 /** Returning to the remote screen performs one short check, never opens a permanent stream. */
 export function setRemoteForeground(active: boolean) {
+  if (!active) stopStream();
   if (!hub?.pairToken) return;
   if (active && screenOpen) {
     void recoverPendingHandoverOnce();
@@ -1012,6 +1025,30 @@ async function recoverPendingHandover(intent: PendingStationHandover, expectedGe
   } catch { return false; }
 }
 
+/** Same handover UUID and payload, delivered through B's bounded standby lane. */
+async function requestStandbyHandover(target: RemoteConnection, intent: PendingStationHandover, expectedGeneration: number, expectedOwner: Hub): Promise<void> {
+  const current = () => expectedGeneration === connectionGeneration && expectedOwner === hub && state.connectionId === intent.fromConnectionId;
+  const discovery = await discoverStation(target.hubUrl);
+  if (!current()) throw new Error('连接已切换，请刷新确认');
+  if (!discovery.capabilities.includes('station.standby.v1') || !discovery.capabilities.includes('commands.idempotency.v1')) {
+    throw new Error('目标中转站暂不支持备用切换，请先更新远程服务');
+  }
+  const token = await connectionToken(target);
+  if (!token || !current()) throw new Error('目标配对或连接已变化，请重新确认');
+  const reply = await command<unknown>({ url: discovery.url, pairToken: token, deviceId: target.deviceId }, target.deviceId, {
+    type: 'remote.station.switch', targetHubUrl: target.hubUrl, targetDeviceId: target.deviceId, targetComputerId: target.computerId!,
+    ...(intent.agent ? { agent: intent.agent } : {}), ...(intent.accountId ? { accountId: intent.accountId } : {}),
+    ...(intent.model ? { model: intent.model } : {}), ...(intent.sessionKey ? { sessionKey: intent.sessionKey } : {}), operationId: intent.operationId,
+  }, intent.operationId);
+  if (!current()) throw new Error('连接已切换，请刷新确认');
+  // Unlike legacy A replies, standby must prove exactly what was committed.
+  if (!reply || typeof reply !== 'object' || !optionalHandoverReplyMatches(reply, intent.operationId, handoverPayloadHash(target, intent.agent, intent.accountId, intent.model, intent.sessionKey))
+    || (reply as Record<string, unknown>).operationId !== intent.operationId || (reply as Record<string, unknown>).switched !== true
+    || (reply as Record<string, unknown>).payloadHash !== handoverPayloadHash(target, intent.agent, intent.accountId, intent.model, intent.sessionKey)) {
+    throw new HubError('备用切换回执不匹配，请刷新确认', 409, 'handover_receipt_mismatch');
+  }
+}
+
 /** Reconcile a handover journal on foreground/screen entry as well as boot. */
 async function recoverPendingHandoverOnce(): Promise<boolean> {
   if (handoverRecoveryFlight) return handoverRecoveryFlight;
@@ -1042,14 +1079,14 @@ async function recoverPendingHandoverOnce(): Promise<boolean> {
   finally { if (handoverRecoveryFlight === flight) handoverRecoveryFlight = null; }
 }
 
-async function runCommand<T = Record<string, unknown>>(owner: Hub, deviceId: string, input: Command, requestId?: string, signal?: AbortSignal): Promise<T> {
+async function runCommand<T = Record<string, unknown>>(owner: Hub, deviceId: string, input: Command, requestId?: string, signal?: AbortSignal, quiet = false): Promise<T> {
   try {
     const result = await command<T>(owner, deviceId, input, requestId, signal);
-    if (owner === hub) set((current) => ({ connection: 'open', connectionError: undefined,
+    if (!quiet && owner === hub) set((current) => ({ connection: 'open', connectionError: undefined,
       ...(!requestId ? { devices: current.devices.map((device) => device.deviceId === deviceId ? { ...device, online: true } : device) } : {}) }));
     return result;
   } catch (error) {
-    if (owner === hub && error instanceof HubError && (error.status === 0 || error.status >= 500 || error.status === 401 || error.status === 403 || error.status === 409)) {
+    if (!quiet && owner === hub && error instanceof HubError && (error.status === 0 || error.status >= 500 || error.status === 401 || error.status === 403 || error.status === 409)) {
       set({ connection: 'error', connectionError: error.message });
     }
     throw error;
@@ -1310,6 +1347,17 @@ async function switchRemoteStationImpl(deviceId: string, targetConnectionId: str
         createdAt: previous?.createdAt ?? Date.now(), ...(agent ? { agent } : {}), ...(accountId ? { accountId } : {}),
         ...(model?.trim() ? { model: model.trim() } : {}), ...(sessionKey ? { sessionKey } : {}) };
       if (ambiguousHandoverError(error) && await recoverPendingHandover(intent, operationGeneration, owner)) return;
+      if (ambiguousHandoverError(error) || error instanceof HubError && error.code === 'computer_offline') {
+        try {
+          await requestStandbyHandover(target, intent, operationGeneration, owner);
+          await useSavedConnection(target.id, false, { skipHandover: true, handoverOperationId: operationId });
+          await clearPendingHandover(operationId);
+          return;
+        } catch (standbyError) {
+          if (ambiguousHandoverError(standbyError) && await recoverPendingHandover(intent, operationGeneration, owner)) return;
+          throw standbyError;
+        }
+      }
       if (error instanceof HubError && (error.status === 200 || error.status === 401 || error.status === 403 || error.code === 'request_id_conflict')) await clearPendingHandover(operationId);
       throw error;
     }
@@ -1382,28 +1430,32 @@ async function resolveClaudeHistoryScope(owner: Hub, deviceId: string, sessionKe
   return scope;
 }
 /** Native Claude Chat/Cowork has its own read-only directory and account identity. */
-export async function loadClaudeDesktopHistory(deviceId: string, scope: import('./client').ClaudeDesktopScope, more = false): Promise<void> {
+export async function loadClaudeDesktopHistory(deviceId: string, scope: import('./client').ClaudeDesktopScope, more = false, options?: { preservePages?: boolean }): Promise<void> {
   const owner = need(), identity = claudeHistoryIdentity(deviceId);
   if (!state.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory?.scopes.includes(scope)) throw new Error('这个桌面目录不可用');
   const entry = state.sessions[deviceId]?.readOnly?.[scope], cursor = more && entry?.identity === identity ? entry.nextCursor : undefined;
+  const preserve = !more && options?.preservePages && entry?.identity === identity && entry.loaded;
+  if (preserve && entry?.loading) return;
   if (more && (!cursor || entry?.loading)) return;
   const requestKey = `claude-history:${deviceId}:${scope}`, revision = (sessionRequests.get(requestKey) ?? 0) + 1;
   sessionRequests.set(requestKey, revision);
   const current = () => owner === hub && sessionRequests.get(requestKey) === revision;
   const publish = (directory: NonNullable<DeviceSessions['readOnly']>[typeof scope]) => set(previous => ({ sessions: { ...previous.sessions,
     [deviceId]: { ...(previous.sessions[deviceId] ?? { list: [], loading: false, loaded: false }), readOnly: { ...previous.sessions[deviceId]?.readOnly, [scope]: directory } } } }));
-  publish({ list: entry?.identity === identity ? entry.list : [], loaded: entry?.identity === identity && entry.loaded === true, loading: true, identity });
+  publish({ list: entry?.identity === identity ? entry.list : [], nextCursor: entry?.identity === identity ? entry.nextCursor : undefined,
+    loaded: entry?.identity === identity && entry.loaded === true, loading: !preserve, identity });
   try {
     const result = await runCommand<{ sessions?: SessionInfo[]; nextCursor?: string; historyIdentity?: string }>(owner, deviceId,
-      { type: 'sessions.list', tool: 'claude', client: scope, controlSurface: 'read-only', historyIdentity: identity, limit: 100, ...(cursor ? { cursor } : {}) });
+      { type: 'sessions.list', tool: 'claude', client: scope, controlSurface: 'read-only', historyIdentity: identity, limit: SESSION_PAGE_SIZE, ...(cursor ? { cursor } : {}) });
     if (!current()) return;
     if (claudeHistoryIdentity(deviceId) !== identity || result.historyIdentity !== identity) throw new Error('桌面账号已变更，请刷新');
     if (!Array.isArray(result.sessions) || result.sessions.some(row => !row || !isReadOnlyDesktopSession(row.sessionKey) || row.tool !== 'claude' || row.controlSurface !== 'read-only' || row.controllable !== false
       || row.client !== 'Claude Desktop' || row.sessionScope !== scope) || new Set(result.sessions.map(row => row.sessionKey)).size !== result.sessions.length) throw new Error('桌面目录无效');
     const nextCursor = safePageCursor(result.nextCursor);
     if (cursor && nextCursor === cursor) throw new Error('电脑没有推进读取位置，请刷新');
-    const list = [...new Map([...(more ? entry?.list ?? [] : []), ...result.sessions].map(row => [row.sessionKey, row])).values()].sort((a, b) => b.updatedAt - a.updatedAt);
-    publish({ list, nextCursor, loading: false, loaded: true, identity });
+    const list = [...new Map([...(more || preserve ? entry?.list ?? [] : []), ...result.sessions].map(row => [row.sessionKey, row])).values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    publish({ list, nextCursor: preserve ? entry?.nextCursor : nextCursor, loading: false, loaded: true, identity });
+    if (!more) warmDirectoryMessages(deviceId, list);
   } catch (error) {
     if (!current()) return;
     if (state.agents[deviceId]?.list.find(item => item.id === 'claude-desktop')?.desktopHistory?.identity !== identity) throw error;
@@ -1436,16 +1488,21 @@ export function selectSessionDirectory(deviceId: string, surface: 'desktop' | 'a
     return { sessions: { ...current.sessions, [deviceId]: { ...entry, directorySurface: surface } } }; });
 }
 /** Native and all-history directories are separate; a native failure never falls back to CLI. */
-export async function loadNativeSessions(deviceId: string): Promise<void> {
+export async function loadNativeSessions(deviceId: string, more = false, options?: { preservePages?: boolean }): Promise<void> {
+  const original = state.sessions[deviceId]?.native;
+  const preserve = !more && options?.preservePages && original?.loaded;
+  if (preserve && original?.loading) return;
+  const cursor = more ? original?.nextCursor : undefined;
+  if (more && (!cursor || original?.loading)) return;
   const owner = need(), requestKey = `native-sessions:${deviceId}`;
   const revision = (sessionRequests.get(requestKey) ?? 0) + 1;
   sessionRequests.set(requestKey, revision);
   const currentRequest = () => owner === hub && sessionRequests.get(requestKey) === revision;
   set(current => { const entry = current.sessions[deviceId] ?? { list: [], loading: false, loaded: false };
-    return { sessions: { ...current.sessions, [deviceId]: { ...entry, directorySurface: 'desktop', native: { ...(entry.native ?? { list: [], loaded: false }), loading: true, error: undefined } } } }; });
+    return { sessions: { ...current.sessions, [deviceId]: { ...entry, directorySurface: 'desktop', native: { ...(entry.native ?? { list: [], loaded: false }), loading: !preserve, error: undefined } } } }; });
   try {
     const lease = nativeLeaseIdentity(deviceId);
-    const result = await runCommand<{ sessions?: SessionInfo[] }>(owner, deviceId, { type: 'desktop.sessions.list', tool: 'codex', controlSurface: 'desktop' });
+    const result = await runCommand<{ sessions?: SessionInfo[]; nextCursor?: string }>(owner, deviceId, { type: 'desktop.sessions.list', tool: 'codex', controlSurface: 'desktop', limit: SESSION_PAGE_SIZE, ...(cursor ? { cursor } : {}) });
     if (!currentRequest()) return;
     if (nativeLeaseIdentity(deviceId) !== lease) throw new Error('桌面授权已更新，请重新读取');
     const allowed = new Set(nativeLease(deviceId).sessionKeys), seen = new Set<string>(), positions = new Set<number>();
@@ -1456,8 +1513,17 @@ export async function loadNativeSessions(deviceId: string): Promise<void> {
         || item.pinnedIndex !== undefined && (!Number.isInteger(item.pinnedIndex) || item.pinnedIndex < 1 || item.pinnedIndex > 10000)) throw new Error('电脑返回的桌面目录无效');
       seen.add(item.sessionKey); positions.add(item.sidebarIndex!); return item;
     }).sort((a, b) => a.sidebarIndex! - b.sidebarIndex!);
+    const nextCursor = safePageCursor(result.nextCursor);
+    if (cursor && nextCursor === cursor) throw new Error('电脑没有推进读取位置，请刷新');
     set(current => { const entry = current.sessions[deviceId];
-      return { sessions: { ...current.sessions, [deviceId]: { ...entry, native: { list, loading: false, loaded: true } } } }; });
+      const previous = entry.native?.list ?? [], updates = new Map(list.map(item => [item.sessionKey, item]));
+      // A refreshed head is authoritative for its order, while older loaded
+      // pages keep their relative order. Old sidebar indices can collide with
+      // a newly inserted head; preserve the host metadata, not an invented rank.
+      const merged = preserve ? [...list, ...previous.filter(item => !updates.has(item.sessionKey))]
+        : more ? [...previous.map(item => updates.get(item.sessionKey) ?? item), ...list.filter(item => !previous.some(old => old.sessionKey === item.sessionKey))] : list;
+      return { sessions: { ...current.sessions, [deviceId]: { ...entry, native: { list: merged, nextCursor: preserve ? original?.nextCursor : nextCursor, loading: false, loaded: true } } } }; });
+    if (!more) warmDirectoryMessages(deviceId, list);
   } catch (error) {
     if (!currentRequest()) return;
     set(current => { const entry = current.sessions[deviceId];
@@ -1478,11 +1544,12 @@ async function readSessions(deviceId: string, agent: AgentId | undefined, more: 
   sessionRequests.set(requestKey, revision);
   const currentRequest = () => owner === hub && sessionRequests.get(requestKey) === revision;
   set(current => ({ sessions: { ...current.sessions, [deviceId]: { ...(current.sessions[deviceId] ?? entry),
-    ...(more ? {} : { loading: true, error: undefined }),
-    ...(agent ? { pages: { ...current.sessions[deviceId]?.pages, [agent]: { ...(more || preserve ? entry.pages?.[agent] : {}), loading: true } } } : {}) } } }));
+    ...(more ? {} : { loading: !preserve, error: undefined }),
+    ...(agent ? { pages: { ...current.sessions[deviceId]?.pages, [agent]: { ...(more || preserve ? entry.pages?.[agent] : {}), loading: !preserve } } } : {}) } } }));
   try {
     const result = await runCommand<{ sessions?: SessionInfo[]; nextCursor?: string }>(owner, deviceId, { type: 'sessions.list',
-      ...(agent ? { tool: agent === 'codex' ? 'codex' : 'claude', limit: 100, ...(agent === 'codex' ? {} : { client: agent === 'claude-desktop' ? 'desktop-code' : 'code' }) } : {}),
+      limit: SESSION_PAGE_SIZE,
+      ...(agent ? { tool: agent === 'codex' ? 'codex' : 'claude', ...(agent === 'codex' ? {} : { client: agent === 'claude-desktop' ? 'desktop-code' : 'code' }) } : {}),
       ...(cursor ? { cursor } : {}) });
     if (!currentRequest()) return;
     const nextCursor = safePageCursor(result.nextCursor);
@@ -1495,6 +1562,7 @@ async function readSessions(deviceId: string, agent: AgentId | undefined, more: 
       return { sessions: { ...current.sessions, [deviceId]: { ...latest, list, loading: false, loaded: true, error: undefined,
         ...(agent ? { pages: { ...latest.pages, [agent]: { nextCursor: preserve ? entry.pages?.[agent]?.nextCursor : nextCursor, loading: false } } } : {}) } } };
     });
+    if (!more && agent) warmDirectoryMessages(deviceId, received);
   } catch (error) {
     if (!currentRequest()) return;
     set(current => ({ sessions: { ...current.sessions, [deviceId]: { ...(current.sessions[deviceId] ?? entry), loading: false, loaded: true,
@@ -1504,8 +1572,43 @@ async function readSessions(deviceId: string, agent: AgentId | undefined, more: 
   }
 }
 
-export function openSession(deviceId: string, sessionKey: string, options?: { background?: boolean; signal?: AbortSignal }): Promise<void> {
+function warmDirectoryMessages(deviceId: string, sessions: SessionInfo[]) {
+  if (!screenOpen || AppState.currentState !== 'active') return;
+  directoryPreloads.get(deviceId)?.abort();
+  const controller = new AbortController();
+  directoryPreloads.set(deviceId, controller);
+  void preloadRecentSessionMessages(deviceId, sessions, controller.signal).finally(() => {
+    if (directoryPreloads.get(deviceId) === controller) directoryPreloads.delete(deviceId);
+  }).catch(() => undefined);
+}
+
+/** First-page previews are optional background reads, never a directory gate. */
+export async function preloadRecentSessionMessages(deviceId: string, sessions: SessionInfo[], signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted || !hub) return;
+  const owner = hub, generation = connectionGeneration;
+  const queue = [...new Map(sessions.filter(item => !item.parentSessionKey).map(item => [item.sessionKey, item])).values()]
+    .slice(0, SESSION_PAGE_SIZE);
+  let index = 0;
+  const worker = async () => {
+    while (!signal?.aborted && owner === hub && generation === connectionGeneration && index < queue.length) {
+      const item = queue[index++], key = timelineKey(deviceId, item.sessionKey);
+      const cached = state.timelines[key];
+      if (snapshotFlights.has(key) || cached?.loading || cached?.loadingEarlier || cached?.historyExpanded
+        || cached?.snapshotAt && Date.now() - cached.snapshotAt < 30_000) continue;
+      try { await openSession(deviceId, item.sessionKey, { background: true, preload: true, signal }); }
+      catch { /* Selecting the thread performs an authoritative foreground retry. */ }
+    }
+  };
+  // Reserve capacity for a selected conversation, sends and approval replies.
+  await Promise.all([worker(), worker()]);
+}
+
+export function openSession(deviceId: string, sessionKey: string, options?: { background?: boolean; preload?: boolean; signal?: AbortSignal }): Promise<void> {
   if (options?.signal?.aborted) return Promise.resolve();
+  if (!options?.background) {
+    directoryPreloads.get(deviceId)?.abort();
+    directoryPreloads.delete(deviceId);
+  }
   const key = timelineKey(deviceId, sessionKey), owner = need();
   const flight = { owner, promise: Promise.resolve() as Promise<void> };
   flight.promise = readSessionSnapshot(deviceId, sessionKey, options).finally(() => {
@@ -1515,7 +1618,7 @@ export function openSession(deviceId: string, sessionKey: string, options?: { ba
   return flight.promise;
 }
 
-async function readSessionSnapshot(deviceId: string, sessionKey: string, options?: { background?: boolean; signal?: AbortSignal }): Promise<void> {
+async function readSessionSnapshot(deviceId: string, sessionKey: string, options?: { background?: boolean; preload?: boolean; signal?: AbortSignal }): Promise<void> {
   const owner = need();
   if (options?.signal?.aborted) return;
   const key = timelineKey(deviceId, sessionKey);
@@ -1534,7 +1637,7 @@ async function readSessionSnapshot(deviceId: string, sessionKey: string, options
     const cached = current.timelines[key] ?? EMPTY_TIMELINE;
     const existing = readOnly && (!identity || cached.historyLease !== identity) ? EMPTY_TIMELINE : cached;
     return { timelines: { ...current.timelines, [key]: { ...existing,
-      ...(readOnly ? { historyLease: identity } : {}), loading: options?.background && existing.snapshotAt ? false : true, error: undefined,
+      ...(readOnly ? { historyLease: identity } : {}), loading: !options?.background, error: undefined,
       ...(options?.background ? {} : { loadingEarlier: false, earlierError: undefined }) } } };
   });
   try {
@@ -1545,7 +1648,7 @@ async function readSessionSnapshot(deviceId: string, sessionKey: string, options
     const head = native || readOnly ? { lastSeq: 0, nextSeq: 0 } : await sessionEventsPage(owner, deviceId, sessionKey, 0, 0, 1, options?.signal);
     if (!currentRequest()) return;
     const result = await runCommand<{ session?: SessionInfo; events?: HubEvent[]; nextCursor?: string; historyIdentity?: string }>(owner, deviceId,
-      native ? { type: 'desktop.session.open', sessionKey, controlSurface: 'desktop' } : { type: 'session.open', sessionKey, limit: 400, ...(readOnly ? { controlSurface: 'read-only' as const, historyIdentity: lease, client: historyScope } : {}) }, undefined, options?.signal);
+      native ? { type: 'desktop.session.open', sessionKey, controlSurface: 'desktop', limit: INITIAL_MESSAGE_COUNT, messageLimit: INITIAL_MESSAGE_COUNT } : { type: 'session.open', sessionKey, limit: HISTORY_EVENT_BUDGET, messageLimit: INITIAL_MESSAGE_COUNT, ...(readOnly ? { controlSurface: 'read-only' as const, historyIdentity: lease, client: historyScope } : {}) }, undefined, options?.signal, options?.preload);
     if (!currentRequest()) return;
     if (!result.session || result.session.sessionKey !== sessionKey) throw new Error('会话身份不一致，已取消读取');
     if (native && (nativeLeaseIdentity(deviceId, sessionKey) !== lease || result.session.controlSurface !== 'desktop' || result.session.tool !== 'codex')) throw new Error('桌面授权已更新，请重新读取');
@@ -1560,7 +1663,7 @@ async function readSessionSnapshot(deviceId: string, sessionKey: string, options
       const cached = current.timelines[key] ?? EMPTY_TIMELINE;
       const existing = readOnly && cached.historyLease !== lease ? EMPTY_TIMELINE : cached;
       const concurrentApprovals = new Set(existing.items.filter(item => item.kind === 'approval' && originalApprovals.get(item.id) !== item).map(item => item.id));
-      const keepFrontier = Boolean((native || readOnly) && options?.background && existing.historyLease === lease && existing.historyExpanded);
+      const keepFrontier = Boolean(options?.background && existing.historyExpanded && (!(native || readOnly) || existing.historyLease === lease));
       const timeline = { ...mergeHistory(existing, result.session, history, concurrentApprovals), cachedAt: undefined, snapshotAt: Date.now(), snapshotStartedAt,
         nextCursor: keepFrontier ? existing.nextCursor : safePageCursor(result.nextCursor), historyLease: native || readOnly ? lease : undefined,
         historyExpanded: keepFrontier, loadingEarlier: options?.background ? existing.loadingEarlier : false,
@@ -1596,7 +1699,7 @@ async function readSessionSnapshot(deviceId: string, sessionKey: string, options
   } finally {
     // A cancelled first snapshot has no snapshotAt yet. Release only its own
     // loading state, or the next foreground read would be skipped forever.
-    if (options?.signal?.aborted && owner === hub && sessionRequests.get(revisionKey) === revision) {
+    if (owner === hub && sessionRequests.get(revisionKey) === revision && state.timelines[key]?.loading) {
       set(current => ({ timelines: { ...current.timelines, [key]: { ...(current.timelines[key] ?? EMPTY_TIMELINE), loading: false } } }));
     }
   }
@@ -1621,7 +1724,7 @@ export async function loadEarlierHistory(deviceId: string, sessionKey: string, s
     if (readOnly && original.historyLease !== lease) throw new Error('桌面账号已变更，请刷新');
     const historyScope = readOnly ? await resolveClaudeHistoryScope(owner, deviceId, sessionKey, lease, signal) : undefined;
     const result = await runCommand<{ session?: SessionInfo; events?: HubEvent[]; nextCursor?: string; historyIdentity?: string }>(owner, deviceId,
-      native ? { type: 'desktop.session.open', sessionKey, cursor, controlSurface: 'desktop' } : { type: 'session.open', sessionKey, cursor, limit: 400, ...(readOnly ? { controlSurface: 'read-only' as const, historyIdentity: lease, client: historyScope } : {}) }, undefined, signal);
+      native ? { type: 'desktop.session.open', sessionKey, cursor, controlSurface: 'desktop', limit: OLDER_HISTORY_PAGE_SIZE, messageLimit: OLDER_HISTORY_PAGE_SIZE } : { type: 'session.open', sessionKey, cursor, limit: HISTORY_EVENT_BUDGET, messageLimit: OLDER_HISTORY_PAGE_SIZE, ...(readOnly ? { controlSurface: 'read-only' as const, historyIdentity: lease, client: historyScope } : {}) }, undefined, signal);
     if (!currentRequest()) return;
     if (result.session?.sessionKey !== sessionKey) throw new Error('会话身份不一致，已取消读取');
     if (native && (nativeLeaseIdentity(deviceId, sessionKey) !== lease || result.session.controlSurface !== 'desktop' || result.session.tool !== 'codex')) throw new Error('桌面授权已更新，请重新读取');
@@ -1650,7 +1753,7 @@ export async function loadEarlierHistory(deviceId: string, sessionKey: string, s
   } finally {
     // Cancellation is not a failed page. Keep its cursor and content while
     // releasing only the loading state still owned by this exact read.
-    if (signal?.aborted && owner === hub && sessionRequests.get(pageKey) === revision
+    if (owner === hub && sessionRequests.get(pageKey) === revision && state.timelines[key]?.loadingEarlier
       && sessionRequests.get(`history:${key}`) === historyRevision) {
       set(current => ({ timelines: { ...current.timelines, [key]: { ...current.timelines[key], loadingEarlier: false } } }));
     }

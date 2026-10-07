@@ -6,7 +6,7 @@
 - [远程编程](REMOTE-PROGRAMMING.zh.md)：准备电脑、连接 Hub、扫码、电脑 API、会话历史和离线处理。
 - [网络排错](NETWORK.md)：API、图片下载和更新链路。
 - [隐私说明](../PRIVACY.md) 与 [安全政策](../SECURITY.md)。
-- [版本说明](RELEASE-v1.8.0.md)；安装包到 [Releases](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases) 下载。
+- [1.8.2 版本说明](RELEASE-1.8.2.md)；安装包到 [Releases](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases) 下载。
 
 ## 开发与维护
 

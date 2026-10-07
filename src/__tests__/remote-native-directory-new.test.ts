@@ -1,6 +1,7 @@
 import { setHubFetch, type FetchLike, type SessionInfo } from '../remote/client';
 import { bootRemote, connectStation, getRemoteState, hydrateCachedThread, loadAgentProfiles, loadNativeSessions, loadSessions, loadEarlierHistory, openSession, pairRemoteQr, parseRemoteQr, resetRemoteForTests, syncSessionEvents, timelineKey } from '../remote/store';
 import { deliveryCredentialId } from '../remote/connections';
+import { groupSessionsByProject } from '../remote/projection';
 
 const mockSettings = new Map<string, string>(), mockSecrets = new Map<string, string>();
 let mockUuid = 0;
@@ -35,7 +36,7 @@ async function pair() {
   await loadAgentProfiles('pc');
 }
 beforeEach(() => {
-  resetRemoteForTests(); mockSettings.clear(); mockSecrets.clear(); mockUuid = 0; lease = Date.now() + 60000; reads = 0; commands = []; eventReads = 0; handler = defaultHandler;
+  resetRemoteForTests(); mockSettings.clear(); mockSecrets.clear(); keys.length = 2; mockUuid = 0; lease = Date.now() + 60000; reads = 0; commands = []; eventReads = 0; handler = defaultHandler;
   setHubFetch((async (endpoint, init) => {
     if (endpoint.endsWith('/ping')) return response({ service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, authModes: ['device-pairing'], capabilities: ['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1'] });
     if (endpoint.endsWith('/app/pair/qr')) return response({ pair_token: 'a'.repeat(64), device });
@@ -61,10 +62,46 @@ test('current native lease cannot hydrate an older CLI disk snapshot for the sam
 test('native directory uses only the authorized native transport and retains real pins/order independently of all history', async () => {
   await pair(); await loadNativeSessions('pc'); await loadSessions('pc', 'codex');
   expect(commands.filter(item => item.type !== 'agents.status')).toEqual([
-    { type: 'desktop.sessions.list', tool: 'codex', controlSurface: 'desktop' }, { type: 'sessions.list', tool: 'codex', limit: 100 },
+    { type: 'desktop.sessions.list', tool: 'codex', controlSurface: 'desktop', limit: 10 }, { type: 'sessions.list', tool: 'codex', limit: 10 },
   ]);
   expect(getRemoteState().sessions.pc.native?.list.map(item => [item.sessionKey, item.pinnedIndex, item.sidebarIndex])).toEqual([[keys[0], 3, 1], [keys[1], undefined, 2]]);
   expect(getRemoteState().sessions.pc.list.map(item => item.sessionKey)).toEqual(['codex:history-only']);
+});
+
+test('native head refresh preserves the older frontier without a spinner or stale-index reordering', async () => {
+  keys.push('codex:0199aaa1-1234-4678-9abc-000000000003', 'codex:0199aaa1-1234-4678-9abc-000000000004');
+  await pair(); let head = 0, release!: (value: unknown) => void, entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  handler = command => command.type === 'desktop.sessions.list' ? command.cursor
+    ? { ok: true, result: { sessions: [row(1), row(2)], nextCursor: 'third-page' } }
+    : ++head === 1 ? { ok: true, result: { sessions: [row(0)], nextCursor: 'second-page' } }
+      : (entered(), new Promise(resolve => { release = resolve; })) : defaultHandler(command);
+  await loadNativeSessions('pc'); await loadNativeSessions('pc', true);
+  const refresh = loadNativeSessions('pc', false, { preservePages: true }); await started;
+  expect(getRemoteState().sessions.pc.native).toMatchObject({ loading: false, nextCursor: 'third-page' });
+  const before = commands.length;
+  release({ ok: true, result: { sessions: [{ ...row(3), sidebarIndex: 1 }, { ...row(0), sidebarIndex: 2 }], nextCursor: 'second-page' } }); await refresh;
+  const entry = getRemoteState().sessions.pc.native!;
+  expect(entry.nextCursor).toBe('third-page');
+  expect(entry.list.map(item => item.sessionKey)).toEqual([keys[3], keys[0], keys[1], keys[2]]);
+  const groups = groupSessionsByProject(entry.list, { nativeOrder: true, nativeSessionOrder: entry.list.map(item => item.sessionKey) });
+  expect(groups.find(group => group.key === '__native_recent')?.sessions.map(item => item.sessionKey)).toEqual([keys[3], keys[1], keys[2]]);
+  expect(commands).toHaveLength(before);
+});
+
+test('a foreground native older page supersedes an unfinished background head refresh', async () => {
+  await pair(); handler = command => command.type === 'desktop.sessions.list'
+    ? { ok: true, result: { sessions: [row(0)], nextCursor: 'second-page' } } : defaultHandler(command);
+  await loadNativeSessions('pc'); let release!: (value: unknown) => void, entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  handler = command => command.type === 'desktop.sessions.list' ? command.cursor
+    ? { ok: true, result: { sessions: [row(1)], nextCursor: 'third-page' } }
+    : (entered(), new Promise(resolve => { release = resolve; })) : defaultHandler(command);
+  const refresh = loadNativeSessions('pc', false, { preservePages: true }); await started;
+  await loadNativeSessions('pc', true);
+  release({ ok: true, result: { sessions: [{ ...row(0), title: 'stale background' }], nextCursor: 'second-page' } }); await refresh;
+  expect(getRemoteState().sessions.pc.native).toMatchObject({ loading: false, nextCursor: 'third-page' });
+  expect(getRemoteState().sessions.pc.native?.list.map(item => item.title)).toEqual(['native-0', 'native-1']);
 });
 
 test('native open and demand sync read real desktop snapshots instead of CLI events and replace partial replies by ID', async () => {
@@ -94,7 +131,7 @@ test('native older pages preserve original transport and pagination frontier acr
   await openSession('pc', keys[0]); await loadEarlierHistory('pc', keys[0]); await syncSessionEvents('pc', keys[0]);
   const timeline = getRemoteState().timelines[timelineKey('pc', keys[0])];
   expect(timeline.items.map(item => item.id)).toEqual(['older', 'latest']); expect(timeline.nextCursor).toBeUndefined();
-  expect(commands.find(item => item.cursor)).toEqual({ type: 'desktop.session.open', sessionKey: keys[0], controlSurface: 'desktop', cursor: 'lease-signed-fixture' });
+  expect(commands.find(item => item.cursor)).toEqual({ type: 'desktop.session.open', sessionKey: keys[0], controlSurface: 'desktop', cursor: 'lease-signed-fixture', limit: 10, messageLimit: 10 });
   expect(commands.some(item => item.type === 'session.open')).toBe(false);
 });
 

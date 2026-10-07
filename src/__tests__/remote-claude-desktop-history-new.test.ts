@@ -56,6 +56,39 @@ test('Chat/Cowork directory and paginated history use native readonly identity w
   expect(Object.keys(getRemoteState().approvals)).toEqual([]);
 });
 
+test('readonly head refresh retains older loaded pages and its cursor while remaining silent', async () => {
+  await pair(); const older = { ...row, sessionKey: 'claude-desktop:local_0199aaa1-1234-4678-9abc-000000000002', updatedAt: 0 };
+  let head = 0, release!: (value: unknown) => void, entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  handler = command => command.type === 'sessions.list' ? command.cursor
+    ? { ok: true, result: { sessions: [older], nextCursor: 'third-page', historyIdentity: identity } }
+    : ++head === 1 ? { ok: true, result: { sessions: [row], nextCursor: 'second-page', historyIdentity: identity } }
+      : (entered(), new Promise(resolve => { release = resolve; })) : defaultHandler(command);
+  await loadClaudeDesktopHistory('pc', 'desktop-chat'); await loadClaudeDesktopHistory('pc', 'desktop-chat', true);
+  const refresh = loadClaudeDesktopHistory('pc', 'desktop-chat', false, { preservePages: true }); await started;
+  expect(getRemoteState().sessions.pc.readOnly?.['desktop-chat']).toMatchObject({ loading: false, nextCursor: 'third-page' });
+  release({ ok: true, result: { sessions: [{ ...row, status: 'running' }], nextCursor: 'second-page', historyIdentity: identity } }); await refresh;
+  const entry = getRemoteState().sessions.pc.readOnly?.['desktop-chat'];
+  expect(entry?.list.map(item => item.sessionKey)).toEqual([key, older.sessionKey]);
+  expect(entry?.list[0].status).toBe('running'); expect(entry?.nextCursor).toBe('third-page');
+});
+
+test('a foreground readonly page wins over an unfinished background head refresh', async () => {
+  await pair(); const older = { ...row, sessionKey: 'claude-desktop:local_0199aaa1-1234-4678-9abc-000000000002' };
+  handler = command => command.type === 'sessions.list' ? { ok: true, result: { sessions: [row], nextCursor: 'second-page', historyIdentity: identity } } : defaultHandler(command);
+  await loadClaudeDesktopHistory('pc', 'desktop-chat');
+  let release!: (value: unknown) => void, entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  handler = command => command.type === 'sessions.list' ? command.cursor
+    ? { ok: true, result: { sessions: [older], nextCursor: 'third-page', historyIdentity: identity } }
+    : (entered(), new Promise(resolve => { release = resolve; })) : defaultHandler(command);
+  const refresh = loadClaudeDesktopHistory('pc', 'desktop-chat', false, { preservePages: true }); await started;
+  await loadClaudeDesktopHistory('pc', 'desktop-chat', true);
+  release({ ok: true, result: { sessions: [{ ...row, title: 'stale background' }], nextCursor: 'second-page', historyIdentity: identity } }); await refresh;
+  expect(getRemoteState().sessions.pc.readOnly?.['desktop-chat']).toMatchObject({ loading: false, nextCursor: 'third-page' });
+  expect(getRemoteState().sessions.pc.readOnly?.['desktop-chat']?.list).toEqual([row, older]);
+});
+
 test('readonly native IDs cannot send, stop or approve even before any history loads', async () => {
   await pair(); const before = commands.length;
   await expect(sendToSession('pc', key, 'no')).rejects.toThrow('只支持查看');
