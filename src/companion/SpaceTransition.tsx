@@ -94,27 +94,41 @@ export function SpaceTransition({ space, children }: { space: Space; children: (
   const reduced = useReducedMotion();
   const { width, height } = useWindowDimensions();
   const origin = useRef({ x: width / 2, y: 80 });
+  const shownRef = useRef(shown);
+  const activeAnimations = useRef<Animated.CompositeAnimation[]>([]);
+  const viewport = useRef({ width, height });
+  viewport.current = { width, height };
 
   useEffect(() => {
-    if (space === shown) return undefined;
-    if (reduced) { setShown(space); return undefined; }
-    origin.current = { x: switchOrigin.x || width / 2, y: switchOrigin.y || 80 };
+    const stopAnimations = () => { activeAnimations.current.forEach((animation) => animation.stop()); activeAnimations.current = []; };
+    stopAnimations();
+    if (space === shownRef.current) { setCover(null); return undefined; }
+    if (reduced) { shownRef.current = space; setShown(space); setCover(null); return undefined; }
+    let live = true;
+    const animations: Animated.CompositeAnimation[] = [];
+    const track = (animation: Animated.CompositeAnimation) => { animations.push(animation); animation.start(); };
+    activeAnimations.current = animations;
+    origin.current = { x: switchOrigin.x || viewport.current.width / 2, y: switchOrigin.y || 80 };
     setCover(space);
     setRunId((value) => value + 1);
     grow.setValue(0);
     fade.setValue(1);
     burst.setValue(0);
     pop.setValue(0);
-    Animated.timing(burst, { toValue: 1, duration: 1000, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
-    Animated.sequence([Animated.delay(200), Animated.spring(pop, { toValue: 1, damping: 9, stiffness: 180, useNativeDriver: true })]).start();
+    track(Animated.timing(burst, { toValue: 1, duration: 1000, easing: Easing.out(Easing.cubic), useNativeDriver: true }));
+    track(Animated.sequence([Animated.delay(200), Animated.spring(pop, { toValue: 1, damping: 9, stiffness: 180, useNativeDriver: true })]));
     const animation = Animated.timing(grow, { toValue: 1, duration: 460, easing: Easing.inOut(Easing.cubic), useNativeDriver: true });
+    animations.push(animation);
     animation.start(({ finished }) => {
-      if (!finished) return;
+      if (!finished || !live) return;
+      shownRef.current = space;
       setShown(space);
-      Animated.timing(fade, { toValue: 0, duration: 420, delay: 260, easing: Easing.out(Easing.quad), useNativeDriver: true }).start(() => setCover(null));
+      const fadeAnimation = Animated.timing(fade, { toValue: 0, duration: 420, delay: 260, easing: Easing.out(Easing.quad), useNativeDriver: true });
+      animations.push(fadeAnimation);
+      fadeAnimation.start(({ finished: faded }) => { if (faded && live) setCover(null); });
     });
-    return () => animation.stop();
-  }, [space, shown, reduced, grow, fade, burst, pop, width]);
+    return () => { live = false; animations.forEach((current) => current.stop()); if (activeAnimations.current === animations) activeAnimations.current = []; };
+  }, [space, reduced, grow, fade, burst, pop]);
 
   const particles = useMemo(() => (cover ? makeParticles(cover, 1234 + runId * 97) : []), [cover, runId]);
   const radius = Math.hypot(Math.max(origin.current.x, width - origin.current.x), Math.max(origin.current.y, height - origin.current.y)) * 1.1;

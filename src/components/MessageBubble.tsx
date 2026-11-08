@@ -1,16 +1,18 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { Animated, Easing, Image, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
-import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
+import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg';
 
 import type { GeneratedFile, PhoneAction } from '../agent/types';
-import type { ChatMessage } from '../domain';
+import type { ChatMessage, GeneratedImage } from '../domain';
 import { attachmentKind } from '../document-inputs';
-import type { RequestPhase } from '../state/AppContext';
+import { messageGeneratedImages } from '../generated-images';
+import { useElapsedSeconds, type RequestPhase } from '../state/AppContext';
 import { colors, themed } from '../theme';
 import { ActionCards, AgentActivity, DraftStrip, FileCards, PlanCard, SourcesRow, SuggestionList } from './AgentTrace';
 import { LivingMark } from './Brand';
 import { Icon, type IconName } from './Icon';
+import { GeneratedImageGallery } from './GeneratedImageGallery';
 import { MessageContent } from './MessageContent';
 import { Appear, MotionPressable, useReducedMotion } from './MotionPressable';
 import { showToast } from './ui';
@@ -19,13 +21,14 @@ import { useLiveText } from '../state/live-text';
 type Props = {
   message: ChatMessage;
   phase: RequestPhase;
-  elapsedSeconds: number;
   isLast: boolean;
   onStop: () => void;
   onRetry: (message: ChatMessage) => void;
-  onPreview: (uri: string) => void;
+  onPreview: (uri: string, images?: readonly GeneratedImage[]) => void;
   onSave: (uri: string) => void;
   onShare: (uri: string) => void;
+  onEditImage?: (uri: string) => void;
+  onRetryImage?: (message: ChatMessage, imageId: string, failedUri?: string) => void;
   /** Sends a follow-up message, e.g. from the chips under a fresh image. */
   onFollowUp?: (text: string) => void;
   /** Long-press on the user's own message (copy / edit and resend). */
@@ -83,12 +86,14 @@ export function FileCard({ name, mimeType, size, onRemove }: { name: string; mim
   </View>;
 }
 
-function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare, onFollowUp, onRunAction, onDismissAction, onOpenFile, onDelete }: Props) {
+function AssistantMessage({ message, phase, isLast, onStop, onRetry: retryMessage, onPreview, onSave, onShare, onEditImage, onRetryImage, onFollowUp, onRunAction, onDismissAction, onOpenFile, onDelete }: Props) {
   const styles = useStyles();
   const onRetry = () => retryMessage(message);
   const pending = message.status === 'pending';
   const imageJob = Boolean(message.preparedPrompt) && (message.mode === 'generate' || message.mode === 'edit');
-  const drawing = imageJob && pending && !message.imageUri;
+  const generatedImages = messageGeneratedImages(message);
+  const hasImages = generatedImages.length > 0;
+  const drawing = imageJob && pending && !hasImages;
   const text = useLiveText(message.id, message.text)?.trim() ?? '';
   const streaming = pending && !drawing && Boolean(text);
   const failed = message.status === 'error' || message.status === 'interrupted';
@@ -99,24 +104,27 @@ function AssistantMessage({ message, phase, elapsedSeconds, isLast, onStop, onRe
   return <View style={styles.assistantWrap}>
     {trace?.plan?.length ? <PlanCard plan={trace.plan} pending={pending} /> : null}
     {trace?.steps.length ? <AgentActivity trace={trace} pending={pending} /> : null}
-    {pending && !text && !drawing && !running && <Thinking label={phase === 'downloading' ? '正在取回图片' : trace?.research ? '正在研究' : '正在思考'} />}
+    {pending && !text && !drawing && !hasImages && !running && <Thinking label={phase === 'downloading' ? '正在取回图片' : trace?.research ? '正在研究' : '正在思考'} />}
     {text ? <MessageContent text={text} streaming={streaming} sources={trace?.sources} /> : null}
-    {drawing && <DrawingCanvas message={message} seconds={elapsedSeconds} onStop={onStop} downloading={phase === 'downloading'} />}
-    {message.imageUri ? <ImageResult message={message} fresh={isLast} onPreview={onPreview} /> : null}
+    {drawing && <DrawingCanvas message={message} onStop={onStop} downloading={phase === 'downloading'} />}
+    {hasImages ? <GeneratedImageGallery message={message} fresh={isLast} onPreview={onPreview} onEdit={onEditImage} onShare={onShare}
+      onStop={onStop} downloading={phase === 'downloading'} onRetryImage={onRetryImage ? (imageId, failedUri) => onRetryImage(message, imageId, failedUri) : undefined}
+      renderActions={(uri) => <Actions message={message} imageUri={uri} text={text} emphasized={isLast} onRetry={!pending && !stopped ? onRetry : undefined}
+        onSave={onSave} onDelete={!pending && onDelete ? () => onDelete(message) : undefined} />} /> : null}
     {trace?.drafts?.length ? <DraftStrip drafts={trace.drafts} onPreview={onPreview} /> : null}
     {trace?.files?.length && onOpenFile ? <FileCards files={trace.files} onOpen={onOpenFile} /> : null}
     {trace?.actions?.length ? <ActionCards actions={trace.actions} disabled={pending}
       onRun={(action) => onRunAction?.(message, action)} onDismiss={(action) => onDismissAction?.(message, action)} /> : null}
     {trace?.sources?.length && !pending ? <SourcesRow sources={trace.sources} /> : null}
-    {failed && <View style={styles.errorCard}>
+    {failed && !hasImages && <View style={styles.errorCard}>
       <Icon name="alert" size={18} color={colors.danger} />
       <Text selectable style={styles.errorText}>{message.error || '这次没有完成'}</Text>
       <Pressable accessibilityRole="button" onPress={onRetry} hitSlop={8} style={styles.retry}><Text style={styles.retryText}>{message.remoteImageUrl ? '重新下载' : imageJob ? '重新绘制' : '重试'}</Text></Pressable>
     </View>}
     {stopped && <View style={styles.stoppedRow}><Text style={styles.stoppedText}>已停止</Text><Pressable accessibilityRole="button" onPress={onRetry} hitSlop={8}><Text style={styles.retryText}>重新生成</Text></Pressable></View>}
-    {!pending && !failed && !stopped && <Actions message={message} text={text} emphasized={isLast} onRetry={onRetry} onSave={onSave} onShare={onShare} onDelete={onDelete ? () => onDelete(message) : undefined} />}
+    {!hasImages && !pending && !failed && !stopped && <Actions message={message} imageUri={null} text={text} emphasized={isLast} onRetry={onRetry} onSave={onSave} onDelete={onDelete ? () => onDelete(message) : undefined} />}
     {isLast && !pending && !failed && !stopped && onFollowUp
-      ? suggestions.length ? <SuggestionList items={suggestions} onPick={onFollowUp} /> : message.imageUri ? <FollowUps onPick={onFollowUp} /> : null
+      ? suggestions.length ? <SuggestionList items={suggestions} onPick={onFollowUp} /> : generatedImages.length === 1 ? <FollowUps onPick={onFollowUp} /> : null
       : null}
   </View>;
 }
@@ -133,14 +141,13 @@ function FollowUps({ onPick }: { onPick: (text: string) => void }) {
   </ScrollView>;
 }
 
-function Actions({ message, text, emphasized, onRetry, onSave, onShare, onDelete }: { message: ChatMessage; text: string; emphasized: boolean; onRetry: () => void; onSave: (uri: string) => void; onShare: (uri: string) => void; onDelete?: () => void }) {
+function Actions({ message, imageUri, text, emphasized, onRetry, onSave, onDelete }: { message: ChatMessage; imageUri: string | null; text: string; emphasized: boolean; onRetry?: () => void; onSave: (uri: string) => void; onDelete?: () => void }) {
   const styles = useStyles();
   const copy = () => void Clipboard.setStringAsync(text || message.preparedPrompt || '').then(() => showToast(text ? '已复制' : '已复制作图描述'));
   return <View style={[styles.actions, !emphasized && { opacity: 0.6 }]}>
-    {message.imageUri ? <ActionIcon icon="download" label="保存到相册" onPress={() => onSave(message.imageUri!)} /> : null}
-    {message.imageUri ? <ActionIcon icon="share" label="分享" onPress={() => onShare(message.imageUri!)} /> : null}
+    {imageUri ? <ActionIcon icon="download" label="保存到相册" onPress={() => onSave(imageUri)} /> : null}
     {(text || message.preparedPrompt) ? <ActionIcon icon="copy" label="复制" onPress={copy} /> : null}
-    <ActionIcon icon="regenerate" label="重新生成" onPress={onRetry} />
+    {onRetry ? <ActionIcon icon="regenerate" label="重新生成" onPress={onRetry} /> : null}
     {onDelete ? <ActionIcon icon="trash" label="删除这条回答" onPress={onDelete} /> : null}
   </View>;
 }
@@ -173,13 +180,19 @@ export function Thinking({ label }: { label: string }) {
 }
 
 /** Aurora placeholder: soft colour fields drifting while the image is drawn. */
-export function DrawingCanvas({ message, seconds, onStop, downloading }: { message: ChatMessage; seconds: number; onStop: () => void; downloading: boolean }) {
+export function DrawingCanvas({ message, onStop, downloading }: { message: ChatMessage; onStop: () => void; downloading: boolean }) {
   const styles = useStyles();
+  const seconds = useElapsedSeconds();
   const { width } = useWindowDimensions();
+  const [availableWidth, setAvailableWidth] = useState(0);
   const reduced = useReducedMotion();
   const drift = useRef(new Animated.Value(0)).current;
   const ratio = ratioFromSize(message.size);
-  const cardWidth = Math.min(width - 40, 400);
+  // The message column can be narrower than the screen (for example in the
+  // companion chat, where the avatar and right inset share the row). Measure
+  // that column instead of assuming the viewport width so the canvas never
+  // protrudes past the list.
+  const cardWidth = Math.min(availableWidth || width - 40, 400);
   const cardHeight = Math.min(cardWidth / ratio, 460);
   useEffect(() => {
     if (reduced) return;
@@ -198,7 +211,10 @@ export function DrawingCanvas({ message, seconds, onStop, downloading }: { messa
     ],
   }}><SoftOrb color={color} size={size} /></Animated.View>;
   const orb = Math.max(cardWidth, cardHeight) * 0.95;
-  return <View style={{ gap: 12 }}>
+  return <View style={styles.mediaResult} onLayout={(event) => {
+    const next = Math.round(event.nativeEvent.layout.width);
+    if (next > 0 && next !== availableWidth) setAvailableWidth(next);
+  }}>
     <View style={[styles.canvas, { width: cardWidth, height: cardHeight }]}>
       {blob('#8CCBFF', orb, [0.2, 0.55], [0.25, 0.1])}
       {blob('#B9A2FF', orb * 0.9, [0.85, 0.5], [0.55, 0.85])}
@@ -227,63 +243,10 @@ function SoftOrb({ color, size }: { color: string; size: number }) {
   </Svg>;
 }
 
-/**
- * A finished image "develops" out of the same aurora the drawing canvas showed,
- * with one soft light sweep. Older images just fade in quickly.
- */
+/** Compatibility export for callers that render a finished image without a toolbar. */
 export function ImageResult({ message, fresh, onPreview }: { message: ChatMessage; fresh: boolean; onPreview: (uri: string) => void }) {
-  const styles = useStyles();
-  const { width } = useWindowDimensions();
-  const reduced = useReducedMotion();
-  const [ratio, setRatio] = useState(() => ratioFromSize(message.size));
-  const reveal = useRef(new Animated.Value(0)).current;
-  const sweep = useRef(new Animated.Value(0)).current;
-  // Only the image that just finished gets the full reveal (list rows remount on scroll).
-  const [develop] = useState(() => fresh && !reduced && Date.now() - message.createdAt - (message.elapsedMs ?? 0) < 8000);
-  const uri = message.imageUri!;
-  useEffect(() => {
-    let alive = true;
-    Image.getSize(uri, (w, h) => { if (alive && w > 0 && h > 0) setRatio(w / h); }, () => undefined);
-    return () => { alive = false; };
-  }, [uri]);
-  const maxWidth = Math.min(width - 40, 420);
-  const cardHeight = Math.min(maxWidth / ratio, 520);
-  const cardWidth = Math.min(maxWidth, cardHeight * ratio);
-  const onLoad = () => {
-    if (!develop) { Animated.timing(reveal, { toValue: 1, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(); return; }
-    Animated.parallel([
-      Animated.timing(reveal, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }),
-      Animated.sequence([Animated.delay(360), Animated.timing(sweep, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver: true })]),
-    ]).start();
-  };
-  const orb = Math.max(cardWidth, cardHeight) * 0.95;
-  const band = Math.max(cardWidth, cardHeight) * 0.5;
-  return <View style={[styles.imageCard, { width: cardWidth, height: cardHeight }]}>
-    {develop && <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      <View style={{ position: 'absolute', left: cardWidth * 0.2 - orb / 2, top: cardHeight * 0.2 - orb / 2 }}><SoftOrb color="#8CCBFF" size={orb} /></View>
-      <View style={{ position: 'absolute', left: cardWidth * 0.8 - orb * 0.45, top: cardHeight * 0.65 - orb * 0.45 }}><SoftOrb color="#B9A2FF" size={orb * 0.9} /></View>
-      <View style={{ position: 'absolute', left: cardWidth * 0.45 - orb * 0.37, top: cardHeight * 0.9 - orb * 0.37 }}><SoftOrb color="#FBC2DF" size={orb * 0.75} /></View>
-    </View>}
-    <Animated.View style={[StyleSheet.absoluteFill, { opacity: reveal, transform: [{ scale: reveal.interpolate({ inputRange: [0, 1], outputRange: [develop ? 1.06 : 0.98, 1] }) }] }]}>
-      <Pressable accessibilityRole="imagebutton" accessibilityLabel="查看大图" onPress={() => onPreview(uri)} style={StyleSheet.absoluteFill}>
-        <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" onLoad={onLoad} onError={() => reveal.setValue(1)} />
-      </Pressable>
-    </Animated.View>
-    {develop && <Animated.View pointerEvents="none" style={{
-      position: 'absolute', top: -cardHeight * 0.25, height: cardHeight * 1.5, width: band, left: 0,
-      opacity: sweep.interpolate({ inputRange: [0, 0.15, 0.85, 1], outputRange: [0, 1, 1, 0] }),
-      transform: [{ translateX: sweep.interpolate({ inputRange: [0, 1], outputRange: [-band * 1.2, cardWidth + band * 0.2] }) }, { rotate: '18deg' }],
-    }}>
-      <Svg width={band} height={cardHeight * 1.5}>
-        <Defs><SvgLinearGradient id={`sweep${message.id}`} x1="0" y1="0" x2="1" y2="0">
-          <Stop offset="0" stopColor="#FFFFFF" stopOpacity={0} /><Stop offset="0.5" stopColor="#FFFFFF" stopOpacity={0.38} /><Stop offset="1" stopColor="#FFFFFF" stopOpacity={0} />
-        </SvgLinearGradient></Defs>
-        <Rect x="0" y="0" width={band} height={cardHeight * 1.5} fill={`url(#sweep${message.id})`} />
-      </Svg>
-    </Animated.View>}
-  </View>;
+  return <GeneratedImageGallery message={message} fresh={fresh} onPreview={onPreview} />;
 }
-
 function isPlaceholderPrompt(message: ChatMessage) {
   return (message.references.length > 0 || (message.documents?.length ?? 0) > 0) && /^请(?:阅读并分析这些文件|看看这张图片)。$/.test(message.prompt);
 }
@@ -308,7 +271,7 @@ export function docIcon(name: string, mimeType: string): IconName {
 
 const useStyles = themed((c, d) => StyleSheet.create({
   userWrap: { alignItems: 'flex-end', gap: 8, paddingLeft: 52 },
-  userBubble: { maxWidth: '100%', backgroundColor: colors.userBubble, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 22 },
+  userBubble: { maxWidth: '100%', backgroundColor: colors.userBubble, paddingHorizontal: 15, paddingVertical: 10, borderRadius: 18 },
   userText: { color: colors.text, fontSize: 16, lineHeight: 24 },
   userImages: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 },
   userImageFrame: { borderRadius: 18, overflow: 'hidden', backgroundColor: colors.surface },
@@ -316,22 +279,23 @@ const useStyles = themed((c, d) => StyleSheet.create({
   userImageLarge: { width: 180, height: 180 },
   maskBadge: { position: 'absolute', left: 8, bottom: 8, width: 22, height: 22, borderRadius: 11, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
   userDocs: { alignItems: 'flex-end', gap: 6 },
-  fileCard: { flexDirection: 'row', alignItems: 'center', gap: 10, maxWidth: 260, padding: 8, paddingRight: 14, borderRadius: 16, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
+  fileCard: { flexDirection: 'row', alignItems: 'center', gap: 10, maxWidth: 260, padding: 8, paddingRight: 14, borderRadius: 12, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
   fileIcon: { width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   fileName: { color: colors.text, fontSize: 13.5, fontWeight: '500' },
   fileMeta: { color: colors.subtle, fontSize: 11.5, marginTop: 2 },
   fileRemove: { width: 22, height: 22, borderRadius: 11, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
-  assistantWrap: { gap: 12, alignItems: 'flex-start' },
+  assistantWrap: { width: '100%', gap: 12, alignItems: 'flex-start' },
   thinking: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 28 },
   thinkingText: { color: colors.textMuted, fontSize: 15 },
-  canvas: { borderRadius: 22, overflow: 'hidden', backgroundColor: c.blueSurface },
+  canvas: { maxWidth: '100%', borderRadius: 22, overflow: 'hidden', backgroundColor: c.blueSurface },
+  mediaResult: { alignSelf: 'stretch', width: '100%', gap: 12 },
   canvasGlass: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(255,255,255,0.18)' },
   drawingCaption: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   drawingText: { color: colors.textSecondary, fontSize: 14.5, fontWeight: '500' },
   drawingSeconds: { color: colors.subtle, fontWeight: '400' },
   stopLink: { marginLeft: 'auto', paddingHorizontal: 12, height: 28, borderRadius: 14, backgroundColor: colors.surfaceStrong, justifyContent: 'center' },
   stopText: { color: colors.textSecondary, fontSize: 12.5, fontWeight: '600' },
-  imageCard: { borderRadius: 22, overflow: 'hidden', backgroundColor: colors.surface },
+  imageCard: { maxWidth: '100%', alignSelf: 'flex-start', borderRadius: 22, overflow: 'hidden', backgroundColor: colors.surface },
   followUpRow: { marginTop: 2, marginHorizontal: -20, alignSelf: 'stretch', flexGrow: 0 },
   followUps: { flexDirection: 'row', gap: 8, paddingHorizontal: 20 },
   followUp: { flexDirection: 'row', alignItems: 'center', gap: 5, height: 34, paddingHorizontal: 12, borderRadius: 17, backgroundColor: colors.primarySoft },

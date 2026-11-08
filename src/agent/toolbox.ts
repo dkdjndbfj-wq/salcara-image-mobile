@@ -28,6 +28,10 @@ export interface DrawResult {
   label: string;
   /** Downscaled copy for the model to check, when requested. */
   preview?: string;
+  previews?: string[];
+  partial?: boolean;
+  /** Original gallery positions, including unavailable slots, mapped to global image labels. */
+  slotMapping?: string;
 }
 
 export interface ToolboxOptions {
@@ -169,12 +173,14 @@ export async function createToolbox(options: ToolboxOptions): Promise<{ toolkit:
         if (!specs.includes(TOOL_SPECS.generate_image)) return { content: '当前不能作图。' };
         if (imagesDrawn >= imageLimit) return { content: '本轮作图次数已用完，不要再画，请直接回复用户。' };
         const parsed = parseImageToolArguments(input);
-        if (!parsed) return { content: 'generate_image 需要 prompt 参数。' };
+        if (!parsed) return { content: 'generate_image 需要有效的 prompt，count 必须为 1–10 的整数。' };
         pendingNote = '';
         const redraw = imagesDrawn > 0;
+        if (redraw && (parsed.count ?? 1) > 1) return { content: '自检重画只允许一张，不要扩大作图数量。' };
         const id = addStep('image', `${redraw ? '重新画图' : '画图'}：${excerpt(parsed.prompt, 30)}`);
         imagesDrawn += 1;
-        const wantsCheck = settings.imageCheck !== 'off' && imagesDrawn < imageLimit + (settings.imageCheck === 'check' ? 1 : 0);
+        // A batch is one paid request. A self-check must not silently redraw ten images.
+        const wantsCheck = (parsed.count ?? 1) === 1 && settings.imageCheck !== 'off' && imagesDrawn < imageLimit + (settings.imageCheck === 'check' ? 1 : 0);
         let result: DrawResult;
         try {
           result = await options.drawImage(parsed, { preview: wantsCheck });
@@ -182,13 +188,14 @@ export async function createToolbox(options: ToolboxOptions): Promise<{ toolkit:
           failStep(id, error);
           throw error;
         }
-        finishStep(id, { detail: `已生成 ${result.label}` });
+        finishStep(id, { detail: `已生成 ${result.label}${result.partial ? '，部分图片未取得' : ''}` });
+        const slotMapping = result.slotMapping ? `\n${result.slotMapping}` : '';
         if (wantsCheck && result.preview) {
           const checkId = addStep('check', '检查画面是否符合要求');
           finishStep(checkId, {});
-          return { content: `已生成 ${result.label}，用户已经看到了。下面是这张图，请检查。`, images: [result.preview], keepText: true };
+          return { content: `已生成 ${result.label}，用户已经看到了。下面是这张图，请检查。${slotMapping}`, images: result.previews?.length ? result.previews : [result.preview], keepText: true, imageGenerated: true };
         }
-        return { content: `已生成 ${result.label}，用户已经看到了。`, terminal: true, keepText: true };
+        return { content: `已生成 ${result.label}，用户已经看到了。${result.partial ? '部分图片未取得，失败项已显示。不要重新调用生图。' : ''}${slotMapping}`, terminal: true, keepText: true, imageGenerated: true };
       }
       case 'web_search': {
         if (!search.config) return { content: '联网搜索不可用。' };

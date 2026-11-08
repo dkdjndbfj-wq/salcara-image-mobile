@@ -4,33 +4,53 @@ import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { colors } from '../theme';
 
 /**
- * Salcara's own icon set, v2: 24px grid, 1.65px rounded strokes and a soft duotone layer
- * (the same colour at low opacity) behind the main shape, so icons feel solid and friendly
- * rather than wiry. `variant="line"` drops the tone layer where an icon must stay minimal.
+ * 24px grid with rounded, single-color strokes. `accent` is opt-in;
+ * `variant="duo"` adds the soft tone layer where an icon needs weight.
  */
 type Paint = { fill?: boolean; tone?: boolean };
 type Shape =
+  | { d: [number, number, number] }
   | ({ p: string } & Paint)
   | ({ c: [number, number, number] } & Paint)
   | ({ r: [number, number, number, number, number] } & Paint);
 
 const ICONS = {
-  menu: [{ p: 'M4.5 7.5h15' }, { p: 'M4.5 12h9' }, { p: 'M4.5 16.5h12' }],
+  menu: [{ p: 'M4 8h16 M4 16h16' }],
   compose: [
-    { p: 'M17.7 3.9a2.05 2.05 0 0 1 2.9 2.9l-7 7-3.9 1 1-3.9z', tone: true },
-    { p: 'M11 4.5H8A3.5 3.5 0 0 0 4.5 8v8A3.5 3.5 0 0 0 8 19.5h8a3.5 3.5 0 0 0 3.5-3.5v-3' },
-    { p: 'M17.7 3.9a2.05 2.05 0 0 1 2.9 2.9l-7 7-3.9 1 1-3.9z' },
+    { p: 'M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5 M9 15l1-4L19 2l3 3-9 9-4 1z' },
   ],
   plus: [{ p: 'M12 5v14' }, { p: 'M5 12h14' }],
+  // Workbench glyphs share a 24px grid. Zoom signs sit beside the percentage;
+  // hierarchy and paging use different arrow shapes.
+  arrowLeft: [{ p: 'M19 12H5 M11 6l-6 6 6 6' }],
+  arrowRight: [{ p: 'M5 12h14 M13 6l6 6-6 6' }],
+  zoomIn: [{ p: 'M12 5v14 M5 12h14' }],
+  zoomOut: [{ p: 'M5 12h14' }],
+  fitFrame: [{ p: 'M9 4H4v5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5' }],
+  originalSize: [{ p: 'M3.5 8 6 6v12 M3.5 18h5 M15.5 8 18 6v12 M15.5 18h5' }, { c: [12, 9, 1], fill: true }, { c: [12, 15, 1], fill: true }],
+  imageGrid: [{ r: [4, 4, 6.5, 6.5, 1.5] }, { r: [13.5, 4, 6.5, 6.5, 1.5] }, { r: [4, 13.5, 6.5, 6.5, 1.5] }, { r: [13.5, 13.5, 6.5, 6.5, 1.5] }],
+  imageCanvas: [{ p: 'M14 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4 M4 16l4-4 3 3 M13.5 20l.8-3.5 5-5a1.4 1.4 0 0 1 2 2l-5 5-2.8 1z' }],
+  filter: [{ p: 'M4 5h16l-6 7v6l-4 2v-8L4 5z' }],
+  selectAll: [{ r: [4, 4, 16, 16, 3] }, { p: 'M8 12l3 3 5-6' }],
+  selectionClear: [{ r: [4, 4, 16, 16, 3] }],
+  newTab: [{ r: [4, 4, 16, 16, 2] }, { p: 'M8 12h8 M12 8v8' }],
+  closeOthers: [{ p: 'M15 4H5a2 2 0 0 0-2 2v10' }, { r: [8, 8, 13, 13, 2.5] }, { p: 'M12 12l5 5 M17 12l-5 5' }],
+  retry: [{ p: 'M20 8A8 8 0 1 0 19 17 M20 3v5h-5' }, { p: 'M10 8.5l5 3.5-5 3.5z', fill: true }],
+  maximize: [{p:'M14 4h6v6 M20 4l-7 7 M10 20H4v-6 M4 20l7-7'}],
+  minimize: [{p:'M20 4l-7 7 M13 5v6h6 M4 20l7-7 M5 13h6v6'}],
+  panelRight: [{r:[3,4,18,16,3]},{p:'M14 4v16'}],
+  panelLeft: [{r:[3,4,18,16,3]},{p:'M10 4v16'}],
+  folder: [{p:'M3 9V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v1M3 9h18l-3 10H3V9Z'}],
   minus: [{ p: 'M5 12h14' }],
   arrowUp: [{ p: 'M12 19V5.5' }, { p: 'M6.5 11 12 5.5 17.5 11' }],
   arrowDown: [{ p: 'M12 5v13.5' }, { p: 'M6.5 13 12 18.5 17.5 13' }],
   stop: [{ r: [7, 7, 10, 10, 2.6], fill: true }],
+  pause: [{ p: 'M9 6v12 M15 6v12' }],
   chevronDown: [{ p: 'M6.5 9.5 12 15l5.5-5.5' }],
   chevronRight: [{ p: 'M9.5 6.5 15 12l-5.5 5.5' }],
   chevronLeft: [{ p: 'M14.5 6.5 9 12l5.5 5.5' }],
   close: [{ p: 'M6.5 6.5l11 11' }, { p: 'M17.5 6.5l-11 11' }],
-  search: [{ c: [10.8, 10.8, 6.3], tone: true }, { c: [10.8, 10.8, 6.3] }, { p: 'M15.6 15.6 20 20' }],
+  search: [{ c: [10.5, 10.5, 6.5] }, { p: 'M15.5 15.5 20 20' }],
   copy: [
     { r: [8.5, 8.5, 11, 11, 3], tone: true }, { r: [8.5, 8.5, 11, 11, 3] },
     { p: 'M15.5 8.5V7A2.5 2.5 0 0 0 13 4.5H7A2.5 2.5 0 0 0 4.5 7v6A2.5 2.5 0 0 0 7 15.5h1.5' },
@@ -43,7 +63,7 @@ const ICONS = {
     { p: 'M8.5 10.5h-1A2.5 2.5 0 0 0 5 13v4.5A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5V13a2.5 2.5 0 0 0-2.5-2.5h-1' },
   ],
   image: [
-    { r: [3.5, 4.5, 17, 15, 3.8], tone: true }, { r: [3.5, 4.5, 17, 15, 3.8] }, { c: [9, 9.9, 1.7], fill: true },
+    { r: [3.5, 4.5, 17, 15, 3.8], tone: true }, { r: [3.5, 4.5, 17, 15, 3.8] }, { d: [9, 9.9, 1.7] },
     { p: 'M4 17.2l4.4-4.1a1.7 1.7 0 0 1 2.3 0l4 3.8' }, { p: 'M13.3 15.4l1.6-1.5a1.7 1.7 0 0 1 2.3 0l3.2 3' },
   ],
   camera: [
@@ -114,9 +134,8 @@ const ICONS = {
   eyeOff: [{ p: 'M4 4l16 16' }, { p: 'M9.9 5.8A9.5 9.5 0 0 1 12 5.5c4 0 7.3 2.5 9.2 6.5a13 13 0 0 1-2.6 3.6M6.2 7.6A12 12 0 0 0 2.8 12c1.9 4 5.2 6.5 9.2 6.5 1.6 0 3.1-.4 4.4-1.1' }, { p: 'M10 10a3 3 0 0 0 4 4' }],
   bolt: [{ p: 'M13.2 3.5 5.8 13.2h5.9l-1 7.3 7.5-9.8h-6z', tone: true }, { p: 'M13.2 3.5 5.8 13.2h5.9l-1 7.3 7.5-9.8h-6z' }],
   chat: [
-    { p: 'M12 4c4.7 0 8.5 3.3 8.5 7.4s-3.8 7.4-8.5 7.4c-1.1 0-2.2-.2-3.2-.5L4.6 19.8l1.3-3.7a6.9 6.9 0 0 1-2.4-4.7C3.5 7.3 7.3 4 12 4z', tone: true },
-    { p: 'M12 4c4.7 0 8.5 3.3 8.5 7.4s-3.8 7.4-8.5 7.4c-1.1 0-2.2-.2-3.2-.5L4.6 19.8l1.3-3.7a6.9 6.9 0 0 1-2.4-4.7C3.5 7.3 7.3 4 12 4z' },
-    { c: [8.4, 11.5, 0.95], fill: true }, { c: [12, 11.5, 0.95], fill: true }, { c: [15.6, 11.5, 0.95], fill: true },
+    { p: 'M7.5 4h9A3.5 3.5 0 0 1 20 7.5v5a3.5 3.5 0 0 1-3.5 3.5H12l-4.5 3.5V16A3.5 3.5 0 0 1 4 12.5v-5A3.5 3.5 0 0 1 7.5 4z' },
+    { c: [9, 10, 1.1], fill: true }, { c: [15, 10, 1.1], fill: true },
   ],
   palette: [
     { p: 'M12 3.8a8.2 8.2 0 1 0 0 16.4c1 0 1.6-.8 1.3-1.7-.4-1.1.3-2.3 1.5-2.3h1.8a3.6 3.6 0 0 0 3.6-3.6c0-4.9-3.7-8.8-8.2-8.8z', tone: true },
@@ -139,7 +158,7 @@ const ICONS = {
   code: [{ p: 'M8.5 7.5 4 12l4.5 4.5' }, { p: 'M15.5 7.5 20 12l-4.5 4.5' }, { p: 'M13.2 5.5l-2.4 13' }],
   mic: [{ r: [9, 3.5, 6, 11, 3], tone: true }, { r: [9, 3.5, 6, 11, 3] }, { p: 'M5.5 11.5a6.5 6.5 0 0 0 13 0' }, { p: 'M12 18v2.5' }],
   micOff: [{ p: 'M15 10.5V6.5a3 3 0 0 0-5.6-1.5' }, { p: 'M9 9v2.5a3 3 0 0 0 4.6 2.5' }, { p: 'M5.5 11.5a6.5 6.5 0 0 0 10.4 5.2' }, { p: 'M18.3 13a6.5 6.5 0 0 0 .2-1.5' }, { p: 'M12 18v2.5' }, { p: 'M4 4l16 16' }],
-  waveform: [{ p: 'M4 10.5v3' }, { p: 'M8 7v10' }, { p: 'M12 4v16' }, { p: 'M16 7.5v9' }, { p: 'M20 10.5v3' }],
+  waveform: [{ p: 'M4.5 10.5v3' }, { p: 'M8.5 7v10' }, { p: 'M12.5 4.5v15' }, { p: 'M16.5 8.5v7' }, { d: [20, 12, 1.5] }],
   speaker: [{ p: 'M4.5 9.5v5h3.5l4.5 4V5.5l-4.5 4z', tone: true }, { p: 'M4.5 9.5v5h3.5l4.5 4V5.5l-4.5 4z' }, { p: 'M16 9a4 4 0 0 1 0 6' }, { p: 'M18.5 6.5a7.5 7.5 0 0 1 0 11' }],
   alarm: [{ c: [12, 13, 7], tone: true }, { c: [12, 13, 7] }, { p: 'M12 9.5V13l2.3 1.8' }, { p: 'M4.5 5.5 7 3.5' }, { p: 'M19.5 5.5 17 3.5' }],
   calendar: [
@@ -156,8 +175,8 @@ const ICONS = {
   clock: [{ c: [12, 12, 8.5], tone: true }, { c: [12, 12, 8.5] }, { p: 'M12 7.5V12l3 2' }],
   user: [{ c: [12, 8.5, 3.8], tone: true }, { c: [12, 8.5, 3.8] }, { p: 'M4.8 19.8a7.4 7.4 0 0 1 14.4 0' }],
   moon: [{ p: 'M19.6 14.6A8 8 0 0 1 9.4 4.4a8 8 0 1 0 10.2 10.2z', tone: true }, { p: 'M19.6 14.6A8 8 0 0 1 9.4 4.4a8 8 0 1 0 10.2 10.2z' }],
-  bookmark: [{ p: 'M7 3.8h10a1.5 1.5 0 0 1 1.5 1.5v15l-6.5-4.3-6.5 4.3v-15A1.5 1.5 0 0 1 7 3.8z', tone: true }, { p: 'M7 3.8h10a1.5 1.5 0 0 1 1.5 1.5v15l-6.5-4.3-6.5 4.3v-15A1.5 1.5 0 0 1 7 3.8z' }],
-  telescope: [{ p: 'M3.8 13.6 15.9 6.6l2.2 3.8L6 17.4z', tone: true }, { p: 'M3.8 13.6 15.9 6.6l2.2 3.8L6 17.4z' }, { p: 'M15.9 6.6l1.2-.7 2.2 3.8-1.2.7' }, { p: 'M10.5 15.2 8 20.5' }, { p: 'M11.4 14.7l2.6 5.8' }],
+  bookmark: [{ p: 'M7 3.8h10a1.5 1.5 0 0 1 1.5 1.5v15l-6.5-4.3-6.5 4.3v-15A1.5 1.5 0 0 1 7 3.8z', tone: true }, { p: 'M7 3.8h10a1.5 1.5 0 0 1 1.5 1.5v15l-6.5-4.3-6.5 4.3v-15A1.5 1.5 0 0 1 7 3.8z' }, { d: [12, 9.5, 1.6] }],
+  telescope: [{ c: [12, 12, 2.6] }, { p: 'M20.2 9.2c.9 2.6-2.4 6.2-7.3 8.1s-9.3 1.4-10.1-1.2 2.4-6.2 7.3-8.1 9.3-1.4 10.1 1.2z' }, { d: [18.8, 5.2, 1.5] }],
   bot: [
     { r: [4.5, 8, 15, 11.5, 4.2], tone: true }, { r: [4.5, 8, 15, 11.5, 4.2] }, { p: 'M12 8V4.8' }, { c: [12, 3.9, 1.1], fill: true },
     { c: [9.3, 13.4, 1.3], fill: true }, { c: [14.7, 13.4, 1.3], fill: true }, { p: 'M2.5 12.5v2.5' }, { p: 'M21.5 12.5v2.5' },
@@ -202,12 +221,16 @@ const ICONS = {
 export type IconName = keyof typeof ICONS;
 export const ICON_NAMES = Object.keys(ICONS) as IconName[];
 
-export function Icon({ name, size = 22, color = colors.text, strokeWidth = 1.65, variant = 'duo' }: {
+export function Icon({ name, size = 22, color = colors.text, strokeWidth = 1.75, variant = 'line', accent }: {
   name: IconName; size?: number; color?: string; strokeWidth?: number; variant?: 'duo' | 'line';
+  /** Optional accent color; icons are monochrome by default. */
+  accent?: string;
 }) {
+  const dot = accent ?? color;
   const shapes: Shape[] = ICONS[name] ?? ICONS.info;
   return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
     {shapes.map((shape, index) => {
+      if ('d' in shape) return <Circle key={index} cx={shape.d[0]} cy={shape.d[1]} r={shape.d[2]} fill={dot} stroke="none" />;
       if (shape.tone && variant === 'line') return null;
       const paint = shape.tone
         ? { fill: color, fillOpacity: 0.2, stroke: 'none' as const }

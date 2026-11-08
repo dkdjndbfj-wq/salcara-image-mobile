@@ -19,3 +19,18 @@ test('the one-dot status explains state without leaking transport error content'
   expect(remoteConnectionState({ connection: 'retrying' }, { online: true }).tone).toBe('pending');
   expect(remoteConnectionState({ connection: 'open' }, { online: true }).tone).toBe('connected');
 });
+
+test('connection details use the selected Bot or relay and reject another computer\'s cached online state', () => {
+  const relay = { id: 'relay-a', hubUrl: 'https://private.example', deviceId: 'pc-a', deviceName: '电脑 A', pairedAt: 1 };
+  const bot = { ...relay, id: 'bot-b', deviceId: 'pc-b', deviceName: '电脑 B', botGroupId: 'private-group' };
+  const remote = { connection: 'open' as const, connections: [relay, bot], connectionId: bot.id };
+  const status = remoteConnectionState(remote, { deviceId: relay.deviceId, online: true });
+  expect(status.label).toBe('电脑离线');expect(status.detail).toContain('Bot');expect(status.detail).not.toContain('中转站');
+  for (const connection of ['connecting', 'retrying', 'error'] as const) {
+    const details = remoteConnectionState({ ...remote, connection }, { deviceId: bot.deviceId, online: true });
+    expect(details.detail).toContain('Bot');expect(details.detail).not.toContain('中转站');
+  }
+  expect(remoteConnectionState(remote, { deviceId: bot.deviceId, online: true }).tone).toBe('connected');
+  expect(remoteConnectionState({ ...remote, connectionId: relay.id }, { deviceId: relay.deviceId, online: false }).detail).toContain('中转站');
+  expect(JSON.stringify(status)).not.toMatch(/private\.example|private-group|pc-a|pc-b/);
+});

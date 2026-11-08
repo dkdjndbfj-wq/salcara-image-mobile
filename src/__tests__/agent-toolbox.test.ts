@@ -96,13 +96,13 @@ test('a failed search is shown as a failed step and reported to the model, not t
 test('drawing ends the turn unless self-check is on; redraw is limited to one', async () => {
   draw.mockResolvedValue({ label: '图3', preview: 'data:image/jpeg;base64,AA' });
   let { toolkit } = await createToolbox(options());
-  expect(await toolkit.execute(call('generate_image', { prompt: '猫' }), { step: 0, mode: 'native' })).toMatchObject({ terminal: true, keepText: true });
+  expect(await toolkit.execute(call('generate_image', { prompt: '猫' }), { step: 0, mode: 'native' })).toMatchObject({ terminal: true, keepText: true, imageGenerated: true });
   expect(draw).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: '猫' }), { preview: false });
 
   trace = emptyTrace();
   ({ toolkit } = await createToolbox(options({}, { imageCheck: 'redraw' })));
   const checked = await toolkit.execute(call('generate_image', { prompt: '猫' }), { step: 0, mode: 'native' });
-  expect(checked).toMatchObject({ images: ['data:image/jpeg;base64,AA'] });
+  expect(checked).toMatchObject({ images: ['data:image/jpeg;base64,AA'], imageGenerated: true });
   expect(checked.terminal).toBeFalsy();
   expect(await toolkit.execute(call('generate_image', { prompt: '更好的猫' }), { step: 1, mode: 'native' })).toMatchObject({ terminal: true });
   expect((await toolkit.execute(call('generate_image', { prompt: '第三张' }), { step: 2, mode: 'native' })).content).toContain('次数已用完');
@@ -112,6 +112,34 @@ test('drawing ends the turn unless self-check is on; redraw is limited to one', 
   draw.mockRejectedValueOnce(new Error('上游超时'));
   ({ toolkit } = await createToolbox(options()));
   await expect(toolkit.execute(call('generate_image', { prompt: '狗' }), { step: 0, mode: 'native' })).rejects.toThrow('上游超时');
+});
+
+test('a partial-batch tool receipt preserves gallery positions while the visible trace stays compact', async () => {
+  const slotMapping = '本组图片位置（共3张，失败或未完成项保留原位）：第1张：生成失败，不可引用；第2张：图7；第3张：图8。';
+  draw.mockResolvedValue({ label: '图7、图8', partial: true, slotMapping });
+  const { toolkit } = await createToolbox(options());
+  const result = await toolkit.execute(call('generate_image', { prompt: '三张风景', count: 3 }), { step: 0, mode: 'native' });
+  expect(result).toMatchObject({ terminal: true, imageGenerated: true });
+  expect(result.content).toContain(slotMapping);
+  expect(result.content).toContain('不要重新调用生图');
+  expect(trace.steps[0].detail).toBe('已生成 图7、图8，部分图片未取得');
+  expect(trace.steps[0].detail).not.toContain('本组图片位置');
+});
+
+test('the self-check receipt carries its gallery position and global tool label together', async () => {
+  const slotMapping = '本组图片位置（共1张，失败或未完成项保留原位）：第1张：图9。';
+  draw.mockResolvedValue({ label: '图9', preview: 'data:image/jpeg;base64,AA', slotMapping });
+  const { toolkit } = await createToolbox(options({}, { imageCheck: 'check' }));
+  const result = await toolkit.execute(call('generate_image', { prompt: '小屋' }), { step: 0, mode: 'native' });
+  expect(result.content).toContain(slotMapping);
+  expect(result.images).toEqual(['data:image/jpeg;base64,AA']);
+  expect(result.terminal).not.toBe(true);
+});
+
+test('a rejected image call never supplies successful-image evidence', async () => {
+  const { toolkit } = await createToolbox(options());
+  expect((await toolkit.execute(call('generate_image', {}), { step: 0, mode: 'native' })).imageGenerated).toBeUndefined();
+  expect(draw).not.toHaveBeenCalled();
 });
 
 test('phone actions, files, memory and history search', async () => {

@@ -2,13 +2,14 @@ import * as Application from 'expo-application';
 import * as FileSystem from 'expo-file-system/legacy';
 import { File, Paths } from 'expo-file-system';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, Linking, Platform, StyleSheet, Text, View } from 'react-native';
+import { AppState, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, spacing, themed } from '../theme';
 import {
   apkDownloadCandidates, type AppRelease, autoUpdateCheckEnabled, compareVersions, fetchLatestRelease, formatBytes, IOS_UPDATE_URL, productionUpdateCheckEnabled, updateInstallMode,
 } from '../update';
-import { AppDialog, type DialogAction } from './ui';
+import { AppDialog, BrandFill, type DialogAction } from './ui';
+import { Skeleton, SkeletonGroup } from './Skeleton';
 import { networkFailureMessage } from '../api/network';
 import { verifyDownloadedApk, withApkDownloadDeadline } from '../apk-download';
 import { launchVerifiedApkInstaller } from '../apk-installer';
@@ -296,10 +297,10 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
 
   return (
     <AppDialog visible={phase !== 'idle'} title={title} message={description} icon={icon} actions={actions} dismissible={dismissible} onClose={close}>
-      {phase === 'checking' && <ActivityIndicator color={colors.primaryStrong} />}
+      {phase === 'checking' && <SkeletonGroup label="正在检查更新" style={styles.checking}><Skeleton width="72%" height={11} /><Skeleton width="54%" height={11} /></SkeletonGroup>}
       {phase === 'downloading' && (
         <View style={styles.progressArea}>
-          <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} /></View>
+          <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]}><BrandFill /></View></View>
           <Text style={styles.progressText}>{progress > 0 ? `${Math.round(progress * 100)}%` : '正在准备下载…'}</Text>
         </View>
       )}
@@ -311,7 +312,8 @@ export function UpdateManager({ manualCheckToken }: { manualCheckToken: number }
 const useStyles = themed((c, d) => StyleSheet.create({
   progressArea: { gap: spacing.sm },
   progressTrack: { height: 8, overflow: 'hidden', borderRadius: radius.pill, backgroundColor: colors.blueSurface },
-  progressFill: { height: '100%', borderRadius: radius.pill, backgroundColor: colors.primary },
+  progressFill: { height: '100%', overflow: 'hidden', borderRadius: radius.pill, backgroundColor: colors.primary },
+  checking: { gap: 8, paddingTop: 2 },
   progressText: { color: colors.primaryStrong, textAlign: 'right', fontSize: 12, fontWeight: '700' },
   digest: { color: colors.textMuted, fontSize: 11, lineHeight: 17 },
 }));

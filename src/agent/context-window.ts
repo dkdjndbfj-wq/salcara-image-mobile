@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../domain';
+import { messageGeneratedImages } from '../generated-images';
 import { selectedHistoryPairs } from './labels';
 
 /**
@@ -36,7 +37,7 @@ export function turnBudget(model: string): number {
 export function pairCharacters([user, assistant]: [ChatMessage, ChatMessage]): number {
   const documents = (user.documents ?? []).reduce((sum, item) => sum + Math.min(40_000, Math.max(2_000, Math.round((item.size ?? 0) / 2))), 0);
   return user.prompt.length + (assistant.text?.length ?? 0) + (assistant.preparedPrompt?.length ?? 0) + documents
-    + (user.references.length + (assistant.imageUri ? 1 : 0)) * 400 + 200;
+    + (user.references.length + messageGeneratedImages(assistant).filter((image) => image.uri).length) * 400 + 200;
 }
 
 export interface ConversationSummary {
@@ -111,7 +112,8 @@ export function summaryPrompt(previous: string, pairs: Array<[ChatMessage, ChatM
     const extra: string[] = [];
     if (user.references.length) extra.push(`[用户附了 ${user.references.length} 张图片]`);
     if (user.documents?.length) extra.push(`[用户附件：${user.documents.map((item) => item.name).join('、')}]`);
-    if (assistant.imageUri || assistant.preparedPrompt) extra.push(`[助手作图：${(assistant.preparedPrompt ?? '').slice(0, 300)}]`);
+    const generatedCount = messageGeneratedImages(assistant).filter((image) => image.status === 'complete' && image.uri).length;
+    if (generatedCount || assistant.preparedPrompt) extra.push(`[助手作图${generatedCount ? `（${generatedCount} 张）` : ''}：${(assistant.preparedPrompt ?? '').slice(0, 300)}]`);
     if (assistant.agent?.files?.length) extra.push(`[助手生成文件：${assistant.agent.files.map((file) => file.name).join('、')}]`);
     return `用户：${user.prompt.slice(0, 6000)}\n${extra.join(' ')}\n助手：${(assistant.text ?? '').slice(0, 8000)}`;
   });

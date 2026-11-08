@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-  <!-- Android 13+: runtime permission, asked only after the user sends a first remote task. -->
+  <!-- Android 13+: runtime permission, requested when the user enables task notifications. -->
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <!-- Keeps the process alive while a remote task runs, or (后台待命) while the person
        chose to stay reachable on a phone that cannot receive push. -->

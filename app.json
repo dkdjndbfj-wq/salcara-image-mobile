@@ -2,19 +2,21 @@
   "expo": {
     "name": "Salcara AI",
     "slug": "salcara-image-mobile",
-    "version": "1.8.2",
+    "scheme": "salcara",
+    "version": "1.8.3",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "top.salcara.image",
-      "buildNumber": "23",
+      "buildNumber": "24",
       "supportsTablet": true,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Salcara AI 需要使用麦克风来听你说话，录音只用于语音输入和语音对话。",
         "NSCameraUsageDescription": "允许 Salcara AI 拍摄参考图片和扫描电脑配对二维码。",
         "NSPhotoLibraryUsageDescription": "允许 Salcara AI 读取你选择的图片。",
         "NSPhotoLibraryAddUsageDescription": "允许 Salcara AI 将生成图片保存到相册。",
+        "NSLocalNetworkUsageDescription": "允许 Salcara AI 在同一局域网内连接你授权的电脑。",
         "NSCalendarsUsageDescription": "你确认日程卡片后，Salcara AI 会把这条日程添加到系统日历。",
         "NSCalendarsWriteOnlyAccessUsageDescription": "你确认日程卡片后，Salcara AI 会把这条日程添加到系统日历，不会读取你已有的日程。",
         "NSCalendarsFullAccessUsageDescription": "你确认日程卡片后，Salcara AI 会把这条日程添加到系统日历，不会读取或修改你已有的日程。",
@@ -23,7 +25,7 @@
     },
     "android": {
       "package": "top.salcara.image",
-      "versionCode": 23,
+      "versionCode": 24,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.CAMERA",
@@ -33,6 +35,11 @@
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "com.android.alarm.permission.SET_ALARM"
+      ],
+      "blockedPermissions": [
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.SYSTEM_ALERT_WINDOW"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#F5F6FF",
@@ -67,7 +74,8 @@
         "expo-media-library",
         {
           "photosPermission": "允许 Salcara AI 访问你选择的图片。",
-          "savePhotosPermission": "允许 Salcara AI 将生成图片保存到相册。"
+          "savePhotosPermission": "允许 Salcara AI 将生成图片保存到相册。",
+          "granularPermissions": ["photo"]
         }
       ],
       "expo-font",

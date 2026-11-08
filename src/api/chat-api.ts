@@ -3,7 +3,7 @@ import { File } from 'expo-file-system';
 
 import { IMAGE_TOOL_NAME, parseImageToolArguments, type ImageToolCall } from '../agent/image-tool';
 import {
-  extractMarkers, phoneSpecHasClock, SUGGEST_OPEN, textToolInstructions, TOOL_SPECS, toolDefinition, visibleStreamingText,
+  extractMarkers, phoneSpecHasClock, stripImageResultClaims, SUGGEST_OPEN, textToolInstructions, TOOL_SPECS, toolDefinition, visibleStreamingText,
   type ToolCall, type ToolSpec,
 } from '../agent/tools';
 import type { Source } from '../agent/types';
@@ -12,6 +12,7 @@ import { historyBudget, turnBudget } from '../agent/context-window';
 import { labelConversationImages, selectedHistoryPairs, type LabeledImage } from '../agent/labels';
 import type { ChatApi, ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
 import { normalizeBaseUrl, redactSensitiveText } from '../domain-utils';
+import { generatedImageSlotMapping, messageGeneratedImages } from '../generated-images';
 import { attachmentKind, MAX_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES, validateAttachments } from '../document-inputs';
 import { prepareAttachment } from '../file-content';
 import { cleanupPdfRender, renderPdfPages } from '../pdf-inputs';
@@ -31,6 +32,8 @@ export interface ToolExecution {
   terminal?: boolean;
   /** The text the model wrote before this call is part of the answer (e.g. “我来画……”). */
   keepText?: boolean;
+  /** Trusted executor evidence that an image was actually produced (not a model-written receipt). */
+  imageGenerated?: boolean;
 }
 
 export interface ToolContext { step: number; mode: ToolMode; signal?: AbortSignal }
@@ -158,6 +161,7 @@ export function agentInstructions(request: InstructionInput, specs?: ToolSpec[],
     SAFETY,
     `现在是 ${localTimeLine(request.now)}。`,
     '对话中出现的每张图片（用户上传的和你生成的）都按出现顺序编号为 图1、图2……，编号写在图片前面。',
+    '对生成图片的“第N张/第二张”等指代，默认按最近一组的画廊位置查“本组图片位置”映射，再转换为全局图号。失败或未完成项也占位，不能跳过，更不能换用其他图片；没有可用图号的项不能作为 reference_images。',
   ];
   if (request.imageAvailable && mode !== 'none' && has(IMAGE_TOOL_NAME)) {
     lines.push(
@@ -168,6 +172,7 @@ export function agentInstructions(request: InstructionInput, specs?: ToolSpec[],
         : '作图描述要忠于用户原话：把用户这次的要求原样写进 prompt（可以去掉“帮我画一下”这类口头语），不要自己添加风格、构图、光线、配色或其他细节，也不要换说法——图片模型自己会理解和发挥。只有用户的话依赖前文时（如“按刚才的方案”“用上面那段文案”“和上一张一样的风格”“按附件”），才把前文里必要的内容原样补在后面。改图时只写要改什么，不要描述原图里其他部分。',
       '只是讨论、分析图片或文件、询问怎么作图、让你写提示词时，正常用文字回答，不要调用工具。',
       '调用作图工具时可以先用一句简短的话告诉用户你要画什么，不要把整段提示词重复给用户，也不要声称图片已经完成。',
+      '应用记录中的图片编号、生成描述和工具状态仅是以前的结果，不能代替本轮调用；不要复制记录或编写“我调用了/已生成”的收据。本轮只有实际调用绘图工具并收到成功结果，才能说图片已生成。',
     );
     if (request.imageDefaults) lines.push(`用户默认的图片参数：${request.imageDefaults}。只有用户明确要求时才改变比例或透明背景。`);
   } else if (!request.imageAvailable && !request.persona) {
@@ -229,8 +234,8 @@ export async function sendChat(request: ChatRequest): Promise<string> {
   return result.text;
 }
 
-// Relays that rejected native tool definitions once are asked in text mode
-// for the rest of this app session, so the user never waits for two requests.
+// Relays that reject native tools (or return only a text-protocol image call)
+// use explicit text-tool instructions on later requests in this app session.
 const nativeToolRejected = new Set<string>();
 export function resetToolSupportCache(): void { nativeToolRejected.clear(); }
 
@@ -252,6 +257,13 @@ interface StepOutput {
 interface TranscriptTurn {
   output: StepOutput;
   results: Array<{ call: ToolCall; execution: ToolExecution }>;
+}
+
+function sameToolCall(left: ToolCall, right: ToolCall): boolean {
+  const canonical = (input: Record<string, unknown> | null) => JSON.stringify(input, (_key, value: unknown) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+  return left.name === right.name && left.input !== null && right.input !== null && canonical(left.input) === canonical(right.input);
 }
 
 /**
@@ -280,6 +292,7 @@ export async function runAgentTurn(request: ChatRequest, onText?: (visibleText: 
   const sources: Source[] = [];
   let suggestions: string[] = [];
   let imageCall: ImageToolCall | null = null;
+  let imageGenerated = false;
   let executed = 0;
   let steps = 0;
   const show = (current: string) => onText?.([...kept, current].filter((item) => item.trim()).join('\n\n'));
@@ -318,8 +331,27 @@ export async function runAgentTurn(request: ChatRequest, onText?: (visibleText: 
     if ((request.api ?? 'chat-completions') !== 'anthropic') output = { ...output, calls: uniqueCallIds(output.calls, turns, step) };
     const extracted = extractMarkers(output.text, `t${step}`);
     if (extracted.suggestions.length) suggestions = extracted.suggestions;
-    const calls = mode === 'native' ? output.calls : mode === 'text' ? [...output.calls, ...extracted.calls] : [];
-    const text = extracted.text;
+    if (mode === 'text' && output.calls.length && extracted.calls.some((call) => !output.calls.some((native) => sameToolCall(native, call)))) {
+      show('');
+      throw tagErrorStage(new ChatApiError('对话模型返回了互相冲突的工具调用，本次工具未执行。请重试，或切换对话模型。'), 'chat');
+    }
+    // A relay can send both representations; structured calls take precedence so a
+    // mirrored text marker never runs a paid operation twice.
+    const calls = mode === 'native' ? output.calls : mode === 'text' ? (output.calls.length ? output.calls : extracted.calls) : [];
+    const imageReceipt = stripImageResultClaims(extracted.text);
+    const text = imageReceipt.text;
+    const hasImageCall = !finalStep && calls.some((call) => call.name === IMAGE_TOOL_NAME && parseImageToolArguments(call.input));
+    const ignoredImageMarker = mode === 'native' && !output.calls.length && extracted.calls.some((call) => call.name === IMAGE_TOOL_NAME);
+    const incompleteImageMarker = mode === 'text' && !output.calls.length && extracted.calls.some((call) => call.name === IMAGE_TOOL_NAME && call.input === null);
+    if (mode !== 'none' && !output.truncated && !imageGenerated && !hasImageCall && (imageReceipt.claimed || ignoredImageMarker || incompleteImageMarker)) {
+      // Do not guess arguments from prose or automatically retry a billed request.
+      // Replace any streamed claim before surfacing a retryable protocol error.
+      show('');
+      if (ignoredImageMarker && extracted.calls.some((call) => call.name === IMAGE_TOOL_NAME && parseImageToolArguments(call.input))) {
+        nativeToolRejected.add(cacheKey);
+      }
+      throw tagErrorStage(new ChatApiError('对话模型没有发起有效的绘图调用，本轮未生成图片。请重试，或切换支持工具调用的对话模型。'), 'chat');
+    }
     for (const source of output.sources) if (!sources.some((item) => item.url === source.url)) sources.push(source);
     // Cut off by the length limit in the middle of a tool call: its arguments are incomplete JSON. Running it
     // would act on half an instruction, and asking again tends to hit the same limit, so the turn stops here.
@@ -337,7 +369,7 @@ export async function runAgentTurn(request: ChatRequest, onText?: (visibleText: 
     }
     if (!toolkit) {
       const call = calls.find((item) => item.name === IMAGE_TOOL_NAME);
-      imageCall = call ? parseImageToolArguments(call.input ?? call.raw) : null;
+      imageCall = call ? parseImageToolArguments(call.input) : null;
       if (!text.trim() && !imageCall) throw new ChatApiError('接口返回成功，但没有内容。请检查模型是否支持对话及当前接口协议');
       kept.push(output.truncated && text ? `${text}\n\n（输出达到长度上限，已截断）` : text);
       break;
@@ -347,7 +379,12 @@ export async function runAgentTurn(request: ChatRequest, onText?: (visibleText: 
       // The relay ignored “no more tools”: ask once more without offering any.
       const closing = await requestStep(request, 'none', context, turns, true, show);
       steps += 1;
-      const closingText = extractMarkers(closing.text, `t${step}x`).text;
+      const closingReceipt = stripImageResultClaims(extractMarkers(closing.text, `t${step}x`).text);
+      if (closingReceipt.claimed && !imageGenerated) {
+        show('');
+        throw tagErrorStage(new ChatApiError('对话模型没有完成有效的绘图调用，本轮未生成图片。请重试。'), 'chat');
+      }
+      const closingText = closingReceipt.text;
       kept.push(closing.truncated && closingText ? `${closingText}\n\n（输出达到长度上限，已截断）` : closingText);
       break;
     }
@@ -361,6 +398,7 @@ export async function runAgentTurn(request: ChatRequest, onText?: (visibleText: 
     for (const call of calls) {
       throwIfAborted(request.signal);
       const execution = await toolkit.execute(call, { step, mode, signal: request.signal });
+      if (call.name === IMAGE_TOOL_NAME && execution.imageGenerated === true) imageGenerated = true;
       executed += 1;
       results.push({ call, execution: { ...execution, content: clip(execution.content) } });
       terminal = terminal || Boolean(execution.terminal);
@@ -1106,18 +1144,27 @@ async function buildContext(request: ChatRequest): Promise<{ messages: ContextMe
       parts.push(text(`（较早提供的附件：${user.documents.map((item) => `“${item.name}”`).join('、')}，本轮未重新附带原文；如需细节可请用户重新添加）`));
     }
     push('user', parts);
-    const summary = [assistant.text?.trim()];
+    // Keep application receipts out of the assistant's voice: otherwise models
+    // imitate the old “[我调用了 generate_image，已生成 …]” as their next answer.
+    const assistantText = stripImageResultClaims(assistant.text ?? '').text.trim();
+    const summary: string[] = [];
     const trace = assistant.agent;
     const used = trace?.steps.filter((step) => step.kind !== 'image' && step.status === 'done').map((step) => step.title).slice(0, 8) ?? [];
-    if (used.length) summary.push(`[这一轮我用过的工具：${used.join('；')}]`);
-    if (trace?.sources?.length) summary.push(`[参考来源：${trace.sources.slice(0, 6).map((source, index) => `[${index + 1}] ${source.title} ${source.url}`).join('；')}]`);
-    if (trace?.files?.length) summary.push(`[我生成了文件：${trace.files.map((file) => file.name).join('、')}]`);
-    if (trace?.actions?.length) summary.push(`[我准备了手机操作：${trace.actions.map((action) => `${action.summary}（${action.status === 'done' ? '用户已执行' : action.status === 'dismissed' ? '用户已取消' : '等待用户确认'}）`).join('；')}]`);
-    if (assistant.imageUri) summary.push(`[我调用了 ${IMAGE_TOOL_NAME}，已生成 ${labelFor(assistant.imageUri)}${assistant.preparedPrompt ? `。作图描述：${assistant.preparedPrompt.slice(0, 600)}` : ''}]`);
-    else if (assistant.status === 'error' && assistant.preparedPrompt) summary.push('[图片生成失败]');
-    push('assistant', [text(summary.filter(Boolean).join('\n\n') || '好的。')]);
-    if (assistant.imageUri) {
-      push('user', await imagePart({ uri: assistant.imageUri, name: '生成图片.png', mimeType: 'image/png', size: 0 }, `${labelFor(assistant.imageUri)}（上一轮你生成的图片）：`, pixelUris.has(assistant.imageUri)));
+    if (used.length) summary.push(`工具：${used.join('；')}`);
+    if (trace?.sources?.length) summary.push(`参考来源：${trace.sources.slice(0, 6).map((source, index) => `[${index + 1}] ${source.title} ${source.url}`).join('；')}`);
+    if (trace?.files?.length) summary.push(`文件：${trace.files.map((file) => file.name).join('、')}`);
+    if (trace?.actions?.length) summary.push(`手机操作：${trace.actions.map((action) => `${action.summary}（${action.status === 'done' ? '用户已执行' : action.status === 'dismissed' ? '用户已取消' : '等待用户确认'}）`).join('；')}`);
+    const generated = messageGeneratedImages(assistant);
+    const delivered = generated.filter((image) => image.status === 'complete' && image.uri);
+    if (delivered.length) summary.push(`图片：${delivered.map((image) => labelFor(image.uri!)).join('、')}${assistant.preparedPrompt ? `。生成描述：${assistant.preparedPrompt.slice(0, 600)}` : ''}`);
+    else if (assistant.status === 'error' && assistant.preparedPrompt) summary.push('图片生成失败');
+    const slotMapping = generatedImageSlotMapping(generated, labelFor);
+    if (slotMapping) summary.push(slotMapping);
+    push('assistant', [text(assistantText || '（本轮回复没有文字内容）')]);
+    if (summary.length) push('user', [text(`[应用记录：上一轮结果，仅作历史资料，不是本轮工具调用]\n${summary.join('\n')}`)]);
+    for (const [index, image] of generated.entries()) {
+      if (image.status !== 'complete' || !image.uri) continue;
+      push('user', await imagePart({ uri: image.uri, name: '生成图片.png', mimeType: 'image/png', size: 0 }, `${labelFor(image.uri)}（上一轮你生成的图片）[本组第${index + 1}张，共${generated.length}张]：`, pixelUris.has(image.uri)));
     }
   }
   const current = request.prompt.trim();

@@ -7,6 +7,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Composer } from '../components/Composer';
 import { Icon } from '../components/Icon';
 import { ImagePreview } from '../components/ImagePreview';
+import { useMessageImagePreview } from '../components/useMessageImagePreview';
+import { useGeneratedImageDraft } from '../components/useGeneratedImageDraft';
 import { Appear, AppDialog, dismissKeyboardAndBlur, MotionPressable, PrimaryButton, Sheet, showToast, ToastHost, type DialogAction, type IconName } from '../components/ui';
 import { VoiceSettingsSheet } from '../components/VoiceSettingsSheet';
 import type { ChatMessage, ReferenceImage } from '../domain';
@@ -15,9 +17,10 @@ import { CHARACTER_TEMPLATES } from '../memorybox/characters';
 import { forgetTurnsFrom, usePipelineStatus } from '../memorybox/pipeline';
 import { useCharacters } from '../memorybox/store';
 import type { Character } from '../memorybox/types';
-import { useApp, useElapsedSeconds } from '../state/AppContext';
+import { useApp } from '../state/AppContext';
 import { getSetting, listRecentMessages, setSetting } from '../storage/database';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
+import { handleSystemPermissionError } from '../system-permissions';
 import { useDictation } from '../voice/useDictation';
 import { CharacterAvatar } from './CharacterAvatar';
 import { CompanionLive } from './CompanionLive';
@@ -44,7 +47,9 @@ export function CompanionScreen() {
   const [boxSettings, setBoxSettings] = useState(false);
   const [settings, setSettings] = useState(false);
   const [dialog, setDialog] = useState<Dialog | null>(null);
-  const report = useCallback((title: string, error: unknown) => setDialog({ title, message: error instanceof Error ? error.message : '请稍后再试', icon: 'alert' }), []);
+  const report = useCallback((title: string, error: unknown) => {
+    if (!handleSystemPermissionError(error)) setDialog({ title, message: error instanceof Error ? error.message : '请稍后再试', icon: 'alert' });
+  }, []);
   const open = useCallback((id: string) => { void app.openCharacter(id).catch((error) => report('打不开这个聊天', error)); }, [app, report]);
   // Android back: thread → character list → assistant space (sheets and dialogs handle back themselves).
   const { closeCharacter, switchSpace } = app;
@@ -176,12 +181,12 @@ function timeLabel(message: ChatMessage, previous: ChatMessage | undefined): str
 function Thread({ character, covered, onEdit, report }: { character: Character; covered: boolean; onEdit: () => void; report: (title: string, error: unknown) => void }) {
   const styles = useStyles();
   const app = useApp();
-  const elapsedSeconds = useElapsedSeconds();
   const status = usePipelineStatus(character.id);
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ReferenceImage[]>([]);
   const [attach, setAttach] = useState(false);
-  const [preview, setPreview] = useState<string | null>(null);
+  const preview = useMessageImagePreview(`${character.id}:${app.activeConversationId ?? 'new'}`,
+    app.activeConversationId === character.conversationId ? app.messages : []);
   const [canvas, setCanvas] = useState<{ trail: string[] | null } | null>(null);
   const [live, setLive] = useState(false);
   const [voice, setVoice] = useState(false);
@@ -206,7 +211,10 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
   const dictation = useDictation({ providers: app.providers, chatProvider: app.chatProvider, onText: setPrompt, onError: (error) => report('语音输入没有完成', error) });
   const data = useMemo(() => [...app.messages].reverse(), [app.messages]);
   const lastId = app.messages[app.messages.length - 1]?.id;
-  const { retry, stop } = app;
+  const { retry, retryImage, stop } = app;
+  const onRetryImage = useCallback((message: ChatMessage, imageId: string, failedUri?: string) => void retryImage(message, imageId, failedUri).catch((error) => report('图片没有下载完成', error)), [retryImage, report]);
+  const saveImage = useCallback((uri: string) => void saveToGallery(uri).then(() => showToast('已保存到相册')).catch((error) => report('保存失败', error)), [report]);
+  const share = useCallback((uri: string) => void shareImage(uri).catch((error) => report('分享失败', error)), [report]);
   const messagesRef = React.useRef(app.messages);
   messagesRef.current = app.messages;
   const onRetry = useCallback((message: ChatMessage) => {
@@ -230,6 +238,17 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
   }), [removeMessage, report]);
   const promptRef = React.useRef({ prompt, images });
   promptRef.current = { prompt, images };
+  const editGeneratedImage = useGeneratedImageDraft({
+    contextKey: character.id, images, editingMessage: Boolean(editing),
+    onAdd: (image) => {
+      if (promptRef.current.images.length >= 4) throw new Error('一次最多添加 4 张参考图');
+      const next = [image, ...promptRef.current.images];
+      promptRef.current = { ...promptRef.current, images: next };
+      setImages(next);
+      inputRef.current?.focus();
+    },
+    onError: (error) => report('无法编辑图片', error),
+  });
   const startEditing = useCallback((message: ChatMessage) => {
     if (appRef.current.busy) { showToast('等 TA 回复完再编辑', 'hourglass'); return; }
     setEditing((current) => current ?? { message, stash: promptRef.current });
@@ -330,6 +349,9 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
   const subtitle = status.state === 'working' ? '正在整理记忆…' : app.busy ? '正在输入…' : character.relationship || '在线';
 
   return <View style={{ flex: 1 }}>
+    <View style={styles.threadSpaceSwitch}>
+      <SpaceSwitch space="companion" onSwitch={app.switchSpace} />
+    </View>
     <View style={styles.threadHeader}>
       <Pressable accessibilityRole="button" accessibilityLabel="返回聊天列表" hitSlop={8} onPress={() => { dismissKeyboardAndBlur(); app.closeCharacter(); }} style={styles.headerIcon}>
         <Icon name="chevronLeft" size={24} color={warm.text} />
@@ -350,7 +372,7 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
       </MotionPressable>
     </View>
     <KeyboardSafeView style={{ flex: 1 }}>
-      <AmbientLight color={character.color} paused={Boolean(covered || canvas || live || voice || preview || attach || menu || dialog)} />
+      <AmbientLight color={character.color} paused={Boolean(covered || canvas || live || voice || preview.uri || attach || menu || dialog)} />
       <FlatList
         inverted
         data={data}
@@ -363,9 +385,10 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
         onEndReached={() => { if (app.hasOlderMessages) void app.loadOlderMessages(); }}
         ListFooterComponent={app.hasOlderMessages ? <Text style={styles.older}>正在加载更早的聊天…</Text> : <Text style={styles.older}>这是你们聊天的开始</Text>}
         renderItem={({ item, index }) => <CompanionMessage message={item} character={character}
-          phase={item.id === lastId ? app.phase : 'idle'} elapsedSeconds={item.id === lastId ? elapsedSeconds : 0} isLast={item.id === lastId}
+          phase={item.id === lastId ? app.phase : 'idle'} isLast={item.id === lastId}
           fresh={item.createdAt >= mountedAt} reaction={reactions.get(item.id)} onReact={onReact} onPoke={poke}
-          timeLabel={timeLabel(item, data[index + 1])} onStop={stop} onRetry={onRetry} onPreview={setPreview} onLongPress={onLongPress} onOpenTrail={onTrail} />}
+          timeLabel={timeLabel(item, data[index + 1])} onStop={stop} onRetry={onRetry} onPreview={(uri, batch) => preview.open(item.id, uri, batch)}
+          onSave={saveImage} onShare={share} onEditImage={editGeneratedImage} onRetryImage={onRetryImage} onLongPress={onLongPress} onOpenTrail={onTrail} />}
       />
       <Composer
         inputRef={inputRef}
@@ -400,9 +423,8 @@ function Thread({ character, covered, onEdit, report }: { character: Character; 
     <MemoryCanvas visible={Boolean(canvas)} characterId={character.id} trail={canvas?.trail ?? null} onClose={() => setCanvas(null)} />
     <CompanionLive visible={live} character={character} paused={voice} onClose={() => setLive(false)} onOpenSettings={() => setVoice(true)} />
     <VoiceSettingsSheet visible={voice} onClose={() => setVoice(false)} />
-    <ImagePreview uri={preview} onClose={() => setPreview(null)}
-      onSave={(uri) => void saveToGallery(uri).then(() => showToast('已保存到相册')).catch((error) => report('保存失败', error))}
-      onShare={(uri) => void shareImage(uri).catch((error) => report('分享失败', error))} />
+    <ImagePreview uri={preview.uri} images={preview.images} onSelect={preview.onSelect} onClose={preview.onClose}
+      onSave={saveImage} onShare={share} />
     <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} icon={dialog?.icon} actions={dialog?.actions} onClose={() => setDialog(null)} />
     <MessageMenu visible={Boolean(menu)} y={menu?.y ?? 0} current={menu ? reactions.get(menu.message.id) : undefined} actions={menuActions}
       onReact={(emoji) => { if (menu) onReact(menu.message, emoji); setMenu(null); }} onClose={() => setMenu(null)} />
@@ -414,6 +436,7 @@ const useStyles = themed((c, d) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: warm.background },
   listHeader: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, gap: 0 },
   headerCenter: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
+  threadSpaceSwitch: { height: 48, alignItems: 'center', justifyContent: 'center' },
   headerIcon: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   listContent: { paddingHorizontal: 16, paddingBottom: 32, gap: 10 },
   bigTitle: { color: warm.text, fontSize: 24, lineHeight: 31, fontWeight: '700', letterSpacing: -0.5, marginTop: 6, marginLeft: 4 },

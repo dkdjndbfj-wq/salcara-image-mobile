@@ -2,11 +2,15 @@ import React from 'react';
 import { Image, View, type ImageSourcePropType } from 'react-native';
 
 import { Icon } from '../components/Icon';
-import { colors, desk, themed, useDesk } from '../theme';
+import { useDesk } from '../theme';
 
 // Original, unmodified official assets. See assets/agent-brand/README.md.
 const CODEX_ICON: ImageSourcePropType = require('../../assets/agent-brand/codex-app-official.png');
 const CLAUDE_ICON: ImageSourcePropType = require('../../assets/agent-brand/claude-app-official.png');
+const ADDITIONAL_ICONS: Record<string, { source: ImageSourcePropType; label: string } | undefined> = {
+  'deepseek-harness': { source: require('../../assets/agent-brand/deepseek-harness-app-official.png'), label: 'DeepSeek Harness' },
+  hermes: { source: require('../../assets/agent-brand/hermes-app-official.png'), label: 'Hermes Agent' },
+};
 
 export type AgentBrandProps = { tool: string; client?: string; size?: number };
 
@@ -14,11 +18,13 @@ export type AgentBrandProps = { tool: string; client?: string; size?: number };
 export function AgentBrand({ tool, client, size = 36 }: AgentBrandProps) {
   const dk = useDesk();
   const desktop = tool === 'claude-desktop' || (tool === 'claude' && /desktop/i.test(client ?? ''));
-  const source = tool === 'codex' ? CODEX_ICON : tool === 'claude' || tool === 'claude-desktop' ? CLAUDE_ICON : null;
-  const label = tool === 'codex' ? 'Codex' : desktop ? 'Claude Desktop' : 'Claude Code';
+  const family = tool === 'codex-desktop' ? 'codex' : tool === 'claude-desktop' ? 'claude' : tool;
+  const additional = ADDITIONAL_ICONS[family];
+  const source = family === 'codex' ? CODEX_ICON : family === 'claude' ? CLAUDE_ICON : additional?.source;
+  const label = family === 'codex' ? 'Codex' : family === 'claude' ? desktop ? 'Claude Desktop' : 'Claude Code' : additional?.label;
 
   if (source) {
-    return <Image testID={`agent-brand-${tool === 'codex' ? 'codex' : 'claude'}`} source={source}
+    return <Image testID={`agent-brand-${family}`} source={source}
       accessibilityRole="image" accessibilityLabel={label} resizeMode="contain"
       style={{ width: size, height: size }} />;
   }

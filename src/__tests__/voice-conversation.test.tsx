@@ -1,5 +1,9 @@
 import { act, render, waitFor } from '@testing-library/react-native';
 import React from 'react';
+import { Alert, Platform } from 'react-native';
+import * as KeepAwake from 'expo-keep-awake';
+import * as VoiceEngines from '../voice/engines';
+import * as VoiceSettings from '../voice/settings';
 
 import type { ChatMessage, Conversation, ProviderProfile } from '../domain';
 
@@ -14,7 +18,7 @@ jest.mock('../api/chat-api', () => ({ runAgentTurn: (...args: unknown[]) => mock
 jest.mock('../api/image-api', () => ({ generateImage: jest.fn(), editImage: jest.fn(), normalizeError: (error: unknown) => error }));
 jest.mock('../document-inputs', () => ({ validateAttachments: () => undefined }));
 jest.mock('../image-inputs', () => ({ createReferenceFromGenerated: jest.fn() }));
-jest.mock('expo-keep-awake', () => ({ activateKeepAwakeAsync: async () => undefined, deactivateKeepAwake: async () => undefined }));
+jest.mock('expo-keep-awake', () => ({ __esModule: true, activateKeepAwakeAsync: async () => undefined, deactivateKeepAwake: async () => undefined }));
 jest.mock('../storage/secure-keys', () => ({ getProviderKey: async () => 'key', deleteProviderKey: async () => undefined }));
 jest.mock('../storage/files', () => ({ downloadPng: jest.fn(), deleteLocalFile: () => undefined, RemoteImageDownloadError: class extends Error {} }));
 jest.mock('../voice/models', () => ({ refreshModels: async () => undefined, isInstalled: () => true, modelDirectory: () => 'file:///models/p/' }));
@@ -24,7 +28,7 @@ jest.mock('../voice/settings', () => {
     conversationEngine: 'cascade', realtimeProviderId: null, realtimeModel: 'r', realtimeVoice: 'marin',
     speechOutput: 'system', ttsProviderId: null, ttsModel: 't', ttsVoice: 'marin',
   };
-  return { loadVoiceSettings: async () => settings, voiceSettings: () => settings };
+  return { __esModule: true, loadVoiceSettings: async () => settings, voiceSettings: () => settings };
 });
 jest.mock('expo', () => ({ requireOptionalNativeModule: () => null }));
 jest.mock('../voice/useDictation', () => ({
@@ -166,4 +170,54 @@ test('returns to listening even when the voice finishes before the reply is mark
   // …then the reply completes with nothing new to say.
   await act(async () => { release(); });
   await waitFor(() => expect(live.phase).toBe('listening'));
+});
+
+test('iOS microphone denial after realtime connection releases resources without starting cascade', async () => {
+  const originalOS = Platform.OS;
+  Object.defineProperty(Platform, 'OS', { configurable: true, value: 'ios' });
+  const settings = await VoiceSettings.loadVoiceSettings();
+  const settingsSpy = jest.spyOn(VoiceSettings, 'loadVoiceSettings').mockResolvedValue({
+    ...settings, conversationEngine: 'auto', realtimeProviderId: 'chat',
+  });
+  const targetSpy = jest.spyOn(VoiceEngines, 'resolveTarget').mockResolvedValue({
+    label: 'Synthetic realtime', model: 'synthetic-realtime',
+  } as never);
+  const session = { connect: jest.fn(async () => undefined), close: jest.fn(), sendAudio: jest.fn(), cancelResponse: jest.fn() };
+  const realtimeSpy = jest.spyOn(VoiceEngines, 'openRealtime').mockReturnValue({ session, inputRate: 24000 } as never);
+  const awake = jest.spyOn(KeepAwake, 'activateKeepAwakeAsync');
+  const releaseAwake = jest.spyOn(KeepAwake, 'deactivateKeepAwake');
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+  fake.startCapture.mockClear();
+  fake.prepareRecognizer.mockClear();
+  fake.startCapture.mockImplementationOnce(async () => {
+    expect(session.connect).toHaveBeenCalledTimes(1);
+    throw Object.assign(new Error('没有麦克风权限'), { code: 'ERR_MIC_PERMISSION' });
+  });
+  let view: Awaited<ReturnType<typeof render>> | undefined;
+  try {
+    view = await render(<AppProvider><Probe active /></AppProvider>);
+    await waitFor(() => expect(live.phase).toBe('error'));
+    expect(live.notice).toBeNull();
+    expect(live.error).toBe('没有麦克风权限');
+    // Check before unmount: the failed start must clean up without waiting
+    // for the person to close Live or press retry.
+    expect(session.close).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(expect.arrayContaining(['cancelCapture', 'playerStop', 'stopSpeaking']));
+    expect(awake).toHaveBeenCalledWith('salcara-live');
+    expect(releaseAwake).toHaveBeenCalledWith('salcara-live');
+    expect(Object.values(listeners).every((set) => set.size === 0)).toBe(true);
+    expect(fake.startCapture).toHaveBeenCalledTimes(1);
+    expect(fake.startCapture).toHaveBeenCalledWith(expect.objectContaining({ emitPcm: true, conversation: true }));
+    expect(fake.prepareRecognizer).not.toHaveBeenCalled();
+    expect(targetSpy).toHaveBeenCalledTimes(1);
+    expect(targetSpy.mock.calls[0][0]).toBe('realtime');
+    expect(mockAgent).not.toHaveBeenCalled();
+    expect(alert).toHaveBeenCalledWith('允许麦克风', expect.any(String), expect.any(Array), expect.any(Object));
+  } finally {
+    await view?.unmount();
+    for (const call of alert.mock.calls) call[2]?.find((button: { text?: string; onPress?: () => void }) => button.text === '暂不')?.onPress?.();
+    alert.mockRestore(); releaseAwake.mockRestore(); awake.mockRestore();
+    realtimeSpy.mockRestore(); targetSpy.mockRestore(); settingsSpy.mockRestore();
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: originalOS });
+  }
 });

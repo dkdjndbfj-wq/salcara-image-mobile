@@ -2,5 +2,5 @@
   "name": "salcara-notify",
   "version": "1.0.0",
   "private": true,
-  "description": "Local notifications for finished remote tasks / approvals, and a short-lived Android foreground watch while a task runs"
+  "description": "Android FCM and iOS APNs task notifications, plus an Android foreground watch"
 }

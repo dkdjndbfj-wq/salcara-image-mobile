@@ -1,22 +1,44 @@
 import { Directory, File, Paths } from 'expo-file-system';
-import * as MediaLibrary from 'expo-media-library';
 import * as Sharing from 'expo-sharing';
 import { fetch } from 'expo/fetch';
+import { Platform } from 'react-native';
 
 import { createId } from '../domain-utils';
 import { networkFailureMessage, networkHost } from '../api/network';
+import { SystemPermissionError } from '../system-permissions';
 
-const imageDirectory = new Directory(Paths.document, 'generated-images');
-const referenceDirectory = new Directory(Paths.document, 'reference-images');
+let imageDirectory: Directory | undefined;
+let referenceDirectory: Directory | undefined;
+
+function getImageDirectory(): Directory {
+  if (Platform.OS === 'web') throw new Error('本地文件保存仅支持移动端');
+  return imageDirectory ??= new Directory(Paths.document, 'generated-images');
+}
+
+function getReferenceDirectory(): Directory {
+  if (Platform.OS === 'web') throw new Error('本地文件保存仅支持移动端');
+  return referenceDirectory ??= new Directory(Paths.document, 'reference-images');
+}
+
+// expo-media-library has no Web implementation and throws while the bundle is
+// being evaluated. Load it only for the native action that needs it so the
+// rest of the app, including remote workspaces, remains usable on Web.
+type MediaLibraryModule = typeof import('expo-media-library');
+let mediaLibrary: MediaLibraryModule | null | undefined;
+function getMediaLibrary(): MediaLibraryModule | null {
+  if (Platform.OS === 'web') return null;
+  if (mediaLibrary === undefined) mediaLibrary = require('expo-media-library') as MediaLibraryModule;
+  return mediaLibrary;
+}
 
 function ensureDirectories(): void {
-  imageDirectory.create({ idempotent: true, intermediates: true });
-  referenceDirectory.create({ idempotent: true, intermediates: true });
+  getImageDirectory().create({ idempotent: true, intermediates: true });
+  getReferenceDirectory().create({ idempotent: true, intermediates: true });
 }
 
 export function saveBase64Png(base64: string): string {
   ensureDirectories();
-  const file = new File(imageDirectory, `${createId()}.png`);
+  const file = new File(getImageDirectory(), `${createId()}.png`);
   file.create({ overwrite: true, intermediates: true });
   file.write(base64, { encoding: 'base64' });
   return file.uri;
@@ -39,7 +61,7 @@ export class RemoteImageDownloadError extends Error {
 
 export async function downloadPng(url: string, signal?: AbortSignal): Promise<string> {
   ensureDirectories();
-  const destination = new File(imageDirectory, `${createId()}.png`);
+  const destination = new File(getImageDirectory(), `${createId()}.png`);
   let detail: string | undefined;
   for (let attempt = 0; attempt <= DOWNLOAD_RETRY_DELAYS_MS.length; attempt += 1) {
     if (signal?.aborted) throw new RemoteImageDownloadError(url, true);
@@ -138,7 +160,7 @@ export async function persistReference(uri: string, extension = '.png'): Promise
   const safeExtension = ['.png', '.jpg', '.jpeg', '.webp'].includes(extension.toLowerCase())
     ? extension.toLowerCase()
     : '.png';
-  const destination = new File(referenceDirectory, `${createId()}${safeExtension}`);
+  const destination = new File(getReferenceDirectory(), `${createId()}${safeExtension}`);
   await source.copy(destination, { overwrite: true });
   return destination.uri;
 }
@@ -167,8 +189,11 @@ const SWEEP_MIN_AGE_MS = 24 * 60 * 60 * 1000;
  * waiting in the composer is never touched. Best effort; returns the count.
  */
 export function sweepUnreferencedFiles(referencedNames: Set<string>, now = Date.now()): number {
+  if (Platform.OS === 'web') return 0;
+  const imageFolder = getImageDirectory();
+  const referenceFolder = getReferenceDirectory();
   let removed = 0;
-  for (const directory of [imageDirectory, referenceDirectory, new Directory(Paths.document, 'reference-documents'), new Directory(Paths.document, 'generated-files')]) {
+  for (const directory of [imageFolder, referenceFolder, new Directory(Paths.document, 'reference-documents'), new Directory(Paths.document, 'generated-files')]) {
     try {
       if (!directory.exists) continue;
       for (const entry of directory.list()) {
@@ -209,7 +234,10 @@ function sweepFolder(folder: InstanceType<typeof Directory>, referencedNames: Se
   }
 }
 
-export async function saveToGallery(uri: string): Promise<void> {
+export async function saveToGallery(uri: string, options: { signal?: AbortSignal } = {}): Promise<void> {
+  if (options.signal?.aborted) throw createAbortError();
+  const library = getMediaLibrary();
+  if (!library) throw new Error('系统相册保存仅支持移动端');
   const file = new File(uri);
   if (!file.exists || (file.size ?? 0) === 0) {
     throw new Error('本地图片文件不存在，请先重新下载图片。');
@@ -218,26 +246,28 @@ export async function saveToGallery(uri: string): Promise<void> {
   // Only request permission to add a photo. Requesting full read access on
   // Android 13+ is unnecessary and can make saving fail after the user chooses
   // limited/denied access.
-  const permission = await MediaLibrary.requestPermissionsAsync(true, ['photo']);
+  const permission = await library.requestPermissionsAsync(true, ['photo']);
+  if (options.signal?.aborted) throw createAbortError();
   if (!permission.granted) {
-    throw new Error(permission.canAskAgain
-      ? '需要允许“保存图片”权限才能写入系统相册。'
-      : '相册保存权限已被关闭，请到系统设置中允许 Salcara AI 保存图片。');
+    throw new SystemPermissionError('photo-save', permission.canAskAgain !== false);
   }
 
   try {
     // Expo 57 removed the old saveToLibraryAsync implementation. Asset.create
     // writes through Android MediaStore and works with scoped storage.
-    await MediaLibrary.Asset.create(file.uri);
+    await library.Asset.create(file.uri);
   } catch (error) {
     const detail = error instanceof Error ? error.message : '';
     throw new Error(detail ? `写入系统相册失败：${detail}` : '写入系统相册失败，请检查存储空间后重试。');
   }
 }
 
-export async function shareImage(uri: string): Promise<void> {
-  if (!(await Sharing.isAvailableAsync())) throw new Error('当前设备不支持系统分享');
-  await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: '分享生成图片' });
+export async function shareImage(uri: string, options: { signal?: AbortSignal; mimeType?: 'image/png' | 'image/jpeg' | 'image/webp' } = {}): Promise<void> {
+  if (options.signal?.aborted) throw createAbortError();
+  const available = await Sharing.isAvailableAsync();
+  if (options.signal?.aborted) throw createAbortError();
+  if (!available) throw new Error('当前设备不支持系统分享');
+  await Sharing.shareAsync(uri, { mimeType: options.mimeType ?? 'image/png', dialogTitle: '分享生成图片' });
 }
 
 export function fileSize(uri: string): number {

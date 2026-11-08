@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 import { MemoryBoxSettingsSheet } from '../companion/MemoryBoxSettingsSheet';
 import { useApp } from '../state/AppContext';
@@ -19,25 +19,34 @@ import { VoiceSettingsSheet } from './VoiceSettingsSheet';
  */
 export function SettingsCenter({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const app = useApp();
-  const [page, setPage] = useState<'providers' | 'models' | 'voice' | 'personal' | 'tools' | 'agents' | 'memory' | 'about' | 'network' | null>(null);
+  type SettingsPage = 'providers' | 'models' | 'voice' | 'personal' | 'tools' | 'agents' | 'memory' | 'about' | 'network';
+  const [page, setPage] = useState<SettingsPage | null>(null);
+  const [mountedPage, setMountedPage] = useState<SettingsPage | null>(null);
   const [updateToken, setUpdateToken] = useState(0);
   const [modelsTab, setModelsTab] = useState<'chat' | 'image'>('chat');
   const close = () => setPage(null);
+  const open = (next: SettingsPage) => { setMountedPage(next); setPage(next); };
+  useEffect(() => {
+    if (page) { setMountedPage(page); return undefined; }
+    if (!mountedPage) return undefined;
+    const timer = setTimeout(() => setMountedPage(null), 260);
+    return () => clearTimeout(timer);
+  }, [page, mountedPage]);
   const main = app.chatProvider ?? app.imageProvider;
   return <>
     <AppSettingsSheet visible={visible} onClose={onClose}
-      onOpenProviders={() => setPage('providers')} onOpenModels={(tab) => { setModelsTab(tab ?? 'chat'); setPage('models'); }} onOpenVoice={() => setPage('voice')}
-      onOpenPersonalization={() => setPage('personal')} onOpenTools={() => setPage('tools')} onOpenAgents={() => setPage('agents')}
-      onOpenMemoryBox={() => setPage('memory')} onOpenNetwork={() => setPage('network')} onOpenAbout={() => setPage('about')} onOpenRemote={() => { onClose(); app.switchSpace('remote'); }}
+      onOpenProviders={() => open('providers')} onOpenModels={(tab) => { setModelsTab(tab ?? 'chat'); open('models'); }} onOpenVoice={() => open('voice')}
+      onOpenPersonalization={() => open('personal')} onOpenTools={() => open('tools')} onOpenAgents={() => open('agents')}
+      onOpenMemoryBox={() => open('memory')} onOpenNetwork={() => open('network')} onOpenAbout={() => open('about')} onOpenRemote={() => { onClose(); app.switchSpace('remote'); }}
       onCheckUpdates={() => setUpdateToken((value) => value + 1)} />
-    <ProviderManager visible={page === 'providers'} onClose={close} />
-    <ModelSwitcher visible={page === 'models'} initialTab={modelsTab} onClose={close} onManageProviders={() => setPage('providers')} />
-    <VoiceSettingsSheet visible={page === 'voice'} onClose={close} />
-    <PersonalizationSheet visible={page === 'personal'} onClose={close} />
-    <ToolsSheet visible={page === 'tools'} onClose={close} />
-    <MemoryBoxSettingsSheet visible={page === 'memory'} onClose={close} />
-    <AboutSheet visible={page === 'about'} onClose={close} onCheckUpdates={() => setUpdateToken((value) => value + 1)} />
-    <NetworkDiagnostics visible={page === 'network'} onClose={close} providerId={main?.id ?? ''} baseUrl={main?.baseUrl ?? ''} api={app.chatProvider?.chatApi} />
+    {mountedPage === 'providers' ? <ProviderManager visible={page === 'providers'} onClose={close} /> : null}
+    {mountedPage === 'models' ? <ModelSwitcher visible={page === 'models'} initialTab={modelsTab} onClose={close} onManageProviders={() => open('providers')} /> : null}
+    {mountedPage === 'voice' ? <VoiceSettingsSheet visible={page === 'voice'} onClose={close} /> : null}
+    {mountedPage === 'personal' ? <PersonalizationSheet visible={page === 'personal'} onClose={close} /> : null}
+    {mountedPage === 'tools' ? <ToolsSheet visible={page === 'tools'} onClose={close} /> : null}
+    {mountedPage === 'memory' ? <MemoryBoxSettingsSheet visible={page === 'memory'} onClose={close} /> : null}
+    {mountedPage === 'about' ? <AboutSheet visible={page === 'about'} onClose={close} onCheckUpdates={() => setUpdateToken((value) => value + 1)} /> : null}
+    {mountedPage === 'network' ? <NetworkDiagnostics visible={page === 'network'} onClose={close} providerId={main?.id ?? ''} baseUrl={main?.baseUrl ?? ''} api={app.chatProvider?.chatApi} /> : null}
     {updateToken ? <UpdateManager manualCheckToken={updateToken} /> : null}
   </>;
 }

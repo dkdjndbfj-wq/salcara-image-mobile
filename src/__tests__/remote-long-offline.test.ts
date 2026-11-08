@@ -116,7 +116,8 @@ test('a later authorization failure cannot discard an earlier possible execution
 });
 
 test('legacy attempted records are conservatively timed from their creation, not migrated to fresh receipts', async () => {
-  mockSettings.set('remote_pending_delivery_v1', JSON.stringify([{ ...input, requestId: '0199aaa1-1234-4678-9abc-000000000001', createdAt: 1000, attempted: true, safeRetry: true }]));
+  const { idempotent: _idempotent, ...stored } = input;
+  mockSettings.set('remote_pending_delivery_v1', JSON.stringify([{ ...stored, requestId: '0199aaa1-1234-4678-9abc-000000000001', createdAt: 1000, attempted: true, safeRetry: true }]));
   now.mockReturnValue(1000 + DELIVERY_RETRY_WINDOW_MS);
   expect(deliveryRetryState((await pendingDelivery(input.scope, 'pc', input.sessionKey))!)).toMatchObject({ retryable: false, reason: 'expired' });
   const execute = jest.fn(async () => undefined);
@@ -144,7 +145,7 @@ test('cancel only removes the phone retry record and does not invoke a computer 
 test('repeated synchronization failures exponentially back off to five minutes and success resets it', () => {
   expect([1, 2, 3, 4, 5, 6, 7, 8, 9, 100].map((failures) => liveDelay(0, failures, true)))
     .toEqual([2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 300000, 300000]);
-  expect(liveDelay(100, 0, true)).toBe(0);
+  expect(liveDelay(100, 0, true)).toBe(250);
   expect(liveDelay(0, 0, false)).toBe(2000);
   expect(liveDelay(100, 0, false)).toBe(8000);
 });

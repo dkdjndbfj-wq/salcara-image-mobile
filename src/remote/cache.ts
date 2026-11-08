@@ -1,4 +1,11 @@
 import type { SessionInfo } from './client';
+import { attachmentRef, localImageUri, MAX_OUTPUT_ATTACHMENTS } from './attachment-ref';
+import { clearCachedAttachments } from './attachment-cache';
+import { clearDurableEventScope } from './durable-events';
+import { retireDurableCommandScope } from './durable-commands';
+import { clearRemoteQueuedScope } from './drafts';
+import { messageContextReferences, boundedClientId, messageOrigin, messageSkills, sessionMetadata } from './conversation-metadata';
+import { markRemoteImagesInUse } from './queued-image-files';
 
 /**
  * Small on-device cache of recent 编程 threads and session lists, so a thread
@@ -9,7 +16,7 @@ import type { SessionInfo } from './client';
  *   Claude Desktop history depend on a live desktop lease and are never stored.
  * - At most 40 threads × 300 items; least recently used threads are dropped.
  */
-type CachedThread = { items: unknown[]; session?: SessionInfo; savedAt: number };
+type CachedThread = { items: unknown[]; session?: SessionInfo; revertedTurns?: string[]; revertedItems?: string[]; revertOperations?:string[]; savedAt: number };
 type SettingsStore = { getSetting: (key: string) => Promise<string | null>; setSetting: (key: string, value: string | null) => Promise<void> };
 const settings = (): SettingsStore | null => { try { return require('../storage/database') as SettingsStore; } catch { return null; } };
 
@@ -20,23 +27,48 @@ const threadKey = (scope: string, key: string) => `remote.cache.t.${scope}.${key
 const listKey = (scope: string, deviceId: string) => `remote.cache.s.${scope}.${deviceId}`;
 const indexKey = (scope: string) => `remote.cache.index.${scope}`;
 
+function cacheableAttachments(value: unknown, maximum: number): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length > maximum) return false;
+  const ids = new Set<string>();
+  return value.every((item) => {
+    const ref = attachmentRef(item);
+    if (!ref || ids.has(ref.id)) return false;
+    ids.add(ref.id);
+    const uri = item && typeof item === 'object' ? (item as Record<string, unknown>).uri : undefined;
+    return uri === undefined || localImageUri(uri);
+  });
+}
+
 function cacheableSession(value: unknown): value is SessionInfo {
   if (!value || typeof value !== 'object') return false;
   const session = value as SessionInfo;
-  return typeof session.sessionKey === 'string' && /^(codex|claude):[^|\u0000-\u001f]{1,160}$/.test(session.sessionKey)
-    && (session.tool === 'codex' || session.tool === 'claude') && session.sessionKey.startsWith(`${session.tool}:`)
+  // Extension adapters use the same `<tool>:<opaque-id>` namespace as the
+  // built-ins. Keep the namespace bounded and require the key prefix to match
+  // the advertised tool so a malformed/foreign session cannot enter cache.
+  const tool = typeof session.tool === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(session.tool) ? session.tool : '';
+  return Boolean(tool) && typeof session.sessionKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[^|\u0000-\u001f]{1,160}$/.test(session.sessionKey)
+    && session.sessionKey.startsWith(`${tool}:`)
     && (session.controlSurface === undefined || session.controlSurface === 'cli')
     && typeof session.client === 'string' && typeof session.title === 'string' && typeof session.cwd === 'string' && Number.isSafeInteger(session.updatedAt)
-    && ['idle', 'running', 'waiting_approval', 'failed'].includes(session.status) && typeof session.controllable === 'boolean';
+    && ['idle', 'running', 'waiting_approval', 'failed', 'unknown'].includes(session.status) && typeof session.controllable === 'boolean';
 }
 function cacheableItem(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
   const item = value as Record<string, unknown>;
-  if (typeof item.id !== 'string' || !Number.isSafeInteger(item.ts)) return false;
+  if (typeof item.id !== 'string' || !Number.isSafeInteger(item.ts)
+    || item.seq !== undefined && (!Number.isSafeInteger(item.seq) || Number(item.seq) < 0)
+    || item.orderSeq !== undefined && (!Number.isSafeInteger(item.orderSeq) || Number(item.orderSeq) < 0)) return false;
   switch (item.kind) {
-    case 'message': return !item.local && (item.role === 'user' || item.role === 'assistant') && typeof item.text === 'string' && typeof item.final === 'boolean';
+    case 'message': {
+      if (item.local || (item.role !== 'user' && item.role !== 'assistant') || typeof item.text !== 'string' || typeof item.final !== 'boolean') return false;
+      const imageLimit = item.role === 'user' ? 4 : MAX_OUTPUT_ATTACHMENTS;
+      if (!cacheableAttachments(item.attachments, imageLimit)) return false;
+      return item.images === undefined || Array.isArray(item.images) && item.images.length <= imageLimit && item.images.every(localImageUri);
+    }
     case 'reasoning': return typeof item.text === 'string' && typeof item.final === 'boolean';
     case 'tool': return typeof item.title === 'string' && typeof item.tool === 'string' && ['running', 'done', 'failed'].includes(String(item.status))
+      && cacheableAttachments(item.attachments, MAX_OUTPUT_ATTACHMENTS)
       && (item.detail === undefined || typeof item.detail === 'string') && (item.output === undefined || typeof item.output === 'string') && (item.diff === undefined || typeof item.diff === 'string');
     case 'turn': return ['started', 'completed', 'failed', 'interrupted'].includes(String(item.status));
     case 'notice': return typeof item.text === 'string' && ['info', 'warn', 'error'].includes(String(item.level));
@@ -85,14 +117,19 @@ async function touchIndex(store: SettingsStore, scope: string, key: string) {
   await store.setSetting(indexKey(scope), JSON.stringify(next.slice(0, MAX_THREADS)));
 }
 
-export function saveCachedThread(scope: string, key: string, timeline: { items: unknown[]; session?: SessionInfo }) {
+export function saveCachedThread(scope: string, key: string, timeline: { items: unknown[]; session?: SessionInfo; revertedTurns?:string[]; revertedItems?:string[];revertOperations?:string[] }) {
+  markRemoteImagesInUse();
   if (key.includes('|claude-desktop:') || timeline.session?.controlSurface === 'desktop' || timeline.session?.controlSurface === 'read-only') return;
   debounce(scope, `t:${scope}:${key}`, async store => {
-    let items = timeline.items.slice(-MAX_ITEMS);
-    let json = JSON.stringify({ items, session: timeline.session, savedAt: Date.now() } satisfies CachedThread);
+    let items = timeline.items.slice(-MAX_ITEMS).map(item => {
+      if (!item || typeof item !== 'object' || (item as Record<string, unknown>).kind !== 'message') return item;
+      const row = item as Record<string, unknown>;
+      return { ...row, contextReferences: messageContextReferences(row.contextReferences, row.role), skills: messageSkills(row.skills, row.role) };
+    });
+    let json = JSON.stringify({ items, session: timeline.session, revertedTurns:timeline.revertedTurns,revertedItems:timeline.revertedItems,revertOperations:timeline.revertOperations, savedAt: Date.now() } satisfies CachedThread);
     while (json.length > MAX_BYTES && items.length > 20) {
       items = items.slice(Math.floor(items.length / 3));
-      json = JSON.stringify({ items, session: timeline.session, savedAt: Date.now() } satisfies CachedThread);
+      json = JSON.stringify({ items, session: timeline.session, revertedTurns:timeline.revertedTurns,revertedItems:timeline.revertedItems,revertOperations:timeline.revertOperations, savedAt: Date.now() } satisfies CachedThread);
     }
     if (json.length > MAX_BYTES) return;
     await store.setSetting(threadKey(scope, key), json);
@@ -101,10 +138,26 @@ export function saveCachedThread(scope: string, key: string, timeline: { items: 
 }
 
 export async function loadCachedThread(scope: string, key: string): Promise<CachedThread | null> {
+  markRemoteImagesInUse();
   const cached = await readJson<CachedThread>(threadKey(scope, key));
   if (!cached || !Array.isArray(cached.items) || cached.items.length > MAX_ITEMS || !Number.isSafeInteger(cached.savedAt)
     || !cacheableSession(cached.session) || cached.session.sessionKey !== key.slice(key.indexOf('|') + 1)) return null;
-  return { ...cached, items: cached.items.filter(cacheableItem) };
+  return { ...cached, revertOperations:Array.isArray(cached.revertOperations)?cached.revertOperations.filter(id=>typeof id==='string'&&id.length<=512):undefined, revertedTurns:Array.isArray(cached.revertedTurns)?cached.revertedTurns.filter(id=>typeof id==='string'&&id.length<=512):undefined,revertedItems:Array.isArray(cached.revertedItems)?cached.revertedItems.filter(id=>typeof id==='string'&&id.length<=512):undefined, session: sessionMetadata(cached.session), items: cached.items.filter(cacheableItem).map((item) => {
+    if (!item || typeof item !== 'object' || ((item as Record<string, unknown>).kind !== 'message' && (item as Record<string, unknown>).kind !== 'tool')) return item;
+    const original = item as Record<string, unknown>;
+    const row = original.kind === 'message' ? { ...original, contextReferences: messageContextReferences(original.contextReferences, original.role), messageOrigin: messageOrigin(original.messageOrigin), clientId: boundedClientId(original.clientId), skills: messageSkills(original.skills, original.role),
+      messagePhase: original.messagePhase === 'commentary' || original.messagePhase === 'final_answer' ? original.messagePhase : undefined } : original;
+    if (!Array.isArray(row.attachments)) return row;
+    // Never hydrate a cache with an arbitrary URI. Only the local file/content
+    // schemes are renderable; remote refs are fetched through attachment.read.
+    const attachments = row.attachments.map((value) => {
+      if (!value || typeof value !== 'object') return value;
+      const ref = value as Record<string, unknown>;
+      return ref.uri && /^(?:file|content):/i.test(String(ref.uri)) ? ref : { ...ref, uri: undefined };
+    });
+    return { ...row, attachments,
+      ...(row.kind === 'message' && Array.isArray(row.images) ? { images: row.images.filter(localImageUri) } : {}) };
+  }) };
 }
 
 export function saveCachedSessions(scope: string, deviceId: string, list: SessionInfo[]) {
@@ -116,13 +169,22 @@ export function saveCachedSessions(scope: string, deviceId: string, list: Sessio
 
 export async function loadCachedSessions(scope: string, deviceId: string): Promise<SessionInfo[] | null> {
   const list = await readJson<SessionInfo[]>(listKey(scope, deviceId));
-  return Array.isArray(list) && list.length <= 100 && list.every(cacheableSession) ? list : null;
+  return Array.isArray(list) && list.length <= 100 && list.every(cacheableSession) ? list.map(sessionMetadata) : null;
 }
 
 /** Forget everything cached for one pairing (on unpair). */
 export async function clearRemoteCache(scope: string, deviceIds: string[] = []) {
   retired.add(scope);
   for (const [id, pending] of timers) if (pending.scope === scope) { clearTimeout(pending.timer); timers.delete(id); }
+  // Attachment bytes are kept under Expo's filesystem cache and are not part
+  // of the SQLite settings cleared below. Remove the exact pairing scope too,
+  // otherwise unpairing would leave private screenshots readable on-device.
+  clearCachedAttachments(scope);
+  await clearDurableEventScope(scope);
+  await retireDurableCommandScope(scope);
+  // The queue owns exact scoped produced files, not arbitrary picker or
+  // history paths. Persist its retirement fence before any late writer runs.
+  if (typeof clearRemoteQueuedScope === 'function') await clearRemoteQueuedScope(scope).catch(() => undefined);
   const store = settings(); if (!store) return;
   await serial(scope, async () => {
     for (const key of await readIndex(store, scope)) await store.setSetting(threadKey(scope, key), null);

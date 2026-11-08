@@ -1,0 +1,2 @@
+export interface WorkspaceShortcutActions {active:boolean;visible:boolean;onBrowser:()=>void;onReview:()=>void;onSideChat:()=>void;onFiles:()=>void;onTerminal:()=>void;onClose:()=>void;onRestore:()=>void;onPrevious:()=>void;onNext:()=>void;onCloseOthers:()=>void;onCycleLayout:()=>void;onToggleFull:()=>void;onTogglePanel:()=>void;}
+export function useWorkspaceShortcuts(_actions:WorkspaceShortcutActions){}

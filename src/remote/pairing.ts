@@ -35,7 +35,11 @@ export function readPairQr(raw: string, selectedHubUrl: string | null, now = Dat
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw new Error('这不是 Salcara 电脑配对二维码'); }
   if (!value || typeof value !== 'object') throw new Error('二维码内容无效');
-  const qr = value as Partial<PairQr>;
+  const qr = value as Partial<PairQr> & { mode?: unknown };
+  // The Bridge's LAN direct-relay QR uses a separate WebSocket challenge and
+  // persistent phone identity. It is deliberately not a Hub pair ticket: do
+  // not try to discover its ws:// URL or store its token as a Hub credential.
+  if (qr.mode === 'direct') throw new Error('当前手机版本暂不支持局域网直连，请使用中转站二维码');
   if (qr.type !== 'salcara-remote-pair' || qr.version !== 1 || typeof qr.hubUrl !== 'string') throw new Error('这不是支持的 Salcara 电脑配对二维码');
   const endpoint = canonicalHubUrl(qr.hubUrl, allowLoopback);
   if (qr.hubUrl !== endpoint || selectedHubUrl && endpoint !== canonicalHubUrl(selectedHubUrl, allowLoopback)) throw new Error('二维码的中转站与当前选择不一致，请先连接该中转站');

@@ -28,27 +28,44 @@ const agent: AgentProfile = { id: 'codex', name: 'Codex', tool: 'codex', availab
 beforeEach(() => { jest.clearAllMocks(); });
 afterEach(() => { jest.useRealTimers(); });
 
-test('model popup contains a concise API entry', async () => {
-  const api = jest.fn();
-  const view = await render(<ModelPopover visible anchor={null} value="" fallback="gpt-fixture" models={['gpt-fixture']} loading={false} apiName="主力" onApi={api} onClose={jest.fn()} onSelect={jest.fn()} onRefresh={jest.fn()} />);
-  await fireEvent.press(view.getByLabelText('更换对话 API'));
-  expect(view.getByText('API：主力')).toBeTruthy(); expect(api).toHaveBeenCalledTimes(1);
+test('typed provider conditions guide only their actual recovery instead of guessing from error prose', () => {
+  expect(apiProblem('localized unavailable', 'usage_limit')?.kind).toBe('quota');
+  expect(apiProblem('localized unavailable', 'upstream_rate_limit')?.kind).toBe('rate');
+  expect(apiProblem('localized unavailable', 'upstream_unauthorized')?.kind).toBe('key');
+  expect(apiProblem('HTTP 429 invalid api key', 'model_capacity')?.kind).toBe('model_capacity');
+  for (const code of ['context_limit', 'session_budget', 'upstream_bad_request', 'upstream_forbidden', 'upstream_connection_failed',
+    'response_stream_interrupted', 'response_retry_exhausted', 'upstream_internal_error', 'policy_rejected', 'sandbox_error',
+    'thread_rollback_failed', 'turn_not_steerable', 'unsupported_item', 'unknown_turn_status', 'unknown_execution_error']) {
+    expect(apiProblem('invalid_api_key HTTP 401 insufficient_quota', code)).toBeNull();
+  }
+  expect(apiProblem(new HubError('invalid_api_key', 401, 'upstream_unauthorized'))).toBeNull(); // Hub authentication is not upstream authentication.
 });
 
-test('model popup dismisses through its backdrop without a visible close action or accidental model/refresh presses', async () => {
+test('model popup keeps API and reasoning configuration outside the model list', async () => {
+  const view = await render(<ModelPopover visible value="" fallback="gpt-fixture" models={['gpt-fixture']} loading={false} onClose={jest.fn()} onSelect={jest.fn()} onRefresh={jest.fn()} />);
+  expect(view.getByRole('radio', { name: 'gpt-fixture' })).toBeTruthy();
+  expect(view.queryByLabelText('更换对话 API')).toBeNull(); expect(view.queryByText('推理强度')).toBeNull();
+});
+
+test('model popup confirms a changed model only on outside dismissal and leaves unchanged selections alone', async () => {
   const close = jest.fn(), select = jest.fn(), refresh = jest.fn();
-  const popup = (visible: boolean) => <ModelPopover visible={visible} anchor={null} value="" fallback="gpt-fixture" models={['gpt-fixture']} loading={false}
+  const popup = (visible: boolean) => <ModelPopover visible={visible} anchor={null} value="" fallback="gpt-fixture" models={['gpt-fixture', 'deepseek-chat']} loading={false}
     onClose={close} onSelect={select} onRefresh={refresh} />;
   const view = await render(popup(true));
   expect(view.queryByText('关闭')).toBeNull();
-  expect(view.queryByLabelText('关闭模型选择')).toBeNull();
-  // The modal card hides siblings from accessibility queries; the backdrop remains touchable.
-  await fireEvent.press(view.getByTestId('remote-model-backdrop', { includeHiddenElements: true }));
+  await fireEvent.press(view.getByRole('radio', { name: 'gpt-fixture' }));
+  // The transparent backdrop dismisses without an extra visible close control.
+  await fireEvent.press(view.getByTestId('remote-model-popover-backdrop', { includeHiddenElements: true }));
   expect(close).toHaveBeenCalledTimes(1); expect(select).not.toHaveBeenCalled(); expect(refresh).not.toHaveBeenCalled();
   close.mockClear();
   await view.rerender(popup(false)); await view.rerender(popup(true));
-  await fireEvent.press(view.getByRole('radio', { name: 'gpt-fixture' }));
-  expect(select).toHaveBeenCalledWith('gpt-fixture'); expect(close).not.toHaveBeenCalled(); expect(refresh).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByRole('radio', { name: 'deepseek-chat' }));
+  expect(select).not.toHaveBeenCalled(); expect(close).not.toHaveBeenCalled(); expect(refresh).not.toHaveBeenCalled();
+  expect(view.getByRole('radio', { name: 'deepseek-chat' }).props.accessibilityState.checked).toBe(true);
+  await fireEvent.press(view.getByTestId('remote-model-popover-backdrop', { includeHiddenElements: true }));
+  expect(select).toHaveBeenCalledWith('deepseek-chat'); expect(close).toHaveBeenCalledTimes(1); expect(refresh).not.toHaveBeenCalled();
+  close.mockClear();
+  await view.rerender(popup(false)); await view.rerender(popup(true));
   await fireEvent.press(view.getByLabelText('刷新模型列表'));
   expect(refresh).toHaveBeenCalledTimes(1); expect(close).not.toHaveBeenCalled(); expect(select).toHaveBeenCalledTimes(1);
 });
@@ -65,24 +82,29 @@ test('a managed API popup lists only verified catalog members, not old current/d
 test('conversation API switch passes original session and uses opaque computer handle only', async () => {
   const changed = jest.fn(), close = jest.fn(); mockSetApi.mockResolvedValue({ ...agent, api: { ...agent.api, name: '备用', model: 'deepseek-chat', source: 'phone' } });
   const view = await render(<ApiPicker visible deviceId="pc" agent={agent} apis={[{ id: 'api_opaque', name: '备用', models: ['deepseek-chat'] }]} sessionKey="codex:original" onChanged={changed} onClose={close} />);
+  expect(view.queryByLabelText('使用这个设置')).toBeNull();
   await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
   expect(mockSetApi).toHaveBeenCalledWith('pc', 'codex', 'api_opaque', '', 'codex:original');
-  expect(changed).toHaveBeenCalledWith(expect.objectContaining({ api: expect.objectContaining({ model: 'deepseek-chat' }) })); expect(close).toHaveBeenCalledTimes(1);
+  expect(changed).toHaveBeenCalledWith(expect.objectContaining({ api: expect.objectContaining({ model: 'deepseek-chat' }) }), 'api_opaque'); expect(close).toHaveBeenCalledTimes(1);
   expect(mockToast).not.toHaveBeenCalled();
   expect(view.queryByText('原对话保留，下一轮后台重连。')).toBeNull();
 });
 
 test('running or uncertain task cannot switch API', async () => {
-  const view = await render(<ApiPicker visible deviceId="pc" agent={agent} apis={[]} blocked="先核对待确认消息，再换 API" onClose={jest.fn()} />);
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.disabled).toBe(true);
-  await fireEvent.press(view.getByLabelText('使用这个设置')); expect(mockSetApi).not.toHaveBeenCalled();
+  const view = await render(<ApiPicker visible deviceId="pc" agent={agent} apis={[{ id: 'api_opaque', name: '备用', models: [] }]} blocked="先核对待确认消息，再换 API" onClose={jest.fn()} />);
+  expect(view.queryByLabelText('使用这个设置')).toBeNull();
+  for (const choice of view.getAllByRole('radio')) {
+    expect(choice.props.accessibilityState.disabled).toBe(true);
+    await fireEvent.press(choice);
+  }
+  expect(mockSetApi).not.toHaveBeenCalled();
 });
 
 test('older Bridge cannot silently ignore the conversation API safety guard', async () => {
   const view = await render(<ApiPicker visible deviceId="pc" agent={{ ...agent, conversationApiSwitch: undefined }} apis={[]} sessionKey="codex:original" onClose={jest.fn()} />);
   expect(view.getByText('请先更新电脑端 Bridge')).toBeTruthy();
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
+  expect(view.getByRole('radio', { name: '主力' }).props.accessibilityState.disabled).toBe(true);
+  await fireEvent.press(view.getByRole('radio', { name: '主力' }));
   expect(mockSetApi).not.toHaveBeenCalled();
 });
 
@@ -90,11 +112,13 @@ test('late switch receipt updates the original operation without reopening a dis
   let finish!: (profile?: AgentProfile) => void;
   mockSetApi.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
   const close = jest.fn(), changed = jest.fn();
-  const view = await render(<ApiPicker visible deviceId="pc" agent={agent} apis={[]} onClose={close} onChanged={changed} />);
-  await act(async () => { fireEvent.press(view.getByLabelText('使用这个设置')); });
-  await view.rerender(<ApiPicker visible={false} deviceId="pc" agent={agent} apis={[]} onClose={close} onChanged={changed} />);
+  const phoneAgent = { ...agent, api: { ...agent.api, source: 'phone' as const, accountId: 'api_opaque' } };
+  const view = await render(<ApiPicker visible deviceId="pc" agent={phoneAgent} apis={[]} onClose={close} onChanged={changed} />);
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
+  expect(mockSetApi).toHaveBeenCalledWith('pc', 'codex', '', '');
+  await view.rerender(<ApiPicker visible={false} deviceId="pc" agent={phoneAgent} apis={[]} onClose={close} onChanged={changed} />);
   await act(async () => { finish(agent); });
-  expect(close).not.toHaveBeenCalled(); expect(changed).toHaveBeenCalledWith(agent); expect(mockToast).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled(); expect(changed).toHaveBeenCalledWith(agent, ''); expect(mockToast).not.toHaveBeenCalled();
 });
 
 test('phone submits selected choices and custom text; never auto-selects answers', async () => {
@@ -134,6 +158,8 @@ test('MCP boolean and numeric validation is strict, and cancel does not invent a
 test('provider failures guide API changes, while pairing/network failures do not', () => {
   expect(apiProblem('invalid_api_key')).toMatchObject({ kind: 'key' });
   expect(apiProblem('insufficient_quota')).toMatchObject({ kind: 'quota' });
+  expect(apiProblem('Selected model is at capacity. Please try a different model.')).toMatchObject({ kind: 'model_capacity' });
+  expect(apiProblem('模型容量已满')).toMatchObject({ kind: 'model_capacity' });
   expect(apiProblem('上游返回 HTTP 429')).toMatchObject({ kind: 'rate' });
   expect(apiProblem('上游返回 HTTP 404')).toMatchObject({ kind: 'interface' });
   expect(apiProblem(new HubError('配对凭证无效或已撤销', 401))).toBeNull();

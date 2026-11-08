@@ -42,7 +42,7 @@ test.each(['page', 'sheet'] as const)('locked %s declines both dismissal gesture
   expect(bottom.onMoveShouldSetPanResponder?.(event(), gesture({ dy: 80 }))).toBe(false);
   expect(page.onMoveShouldSetPanResponder?.(event(160), gesture({ dx: 160 }))).toBe(false);
   await perform(() => view.root?.props.onRequestClose());
-  await fireEvent.press(view.getByRole('button', { name: presentation === 'page' ? '返回' : '关闭' }));
+  await fireEvent.press(presentation === 'page' ? view.getByRole('button', { name: '返回' }) : view.getByTestId('sheet-backdrop'));
   expect(close).not.toHaveBeenCalled();
 });
 
@@ -71,7 +71,7 @@ test.each(['page', 'sheet'] as const)('default %s remains dismissible without th
   expect(callbacks.onMoveShouldSetPanResponder?.(event(move.dx), move)).toBe(true);
   await perform(() => callbacks.onPanResponderRelease?.(event(move.dx), move));
   await perform(() => view.root?.props.onRequestClose());
-  await fireEvent.press(view.getByRole('button', { name: presentation === 'page' ? '返回' : '关闭' }));
+  await fireEvent.press(presentation === 'page' ? view.getByRole('button', { name: '返回' }) : view.getByTestId('sheet-backdrop'));
   expect(close).toHaveBeenCalledTimes(3);
 });
 
@@ -84,4 +84,56 @@ test('unlocking an already mounted page re-enables its original gesture callback
   expect(callbacks.onMoveShouldSetPanResponder?.(event(160), move)).toBe(true);
   await perform(() => callbacks.onPanResponderRelease?.(event(160), move));
   expect(close).toHaveBeenCalledTimes(1);
+});
+
+test.each(['page', 'sheet'] as const)('%s routes system back separately from its close button and gesture', async presentation => {
+  const close = jest.fn(), systemBack = jest.fn();
+  const view = await render(<Sheet visible title="对话" presentation={presentation} onClose={close} onSystemBack={systemBack}><Text>当前会话</Text></Sheet>);
+  await perform(() => view.root?.props.onRequestClose());
+  expect(systemBack).toHaveBeenCalledTimes(1);
+  expect(close).not.toHaveBeenCalled();
+  await fireEvent.press(presentation === 'page' ? view.getByRole('button', { name: '返回' }) : view.getByTestId('sheet-backdrop'));
+  const callbacks = mockPans[presentation === 'page' ? 1 : 0];
+  const move = presentation === 'page' ? gesture({ dx: 160, vx: 1 }) : gesture({ dy: 160, vy: 1 });
+  await perform(() => callbacks.onPanResponderRelease?.(event(move.dx), move));
+  expect(close).toHaveBeenCalledTimes(2);
+  expect(systemBack).toHaveBeenCalledTimes(1);
+});
+
+test.each(['page', 'sheet'] as const)('locked %s blocks both custom system back and close actions', async presentation => {
+  const close = jest.fn(), systemBack = jest.fn();
+  const view = await render(<Sheet visible title="正在切换 API" presentation={presentation} dismissible={false} onClose={close} onSystemBack={systemBack}><Text>等待结果</Text></Sheet>);
+  await perform(() => view.root?.props.onRequestClose());
+  await fireEvent.press(presentation === 'page' ? view.getByRole('button', { name: '返回' }) : view.getByTestId('sheet-backdrop'));
+  const callbacks = mockPans[presentation === 'page' ? 1 : 0];
+  const move = presentation === 'page' ? gesture({ dx: 160, vx: 1 }) : gesture({ dy: 160, vy: 1 });
+  await perform(() => callbacks.onPanResponderRelease?.(event(move.dx), move));
+  expect(close).not.toHaveBeenCalled();
+  expect(systemBack).not.toHaveBeenCalled();
+});
+
+test.each(['page', 'sheet'] as const)('%s resets drag when a nested close is consumed and the sheet stays open', async presentation => {
+  const systemBack = jest.fn(), close = jest.fn();
+  function NestedPage() {
+    const [toolOpen, setToolOpen] = React.useState(true);
+    return <Sheet visible title="工作区" presentation={presentation} onSystemBack={systemBack} onClose={() => { close(); setToolOpen(false); }}>
+      <Text>{toolOpen ? '正在查看文件' : '仍在当前对话'}</Text>
+    </Sheet>;
+  }
+  const view = await render(<NestedPage />);
+  const callbacks = mockPans[presentation === 'page' ? 1 : 0];
+  const move = presentation === 'page' ? gesture({ dx: 180, vx: 1 }) : gesture({ dy: 180, vy: 1 });
+  await perform(() => callbacks.onPanResponderMove?.(event(move.dx), move));
+  const valueSpy = jest.mocked(Animated.Value.prototype.setValue);
+  expect(valueSpy).toHaveBeenLastCalledWith(180);
+  const draggedValue = valueSpy.mock.contexts[valueSpy.mock.contexts.length - 1];
+  jest.mocked(Animated.spring).mockClear(); valueSpy.mockClear();
+  await perform(() => callbacks.onPanResponderRelease?.(event(move.dx), move));
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(systemBack).not.toHaveBeenCalled();
+  expect(view.getByText('仍在当前对话')).toBeTruthy();
+  expect(view.root?.props.visible).toBe(true);
+  expect(Animated.spring).toHaveBeenCalledWith(draggedValue, expect.objectContaining({ toValue: 0, useNativeDriver: true }));
+  expect(valueSpy).toHaveBeenLastCalledWith(0);
+  expect(valueSpy.mock.contexts[valueSpy.mock.contexts.length - 1]).toBe(draggedValue);
 });

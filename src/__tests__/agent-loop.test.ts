@@ -136,6 +136,40 @@ test('a terminal tool ends the turn and keeps the text written before it', async
   expect(result.text).toBe('这就画。');
 });
 
+test('a native call mirrored by a text marker executes only once in text mode', async () => {
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: {
+    content: '这就画。\n<<<TOOL generate_image {"prompt":"猫"}>>>',
+    tool_calls: [{ index: 0, id: 'image', function: { name: 'generate_image', arguments: '{"prompt":"猫"}' } }],
+  } }] }])).mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '完成了。' } }] }]));
+  const kit = toolkit({ generate_image: { content: '已生成 图1', imageGenerated: true } });
+  await runAgentTurn({ ...request, toolMode: 'text', imageAvailable: true, toolkit: kit });
+  expect(kit.calls).toHaveLength(1);
+  expect(kit.calls[0].id).toBe('image');
+});
+
+test('conflicting native and text calls cannot silently lose a tool or draw an extra image', async () => {
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: {
+    content: '查一下并画图。\n<<<TOOL generate_image {"prompt":"猫"}>>>',
+    tool_calls: [{ index: 0, id: 'search', function: { name: 'web_search', arguments: '{"query":"猫"}' } }],
+  } }] }]));
+  const kit = toolkit();
+  await expect(runAgentTurn({ ...request, toolMode: 'text', imageAvailable: true, toolkit: kit })).rejects.toThrow('互相冲突的工具调用');
+  expect(kit.calls).toHaveLength(0);
+  expect(mockFetch).toHaveBeenCalledTimes(1);
+});
+
+test.each([false, true])('only successful image execution permits a later receipt (imageGenerated=%s)', async (imageGenerated) => {
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: {
+    tool_calls: [{ index: 0, id: 'image', function: { name: 'generate_image', arguments: '{"prompt":"猫"}' } }],
+  } }] }])).mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '检查完了。\n[我调用了 generate_image，已生成 图1。作图描述：猫]' } }] }]));
+  const kit = toolkit({ generate_image: imageGenerated ? { content: '已生成 图1', imageGenerated: true } : { content: '当前不能作图。' } });
+  const result = runAgentTurn({ ...request, toolMode: 'native', imageAvailable: true, toolkit: kit });
+  if (imageGenerated) await expect(result).resolves.toMatchObject({ text: '检查完了。' });
+  else await expect(result).rejects.toThrow('本轮未生成图片');
+  expect(kit.calls).toHaveLength(1);
+  expect(mockFetch).toHaveBeenCalledTimes(2);
+});
+
 test('the last allowed step forbids more tools and asks for a final answer', async () => {
   const toolCall = () => sse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: `c${Math.random()}`, function: { name: 'web_search', arguments: '{"query":"x"}' } }] } }] }]);
   mockFetch.mockResolvedValueOnce(toolCall()).mockResolvedValueOnce(toolCall())

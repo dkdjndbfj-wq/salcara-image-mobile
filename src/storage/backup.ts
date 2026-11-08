@@ -5,6 +5,7 @@ import { strFromU8, strToU8, Unzip, UnzipInflate, Zip, ZipDeflate } from 'fflate
 
 import type { Conversation, ChatMessage } from '../domain';
 import { database, listMessages } from './database';
+import { messageGeneratedImages } from '../generated-images';
 
 /**
  * Getting conversations off the phone.
@@ -44,7 +45,8 @@ export function conversationMarkdown(title: string, messages: ChatMessage[], now
     lines.push(`## 助手${who ? `（${who}）` : ''}`, '');
     const text = (message.text ?? '').trim();
     if (text) lines.push(text, '');
-    if (message.imageUri || message.remoteImageUrl) lines.push(`> 生成了一张图片${message.preparedPrompt ? `：${message.preparedPrompt.trim()}` : ''}`, '');
+    const count = messageGeneratedImages(message).filter((image) => image.uri || image.remoteUrl).length;
+    if (count || message.remoteImageUrl) lines.push(`> 生成了${count > 1 ? `${count} 张` : '一张'}图片${message.preparedPrompt ? `：${message.preparedPrompt.trim()}` : ''}`, '');
     const sources = message.agent?.sources ?? [];
     if (sources.length) lines.push('**来源**', '', ...sources.map((source, index) => `${index + 1}. [${source.title || source.url}](${source.url})`), '');
     if (message.status === 'error' && message.error) lines.push(`> 没有完成：${message.error}`, '');

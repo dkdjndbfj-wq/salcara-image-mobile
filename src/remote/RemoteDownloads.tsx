@@ -1,12 +1,10 @@
 import { Linking } from 'react-native';
 import { showToast } from '../components/ui';
 
-// Temporary GitHub homepage placeholder, not the computer app's download repository.
-// Replace only after the official Salcara desktop repository is verified.
-export const DESKTOP_GITHUB_URL: string = 'https://github.com/';
+// Keep the entry stable when a new desktop release is published.
+export const DESKTOP_GITHUB_URL: string = 'https://github.com/dkdjndbfj-wq/salcara-desktop/releases/latest';
 
 function desktopGithubUrl(value: string): boolean {
-  if (value === 'https://github.com/') return true;
   if (!/^https:\/\/github\.com\/[a-z0-9-]+\/[a-z0-9_.-]+(?:\/releases(?:\/latest)?)?\/?$/i.test(value)) return false;
   try {
     const parsed = new URL(value);

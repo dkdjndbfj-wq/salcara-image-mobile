@@ -4,6 +4,8 @@ import * as SQLite from 'expo-sqlite';
 import { ALL_CAPABILITIES, parseTrace, traceFileUris, type AgentCapability, type CustomAgent, type HistoryHit, type Memory } from '../agent/types';
 import { vendorById } from '../api/vendors';
 import type { ChatMessage, Conversation, DocumentAttachment, ProviderProfile, ReferenceImage } from '../domain';
+import { normalizeGeneratedImages, validateImageCount } from '../generated-images';
+import { imageTaskFileUris } from './image-task-files';
 
 const DATABASE_NAME = 'salcara-image.db';
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -52,6 +54,8 @@ type MessageRow = {
   size: string;
   transparent: number;
   image_uri: string | null;
+  generated_images_json?: string | null;
+  image_count?: number;
   remote_image_url: string | null;
   references_json: string;
   documents_json: string;
@@ -237,6 +241,8 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
       await addMissingColumns(db, 'conversations', { mode: "TEXT NOT NULL DEFAULT 'image'", agent_id: 'TEXT', kind: "TEXT NOT NULL DEFAULT 'assistant'", character_id: 'TEXT' });
       await addMissingColumns(db, 'messages', {
         remote_image_url: 'TEXT',
+        generated_images_json: "TEXT NOT NULL DEFAULT '[]'",
+        image_count: 'INTEGER NOT NULL DEFAULT 1',
         documents_json: "TEXT NOT NULL DEFAULT '[]'",
         text: 'TEXT',
         prepared_prompt: 'TEXT',
@@ -249,13 +255,70 @@ async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         agent_json: 'TEXT',
       });
       await detachConversationsFromProviders(db);
-      await db.runAsync(
-        `UPDATE messages SET status = 'interrupted', error = '应用在生成期间被关闭' WHERE status = 'pending'`,
-      );
+      await recoverInterruptedMessages(db);
       return db;
     });
   }
   return databasePromise;
+}
+
+const CLOSED_DURING_GENERATION = '应用在生成期间被关闭';
+
+/**
+ * An image is saved before the agent finishes its follow-up text/checks. A cold
+ * start must keep that delivered result instead of offering a paid redraw.
+ * Also repair rows marked interrupted by older versions of this recovery.
+ */
+async function recoverInterruptedMessages(db: SQLite.SQLiteDatabase): Promise<void> {
+  const rows = await db.getAllAsync<Pick<MessageRow, 'id' | 'role' | 'status' | 'image_uri' | 'remote_image_url' | 'agent_json' | 'generated_images_json'>>(
+    `SELECT id, role, status, image_uri, remote_image_url, agent_json, generated_images_json FROM messages
+     WHERE status = 'pending' OR (status = 'interrupted' AND error = ?)`,
+    CLOSED_DURING_GENERATION,
+  );
+  for (const row of rows) {
+    // A remote URL is a saved download job, not proof that its image arrived.
+    // Local images may use Expo file/content URIs or imported absolute/relative paths.
+    const uri = row.image_uri?.trim() ?? '';
+    const localImage = Boolean(uri) && (!/^[a-z][a-z0-9+.-]*:/i.test(uri)
+      || /^(?:file|content):\/\//i.test(uri) || /^[a-z]:[\\/]/i.test(uri));
+    const images = parseGeneratedImages(row.generated_images_json).map((item) => item.status === 'pending'
+      ? { ...item, status: 'error' as const, error: item.remoteUrl ? '图片下载已中断' : CLOSED_DURING_GENERATION } : item);
+    const delivered = row.role === 'assistant' && (images.some((item) => item.status === 'complete' && item.uri)
+      || (localImage && !row.remote_image_url?.trim()));
+    const trace = finishRecoveredTrace(row.agent_json, delivered);
+    await db.runAsync(
+      `UPDATE messages SET status = ?, error = ?, agent_json = ?, generated_images_json = ?
+       WHERE id = ? AND (status = 'pending' OR (status = 'interrupted' AND error = ?))`,
+      delivered ? 'complete' : 'interrupted', delivered ? null : CLOSED_DURING_GENERATION,
+      trace, JSON.stringify(images), row.id, CLOSED_DURING_GENERATION,
+    );
+  }
+}
+
+function finishRecoveredTrace(json: string | null | undefined, delivered: boolean): string | null {
+  if (!json) return json ?? null;
+  try {
+    const trace = JSON.parse(json);
+    if (!trace || typeof trace !== 'object' || !Array.isArray(trace.steps)) return json;
+    const now = Date.now();
+    let lastDrawing = -1;
+    trace.steps.forEach((step: { kind?: string; status?: string } | null, index: number) => {
+      if (step?.kind === 'image' && step.status === 'running') lastDrawing = index;
+    });
+    let changed = false;
+    trace.steps = trace.steps.map((step: { status?: string; error?: string; detail?: string; endedAt?: number } | null, index: number) => {
+      if (!step || step.status !== 'running') return step;
+      changed = true;
+      // Only the drawing backed by the saved image is done. Searches, reviews,
+      // and other work that was running when the process died remain unfinished.
+      return delivered && index === lastDrawing
+        ? { ...step, status: 'done', error: undefined, detail: step.detail || '已生成', endedAt: step.endedAt ?? now }
+        : { ...step, status: 'error', error: step.error || '已中断', endedAt: step.endedAt ?? now };
+    });
+    return changed ? JSON.stringify(trace) : json;
+  } catch {
+    return json;
+  }
 }
 
 /**
@@ -387,6 +450,19 @@ export async function getSetting(key: string): Promise<string | null> {
   return row?.value ?? null;
 }
 
+/** Exact remote image owners, including cache rows whose index write failed.
+ * The collector must see every row, not only the current pairing or LRU index.
+ * Oversized/corrupt storage aborts collection instead of losing references. */
+export async function remoteImageReferenceRecords(): Promise<Array<{ key: string; value: string }>> {
+  const db = await getDatabase();
+  const where = "key IN ('remote_composer_drafts_v1', 'remote_queued_v1', 'remote_pending_delivery_v1') OR key GLOB 'remote.cache.t.*'";
+  const bounds = await db.getFirstAsync<{ count: number; bytes: number }>(`SELECT COUNT(*) AS count, COALESCE(SUM(length(value)), 0) AS bytes FROM app_settings WHERE ${where}`);
+  if (!bounds || bounds.count > 4096 || bounds.bytes > 64 * 1024 * 1024) throw new Error('远程图片引用记录超出清理范围');
+  const rows = await db.getAllAsync<{ key: string; value: string }>(`SELECT key, value FROM app_settings WHERE ${where} LIMIT 4097`);
+  if (rows.length > 4096 || rows.reduce((sum, row) => sum + (typeof row.value === 'string' ? row.value.length : Infinity), 0) > 64 * 1024 * 1024) throw new Error('远程图片引用记录超出清理范围');
+  return rows;
+}
+
 export async function setSetting(key: string, value: string | null): Promise<void> {
   const db = await getDatabase();
   if (value === null) { await db.runAsync('DELETE FROM app_settings WHERE key = ?', key); return; }
@@ -403,8 +479,9 @@ export async function reassignConversations(fromProviderId: string, toProviderId
 
 /** File names of every local file a saved message refers to (images, masks, references, documents). */
 export async function listReferencedFileNames(): Promise<Set<string>> {
-  const rows = await (await getDatabase()).getAllAsync<{ image_uri: string | null; mask_uri: string | null; references_json: string; documents_json: string; agent_json: string | null }>(
-    'SELECT image_uri, mask_uri, references_json, documents_json, agent_json FROM messages',
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<{ image_uri: string | null; generated_images_json: string | null; mask_uri: string | null; references_json: string; documents_json: string; agent_json: string | null }>(
+    'SELECT image_uri, generated_images_json, mask_uri, references_json, documents_json, agent_json FROM messages',
   );
   const names = new Set<string>();
   const add = (uri: unknown) => {
@@ -414,12 +491,17 @@ export async function listReferencedFileNames(): Promise<Set<string>> {
   };
   for (const row of rows) {
     add(row.image_uri);
+    parseGeneratedImages(row.generated_images_json).forEach((image) => add(image.uri));
     add(row.mask_uri);
     for (const json of [row.references_json, row.documents_json]) {
       try { (JSON.parse(json || '[]') as Array<{ uri?: unknown }>).forEach((item) => add(item?.uri)); } catch { /* malformed row */ }
     }
     traceFileUris(parseTrace(row.agent_json)).forEach(add);
   }
+  const tasks = await db.getAllAsync<{ value: string }>(
+    "SELECT s.value FROM app_settings s INNER JOIN messages m ON s.key = 'image_task:' || m.id",
+  );
+  tasks.forEach((task) => imageTaskFileUris(task.value).forEach(add));
   return names;
 }
 
@@ -509,8 +591,8 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
     `INSERT INTO messages
       (id, conversation_id, role, prompt, mode, status, provider_id, model, quality, size,
        transparent, image_uri, remote_image_url, references_json, mask_uri, error, elapsed_ms, created_at,
-       documents_json, text, prepared_prompt, analysis_model, analysis_provider_id, request_api, analysis_api, creation_skill_json, creation_notes, agent_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       documents_json, text, prepared_prompt, analysis_model, analysis_provider_id, request_api, analysis_api, creation_skill_json, creation_notes, agent_json, generated_images_json, image_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     message.id,
     message.conversationId,
     message.role,
@@ -539,6 +621,8 @@ export async function insertMessage(message: ChatMessage): Promise<void> {
     null,
     null,
     serializeTrace(message),
+    JSON.stringify(normalizeGeneratedImages(message.generatedImages)),
+    validateImageCount(message.imageCount),
   );
 }
 
@@ -546,7 +630,7 @@ export async function updateMessage(message: ChatMessage): Promise<void> {
   await (await getDatabase()).runAsync(
     `UPDATE messages SET status = ?, image_uri = ?, remote_image_url = ?, error = ?, elapsed_ms = ?, references_json = ?, mask_uri = ?,
        documents_json = ?, text = ?, prepared_prompt = ?, analysis_model = ?, analysis_provider_id = ?, request_api = ?, analysis_api = ?, creation_skill_json = ?, creation_notes = ?,
-       mode = ?, provider_id = ?, model = ?, quality = ?, size = ?, transparent = ?, prompt = ?, agent_json = ?
+       mode = ?, provider_id = ?, model = ?, quality = ?, size = ?, transparent = ?, prompt = ?, agent_json = ?, generated_images_json = ?, image_count = ?
      WHERE id = ?`,
     message.status,
     message.imageUri,
@@ -572,12 +656,22 @@ export async function updateMessage(message: ChatMessage): Promise<void> {
     message.transparent ? 1 : 0,
     message.prompt,
     serializeTrace(message),
+    JSON.stringify(normalizeGeneratedImages(message.generatedImages)),
+    validateImageCount(message.imageCount),
     message.id,
   );
 }
 
 function serializeTrace(message: ChatMessage): string | null {
   return message.agent ? JSON.stringify(message.agent) : null;
+}
+
+function parseGeneratedImages(raw: string | null | undefined) {
+  try { return normalizeGeneratedImages(JSON.parse(raw || '[]')); } catch { return []; }
+}
+
+function savedImageCount(value: number | undefined): number {
+  try { return validateImageCount(value); } catch { return 1; }
 }
 
 /** Addresses saved by older versions could carry a wrong trailing /v1 (e.g. …/api/v3/v1); read them repaired. */
@@ -657,6 +751,8 @@ function mapMessage(row: MessageRow): ChatMessage {
     size: row.size,
     transparent: row.transparent === 1,
     imageUri: row.image_uri,
+    generatedImages: parseGeneratedImages(row.generated_images_json),
+    imageCount: savedImageCount(row.image_count),
     remoteImageUrl: row.remote_image_url,
     references,
     documents,

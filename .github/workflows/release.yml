@@ -35,6 +35,25 @@ jobs:
           release_version="$(node -p 'require("./package.json").version')"
           [[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           printf 'tag=v%s\n' "$release_version" >> "$GITHUB_OUTPUT"
+      - name: Validate exact release notes before building
+        id: notes
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          candidates=("docs/RELEASE-${RELEASE_TAG}.md" "docs/RELEASE-${RELEASE_TAG#v}.md")
+          notes_file=""
+          for candidate in "${candidates[@]}"; do
+            if [[ -e "$candidate" || -L "$candidate" ]]; then
+              [[ -f "$candidate" && ! -L "$candidate" && -s "$candidate" && -z "$notes_file" ]] || { echo 'Release notes must be a single non-empty regular file.' >&2; exit 1; }
+              grep -q '[^[:space:]]' "$candidate" || { echo 'Release notes cannot be whitespace only.' >&2; exit 1; }
+              notes_file="$candidate"
+            fi
+          done
+          [[ -n "$notes_file" ]] || { echo 'Exact version release notes are missing.' >&2; exit 1; }
+          printf 'path=%s\n' "$notes_file" >> "$GITHUB_OUTPUT"
       - run: npm run typecheck
       - run: npm test
       - run: node --test scripts/update-manifest-core.test.mjs scripts/release-workflow-contract.test.mjs
@@ -103,14 +122,13 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ steps.notes.outputs.path }}
         shell: bash
         run: |
-          notes_file="docs/RELEASE-${GITHUB_REF_NAME}.md"
-          if [[ -f "$notes_file" ]]; then
-            gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara AI $GITHUB_REF_NAME" --notes-file "$notes_file"
-          else
-            gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara AI $GITHUB_REF_NAME" --generate-notes --notes "Android 签名 APK 与 SHA-256。安装和服务商配置见 README；隐私说明见 PRIVACY.md。"
-          fi
+          set -euo pipefail
+          [[ -f "$RELEASE_NOTES" && ! -L "$RELEASE_NOTES" && -s "$RELEASE_NOTES" ]]
+          grep -q '[^[:space:]]' "$RELEASE_NOTES"
+          gh release create "$GITHUB_REF_NAME" salcara-image-android-*.apk salcara-image-android-*.sha256 --title "Salcara AI $GITHUB_REF_NAME" --notes-file "$RELEASE_NOTES"
       - name: Publish released-only update manifest
         if: startsWith(github.ref, 'refs/tags/v')
         env:

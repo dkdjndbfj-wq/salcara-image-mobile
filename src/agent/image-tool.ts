@@ -1,4 +1,5 @@
 import type { AspectRatio, ChatApi } from '../domain';
+import { MAX_GENERATED_IMAGES, validateImageCount } from '../generated-images';
 import { normalizeRatio } from '../image-sizes';
 
 /** What the conversation model decided to draw. */
@@ -8,11 +9,13 @@ export interface ImageToolCall {
   referenceImages: string[];
   aspectRatio: AspectRatio | null;
   transparent: boolean;
+  /** Omitted in old calls; defaults to one image. */
+  count?: number;
 }
 
 export const IMAGE_TOOL_NAME = 'generate_image';
 
-export const IMAGE_TOOL_DESCRIPTION = '生成或编辑一张图片。用户想得到一张图片时调用：画、生成、设计海报/头像/壁纸/插画/封面，或修改、编辑、换背景、换风格、扩图、上色、抠图、"把刚才那张改成……"。只是讨论、分析图片或文件、询问怎么作图、让你写提示词时不要调用。';
+export const IMAGE_TOOL_DESCRIPTION = '生成或编辑图片，一次最多 10 张。用户想得到图片时调用：画、生成、设计海报/头像/壁纸/插画/封面，或修改、编辑、换背景、换风格、扩图、上色、抠图、"把刚才那张改成……"。只是讨论、分析图片或文件、询问怎么作图、让你写提示词时不要调用。';
 
 export const IMAGE_TOOL_PARAMETERS = {
   type: 'object',
@@ -33,6 +36,12 @@ export const IMAGE_TOOL_PARAMETERS = {
     transparent_background: {
       type: 'boolean',
       description: '用户要求透明背景、PNG 贴纸、抠图等时为 true。',
+    },
+    count: {
+      type: 'integer',
+      minimum: 1,
+      maximum: MAX_GENERATED_IMAGES,
+      description: '一次生成的图片张数，1 到 10。仅在用户明确要求多张时填写；默认 1。',
     },
   },
   required: ['prompt'],
@@ -61,11 +70,16 @@ export function parseImageToolArguments(raw: unknown): ImageToolCall | null {
     ? rawRefs.map((item) => normalizeImageLabel(String(item))).filter((item): item is string => Boolean(item))
     : typeof rawRefs === 'string' && normalizeImageLabel(rawRefs) ? [normalizeImageLabel(rawRefs)!] : [];
   const ratio = typeof record.aspect_ratio === 'string' ? record.aspect_ratio.trim() : '';
+  let count: number | undefined;
+  if (record.count !== undefined) {
+    try { count = validateImageCount(record.count); } catch { return null; }
+  }
   return {
     prompt: prompt.slice(0, 16_000),
     referenceImages: [...new Set(referenceImages)].slice(0, 4),
     aspectRatio: ratio && ratio !== 'auto' ? normalizeRatio(ratio) : null,
     transparent: record.transparent_background === true || record.transparent === true,
+    ...(count === undefined ? {} : { count }),
   };
 }
 
@@ -81,7 +95,8 @@ export function normalizeImageLabel(value: string): string | null {
  */
 export const TEXT_TOOL_OPEN = '<<<IMAGE';
 export const TEXT_TOOL_INSTRUCTIONS = `当前接口不支持函数调用。需要作图时，先用一句话告诉用户你要画什么，然后在回复最后单独输出一行：
-${TEXT_TOOL_OPEN} {"prompt":"完整作图描述","reference_images":["图1"],"aspect_ratio":"1:1","transparent_background":false}>>>
+${TEXT_TOOL_OPEN} {"prompt":"完整作图描述","reference_images":["图1"],"aspect_ratio":"1:1","transparent_background":false,"count":1}>>>
+用户明确要多张时将 count 设为对应张数（最多 10），否则为 1。
 不需要作图时绝对不要输出这一行。`;
 
 export function extractTextToolCall(text: string): { text: string; call: ImageToolCall | null } {

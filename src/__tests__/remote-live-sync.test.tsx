@@ -2,11 +2,12 @@ import React from 'react';
 import { AppState } from 'react-native';
 import { act, render } from '@testing-library/react-native';
 import { useLiveSync } from '../remote/useLiveSync';
+import { HubError } from '../remote/client';
 
 let change: ((next: string) => void) | undefined;
 let subscription: jest.SpyInstance;
-function Harness({ sync, enabled = true, wake = 0 }: { sync: (wait: number, signal?: AbortSignal) => Promise<void>; enabled?: boolean; wake?: number }) {
-  useLiveSync(enabled, enabled, false, sync, wake);
+function Harness({ sync, enabled = true, wake = 0, longPoll = false }: { sync: (wait: number, signal?: AbortSignal) => Promise<void>; enabled?: boolean; wake?: number; longPoll?: boolean }) {
+  useLiveSync(enabled, enabled, longPoll, sync, wake);
   return null;
 }
 beforeEach(() => {
@@ -90,4 +91,21 @@ test('leaving a thread aborts its held read instead of retaining a long-poll req
   expect(aborted).toBe(true);
   await advance(600_000);
   expect(sync).toHaveBeenCalledTimes(1);
+});
+
+test('capacity-limited long polls back off without spinning and reset after a successful read', async () => {
+  const sync = jest.fn<Promise<void>, [number, AbortSignal?]>()
+    .mockRejectedValueOnce(new HubError('read capacity fixture', 429, 'app_read_capacity'))
+    .mockRejectedValueOnce(new HubError('read capacity fixture', 429, 'app_read_capacity'))
+    .mockResolvedValueOnce(undefined)
+    .mockImplementation(() => new Promise(() => undefined));
+  const view = await render(<Harness sync={sync} longPoll />);
+  expect(sync).toHaveBeenCalledTimes(1); expect(sync.mock.calls[0][0]).toBe(20);
+  await advance(1999); expect(sync).toHaveBeenCalledTimes(1);
+  await advance(1); expect(sync).toHaveBeenCalledTimes(2);
+  await advance(3999); expect(sync).toHaveBeenCalledTimes(2);
+  await advance(1); expect(sync).toHaveBeenCalledTimes(3);
+  await advance(249); expect(sync).toHaveBeenCalledTimes(3);
+  await advance(1); expect(sync).toHaveBeenCalledTimes(4);
+  await view.unmount(); await advance(600_000); expect(sync).toHaveBeenCalledTimes(4);
 });

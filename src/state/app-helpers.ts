@@ -1,7 +1,10 @@
 import { deleteGeneratedFile } from '../agent/files';
 import { traceFileUris } from '../agent/types';
 import type { ChatMessage, ProviderProfile } from '../domain';
+import { messageGeneratedImages, validateImageCount } from '../generated-images';
 import { deleteLocalFile } from '../storage/files';
+import { getSetting, setSetting } from '../storage/database';
+import { imageTaskFileUris } from '../storage/image-task-files';
 
 export function pickChat(providers: ProviderProfile[], id: string | null): ProviderProfile | null {
   return providers.find((item) => item.id === id && item.chatModel) ?? providers.find((item) => item.chatModel) ?? null;
@@ -32,13 +35,33 @@ export function describeImageDefaults(provider: ProviderProfile | null): string 
   return [`模型 ${provider.model}`, provider.aspectRatio && `比例 ${provider.aspectRatio === 'auto' ? '自动' : provider.aspectRatio}`, provider.resolutionTier && `清晰度 ${provider.resolutionTier}`, provider.quality && `画质 ${provider.quality}`].filter(Boolean).join('，');
 }
 
+/** Image-only setups have no conversation model to turn an explicit count into tool arguments. */
+export function imageCountFromPrompt(prompt: string): number {
+  const match = /(?:生成|绘制|制作|画|来|要)\s*(?:给我|出|一下|一共|共)?\s*(\d{1,3}|[一二两三四五六七八九十]{1,3})\s*[张幅](?![\s]*嘴)/.exec(prompt);
+  if (!match) return 1;
+  const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const raw = match[1];
+  const count = /^\d+$/.test(raw) ? Number(raw) : raw === '十' ? 10 : raw.includes('十')
+    ? (digits[raw.split('十')[0]] || 1) * 10 + (digits[raw.split('十')[1]] || 0) : digits[raw];
+  return validateImageCount(count);
+}
+
 /** Deletes the files removed messages used, except those in `keep` (carried over into an edited message). */
-export function deleteMessageFiles(removed: ChatMessage[], keep: Set<string | null | undefined> = new Set()) {
+export async function deleteMessageFiles(removed: ChatMessage[], keep: Set<string | null | undefined> = new Set()) {
   const drop = (uri: string | null | undefined) => { if (uri && !keep.has(uri)) deleteLocalFile(uri); };
   for (const message of removed) {
     traceFileUris(message.agent).forEach((uri) => { if (!keep.has(uri)) { deleteGeneratedFile(uri); deleteLocalFile(uri); } });
-    drop(message.imageUri); drop(message.maskUri);
+    new Set([message.imageUri, ...messageGeneratedImages(message).map((image) => image.uri)]).forEach(drop);
+    drop(message.maskUri);
     message.references.forEach((reference) => drop(reference.uri));
     message.documents?.forEach((document) => drop(document.uri));
+  }
+  // An accepted asynchronous job may already own files before the final batch
+  // is attached to its message. Retire those files together with the message.
+  for (const id of new Set(removed.map((message) => message.id))) {
+    const key = `image_task:${id}`;
+    const saved = await getSetting(key);
+    imageTaskFileUris(saved).forEach(drop);
+    if (saved !== null) await setSetting(key, null);
   }
 }

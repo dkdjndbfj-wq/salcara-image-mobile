@@ -1,42 +1,58 @@
-import { Platform, Vibration } from 'react-native';
+import { AppState, Platform, Vibration } from 'react-native';
+import * as Haptics from 'expo-haptics';
 
 /**
- * Short, distinct taps for the programming model / effort controls.
- * Android only: React Native's iOS Vibration ignores durations and always
- * buzzes ~400 ms, which is the opposite of "短促". (iOS needs expo-haptics.)
- * Patterns are [wait, buzz, wait, buzz…] in ms; every buzz stays ≤ 22 ms.
+ * Native selection feedback respects the device's haptics settings. Android
+ * uses View.performHapticFeedback, not sub-10ms pulses many motors cannot feel.
+ * An older Android binary without the module keeps a bounded vibration fallback;
+ * never use React Native's ~400ms iOS vibration as a selection fallback.
  */
 const EFFORT_PATTERNS: Record<string, number[]> = {
-  low: [0, 8],
-  medium: [0, 14],
-  high: [0, 12, 50, 12],
-  xhigh: [0, 12, 38, 12, 38, 18],
-  max: [0, 14, 30, 14, 30, 14, 30, 20],
-  ultra: [0, 16, 24, 16, 24, 16, 24, 16, 24, 22],
+  '': [0, 18], none: [0, 18], minimal: [0, 18], low: [0, 20],
+  medium: [0, 24], high: [0, 28], xhigh: [0, 22, 45, 22],
+  max: [0, 24, 40, 28], ultra: [0, 26, 35, 30],
 };
 
-let enabled = Platform.OS === 'android';
-let lastTick = 0;
+let enabled = true;
+let lastTick: number | undefined;
+let feedbackRevision = 0;
+const available = () => enabled && (Platform.OS === 'android' || Platform.OS === 'ios')
+  && AppState.currentState !== 'background' && AppState.currentState !== 'inactive';
 
-function buzz(pattern: number[]) {
-  if (!enabled) return;
-  try { Vibration.cancel(); Vibration.vibrate(pattern); } catch { /* haptics are decorative */ }
+function feedback(android: Haptics.AndroidHaptics, ios: () => Promise<void>, fallback: number[]) {
+  if (!available()) return;
+  const revision = ++feedbackRevision;
+  try {
+    const result = Platform.OS === 'android' ? Haptics.performAndroidHapticsAsync(android) : ios();
+    void Promise.resolve(result).catch(() => {
+      // Do not replay stale pulses after a newer selection or backgrounding.
+      if (revision !== feedbackRevision || !available() || Platform.OS !== 'android') return;
+      try { Vibration.cancel(); Vibration.vibrate(fallback); } catch { /* decorative only */ }
+    });
+  } catch { /* an unavailable haptics host must never block selection */ }
 }
 
-/** One step of thinking effort; higher levels get more, slightly stronger pulses. */
+/** One reported effort step, including None, Minimal and following the default. */
 export function hapticEffort(level?: string) {
-  if (level && EFFORT_PATTERNS[level]) buzz(EFFORT_PATTERNS[level]);
+  const pattern = EFFORT_PATTERNS[level ?? ''];
+  if (!pattern) return;
+  const style = level === 'high' || level === 'xhigh' ? Haptics.ImpactFeedbackStyle.Medium
+    : level === 'max' || level === 'ultra' ? Haptics.ImpactFeedbackStyle.Heavy : Haptics.ImpactFeedbackStyle.Light;
+  feedback(Haptics.AndroidHaptics.Segment_Tick, () => Haptics.impactAsync(style), pattern);
 }
 
 /** A model passing the centre of the arc: a crisp single tick, rate-limited while swiping. */
 export function hapticModelTick() {
   const now = Date.now();
-  if (now - lastTick < 45) return;
-  lastTick = now; buzz([0, 6]);
+  if (!available() || lastTick !== undefined && now >= lastTick && now - lastTick < 45) return;
+  lastTick = now;
+  feedback(Haptics.AndroidHaptics.Segment_Tick, () => Haptics.selectionAsync(), [0, 18]);
 }
 
 /** A model (with its effort) committed: a soft double knock, distinct from effort steps. */
-export function hapticModelCommit() { buzz([0, 9, 70, 16]); }
+export function hapticModelCommit() {
+  feedback(Haptics.AndroidHaptics.Confirm, () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium), [0, 22, 55, 28]);
+}
 
 /** Tests and a future settings switch can turn haptics off. */
-export function setRemoteHaptics(value: boolean) { enabled = value && Platform.OS === 'android'; }
+export function setRemoteHaptics(value: boolean) { enabled = value; lastTick = undefined; feedbackRevision += 1; }

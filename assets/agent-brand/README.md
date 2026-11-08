@@ -8,6 +8,10 @@ These assets identify the external tools integrated by Salcara. They are not Sal
 | --- | --- | --- |
 | `codex-app-official.png` | OpenAI's installed Windows Store package `OpenAI.Codex_26.930.2377.0_x64__2p2nqsd0c76g0`, `app/resources/app.asar` → `webview/assets/codex-app-ga-logo-3e5209898ca3.png` (104 × 104) | `8e82b26c98a10e45798ce48124515720657f7735fb8d0853b3f087eaa8a6b74e` |
 | `claude-app-official.png` | Anthropic's installed Windows Store package `Claude_2.16120.0.0_x64__pzs8sxrjxfjjc`, `assets/Square44x44Logo.targetsize-256_altform-unplated.png` (256 × 256) | `28f6dfd7bc66bffe9ac40dac94dc90b7bae9b4a60b123f687c90ab2b86a63eb0` |
+| `deepseek-harness-app-official.png` | [Official DeepSeek Harness Windows icon](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/apps/desktop/resources/icon-windows.png) (1024 × 1024) | `12064ff340e65872715cb18e56cfa9d3afe294fed98c81807d39e230a030d972` |
+| `hermes-app-official.png` | [Official Hermes Agent desktop icon](https://github.com/NousResearch/hermes-agent/blob/8d7061f1a74980a7549356a4e5e57b603475ddf0/apps/desktop/assets/icon.png) (1024 × 1024) | `2e69dd9a8a1d3f9e3f627efc37102aed416f703e22f599e31c5d86b212a4d6de` |
+
+DeepSeek Harness and Hermes Agent assets were copied unchanged from those pinned official repository commits on 2026-11-08 and are shared with the desktop integration. Their names and marks belong to DeepSeek and Nous Research respectively. Display is local and proportional, with no recolouring or network image requests.
 
 Copied on 2026-10-03. Both PNGs preserve the original bytes and colours; the app only scales them proportionally using `resizeMode="contain"`. They are bundled locally: rendering does not contact OpenAI, Anthropic, or a logo CDN.
 

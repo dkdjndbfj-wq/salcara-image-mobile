@@ -2,11 +2,12 @@ import * as DocumentPicker from 'expo-document-picker';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { File } from 'expo-file-system';
-import { Image, Platform } from 'react-native';
+import { Image } from 'react-native';
 
 import type { ReferenceImage } from './domain';
 import { createId } from './domain-utils';
 import { fileSize, persistReference } from './storage/files';
+import { SystemPermissionError } from './system-permissions';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_MASK_SIDE = 2048;
@@ -22,11 +23,8 @@ type InputAsset = {
 };
 
 export async function pickFromGallery(remaining: number): Promise<ReferenceImage[]> {
-  // iOS uses the system photo picker, which needs no photo-library permission (asking would only prompt for full access).
-  if (Platform.OS !== 'ios') {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) throw new Error('需要相册权限才能选择参考图');
-  }
+  if (remaining <= 0) return [];
+  // The system picker grants access to selected items on both Android and iOS.
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ['images'],
     allowsMultipleSelection: remaining > 1,
@@ -50,7 +48,7 @@ export async function pickFromGallery(remaining: number): Promise<ReferenceImage
 
 export async function takePhoto(): Promise<ReferenceImage[]> {
   const permission = await ImagePicker.requestCameraPermissionsAsync();
-  if (!permission.granted) throw new Error('需要相机权限才能拍摄参考图');
+  if (!permission.granted) throw new SystemPermissionError('camera', permission.canAskAgain !== false);
   const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 1 });
   if (result.canceled) return [];
   const asset = result.assets[0];

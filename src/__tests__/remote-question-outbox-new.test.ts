@@ -26,6 +26,38 @@ test('durable record exists before the first dispatch', async () => {
  await deliverQuestionAnswer({ receipt, signal: new AbortController().signal, active: () => true, beforeAttempt: () => markQuestionAttempt(receipt), perform });
  expect(perform).toHaveBeenCalledWith(receipt.requestId, false);
 });
+
+test('the exact command is captured before storage waits and survives restart without following edited UI objects', async () => {
+ const input = { ...answer, answers: { value: ['original'] }, command: { type: 'approval.respond' as const, approvalId: answer.approvalId,
+   sessionKey: target.sessionKey, decision: answer.decision, answers: { value: ['original'] }, accountId: 'api_original', controlSurface: 'cli' as const } };
+ const preparing = prepareQuestionReceipt(input);
+ input.command.accountId = 'api_changed'; input.command.answers.value[0] = 'changed'; input.answers.value[0] = 'changed';
+ const receipt = await preparing;
+ expect(receipt.command).toMatchObject({ accountId: 'api_original', answers: { value: ['original'] } });
+ receipt.command!.accountId = 'caller-mutated'; resetQuestionOutboxForTests();
+ expect((await pendingQuestionReceipts(target))[0].command).toMatchObject({ accountId: 'api_original', answers: { value: ['original'] } });
+});
+
+test('an attempted legacy receipt cannot acquire a new source; an unattempted one can capture before sending', async () => {
+ const command = { type: 'approval.respond' as const, approvalId: answer.approvalId, sessionKey: target.sessionKey,
+   decision: answer.decision, answers: answer.answers, accountId: 'api_original', controlSurface: 'cli' as const };
+ const first = await prepareQuestionReceipt(answer); await markQuestionAttempt(first);
+ await expect(prepareQuestionReceipt({ ...answer, command })).rejects.toMatchObject({ code: 'question_source_unconfirmed' });
+ expect((await pendingQuestionReceipts(target))[0]).toMatchObject({ requestId: first.requestId, attempted: true });
+ await finishQuestionReceipt(first); const unattempted = await prepareQuestionReceipt(answer);
+ expect(await prepareQuestionReceipt({ ...answer, command })).toMatchObject({ requestId: unattempted.requestId, attempted: false, command });
+});
+
+test('expiring a captured command removes its answer content while retaining a readable tombstone', async () => {
+ const command = { type: 'approval.respond' as const, approvalId: answer.approvalId, sessionKey: target.sessionKey,
+   decision: answer.decision, answers: answer.answers, accountId: 'api_original', controlSurface: 'cli' as const };
+ const first = await prepareQuestionReceipt({ ...answer, command });
+ jest.setSystemTime(Date.now() + DELIVERY_RETRY_WINDOW_MS + 1);
+ await prepareQuestionReceipt({ ...answer, approvalId: 'new-question' });
+ resetQuestionOutboxForTests();
+ expect((await pendingQuestionReceipts(target)).find(item => item.requestId === first.requestId)).toMatchObject({ blocked: 'question_expired' });
+ expect((await pendingQuestionReceipts(target)).find(item => item.requestId === first.requestId)?.command).toBeUndefined();
+});
 test('expired or uncertain records never become a new answer on restart', async () => {
  const receipt = await prepareQuestionReceipt(answer); await blockQuestionReceipt(receipt, 'command_delivery_uncertain'); resetQuestionOutboxForTests();
  await expect(prepareQuestionReceipt(answer)).rejects.toMatchObject({ code: 'command_delivery_uncertain' });

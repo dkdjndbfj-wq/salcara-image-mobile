@@ -1,0 +1,47 @@
+import React, { useMemo, useState } from 'react';
+import { View, Text, Pressable } from 'react-native';
+import { strToU8, zipSync } from 'fflate';
+import { ArtifactViewer } from '../../src/components/ArtifactViewer';
+
+const b64 = bytes => { let text = ''; for (const byte of bytes) text += String.fromCharCode(byte); return btoa(text); };
+export function artifactFixturePDF() {
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 580] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>', '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'];
+  const stream = 'BT /F1 22 Tf 42 510 Td (Artifact PDF - page one) Tj ET\n';
+  objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}endstream`);
+  objects.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 580] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>');
+  const next = 'BT /F1 22 Tf 42 510 Td (Artifact PDF - page two) Tj ET\n'; objects.push(`<< /Length ${next.length} >>\nstream\n${next}endstream`);
+  let text = '%PDF-1.4\n', offsets = [0];
+  objects.forEach((object, index) => { offsets.push(text.length); text += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+  const xref = text.length;
+  text += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map(n => `${String(n).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return strToU8(text);
+}
+const zip = files => zipSync(Object.fromEntries(Object.entries(files).map(([path, xml]) => [path, strToU8(xml)])));
+export function artifactFixturePayloads() {
+  const docx = zip({ '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+    '_rels/.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    'word/document.xml': '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Remote document preview</w:t></w:r></w:p><w:p><w:r><w:t>真实 DOCX 段落 &amp; 表格</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>Agent</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Codex</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>' });
+  const xlsx = zip({ '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>',
+    '_rels/.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+    'xl/workbook.xml': '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Overview" sheetId="1" r:id="rId1"/><sheet name="Details" sheetId="2" r:id="rId2"/></sheets></workbook>',
+    'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>',
+    'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Revenue</t></is></c><c r="B1"><v>42</v></c></row><row r="2"><c r="B2"><f>B1*2</f><v>84</v></c></row></sheetData></worksheet>',
+    'xl/worksheets/sheet2.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Second sheet content</t></is></c></row></sheetData></worksheet>' });
+  const pptx = zip({ '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/></Types>',
+    '_rels/.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>',
+    'ppt/presentation.xml': '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>',
+    'ppt/_rels/presentation.xml.rels': '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/><Relationship Id="rId2" Target="slides/slide2.xml"/></Relationships>',
+    'ppt/slides/slide1.xml': '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>First slide</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
+    'ppt/slides/slide2.xml': '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Second slide</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>' });
+  const html = '<!doctype html><html><body style="font:16px system-ui;padding:30px"><h1>Interactive artifact</h1><p id="count"></p><button id="increment">Increase</button><input id="note" aria-label="Remembered note" placeholder="Remembered note"><button id="network">Network probe</button><p id="network-result"></p><script>let n=Number(ArtifactState.getState().count)||0;const render=()=>document.getElementById("count").textContent="Count: "+n;render();document.getElementById("increment").onclick=()=>{n++;render();ArtifactState.setState({count:n});};document.getElementById("network").onclick=async()=>{try{await fetch("https://example.com/artifact-fetch");document.getElementById("network-result").textContent="UNSAFE";}catch{document.getElementById("network-result").textContent="Network blocked";}};<\/script></body></html>';
+  return Object.fromEntries([
+    ['pdf', 'report.pdf', 'application/pdf', artifactFixturePDF()], ['document', 'notes.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', docx],
+    ['spreadsheet', 'budget.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xlsx], ['presentation', 'slides.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', pptx],
+    ['html', 'interactive.html', 'text/html', strToU8(html)], ['text', 'notes.txt', 'text/plain', strToU8('Editable original text')],
+    ['svg', 'diagram.svg', 'image/svg+xml', strToU8('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="220" role="img" aria-label="Local SVG diagram"><rect width="400" height="220" fill="#eceeeb"/><circle cx="90" cy="110" r="50" fill="#59665e"/><text x="160" y="118" font-size="24">Local SVG</text></svg>')],
+  ].map(([kind, name, mime, bytes]) => [kind, { artifact: { id: 'fixture-' + kind, path: name, name, kind, mime, size: bytes.length, revision: 'fixture-v1', updatedAt: Date.now() }, encoding: kind === 'html' || kind === 'text' ? 'utf8' : 'base64', content: kind === 'html' ? html : kind === 'text' ? 'Editable original text' : b64(bytes) }]));
+}
+export function ArtifactFixture() {
+  const payloads = useMemo(artifactFixturePayloads, []), [kind, setKind] = useState('pdf'), [computer, setComputer] = useState('computer-a'), [annotation, setAnnotation] = useState(''), [saved, setSaved] = useState(''), [opened,setOpened]=useState(true);
+  return <View style={{flex:1,backgroundColor:'#fff'}}><View style={{flexDirection:'row',padding:10,gap:12,flexWrap:'wrap'}}>{Object.keys(payloads).map(key=><Pressable accessibilityRole="button" accessibilityLabel={`Fixture ${key}`} key={key} onPress={()=>{setKind(key);setOpened(true);}}><Text>{key}</Text></Pressable>)}<Pressable accessibilityRole="button" onPress={()=>setComputer(value=>value==='computer-a'?'computer-b':'computer-a')}><Text>Switch computer</Text></Pressable><Pressable accessibilityRole="button" onPress={()=>{payloads[kind]={...payloads[kind],artifact:{...payloads[kind].artifact,revision:'external-'+Date.now()}};}}><Text>External edit</Text></Pressable><Text testID="fixture-computer">{computer}</Text></View><Text testID="fixture-annotation">{annotation}</Text><Text testID="fixture-saved">{saved}</Text>{opened?<ArtifactViewer artifact={payloads[kind].artifact} scopeKey={computer+'/session-one'} load={async()=>payloads[kind]} save={async(artifact,content,expected)=>{if(expected!==payloads[kind].artifact.revision)throw new Error('文件已在电脑上变更，草稿已保留');const next={artifact:{...artifact,revision:'fixture-'+Date.now(),size:strToU8(content).length},encoding:'utf8',content};payloads[kind]=next;setSaved('Saved: '+content);return next;}} onClose={()=>setOpened(false)} onAnnotate={value=>setAnnotation(JSON.stringify(value))}/>:<Text>Viewer closed</Text>}</View>;
+}

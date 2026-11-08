@@ -6,7 +6,7 @@ import { normalizeAgent } from '../agent/agents';
 import { safeFileName } from '../agent/files';
 import { memoryPrompt, rejectsMemory } from '../agent/memory';
 import { parseAgentSettings } from '../agent/settings';
-import { extractMarkers, phoneActionSpec, phoneSpecHasClock, TOOL_SPECS, visibleStreamingText } from '../agent/tools';
+import { extractMarkers, phoneActionSpec, phoneSpecHasClock, stripImageResultClaims, TOOL_SPECS, visibleStreamingText } from '../agent/tools';
 import { parseTrace, traceFileUris } from '../agent/types';
 import {
   assertPublicUrl, htmlToText, resolveLocation, parseBingResults, parseDuckDuckGoResults, readWebpage, searchTavily, unwrapBingUrl, webSearch,
@@ -31,6 +31,42 @@ test('streaming hides markers and half-typed markers, but not ordinary text', ()
   expect(visibleStreamingText('答案 <')).toBe('答案');
   expect(visibleStreamingText('cat <<<EOF')).toBe('cat <<<EOF');
   expect(visibleStreamingText('a < b')).toBe('a < b');
+});
+
+test('tool-looking examples and quoted image receipts remain plain text', () => {
+  const receipt = '[我调用了 generate_image，已生成 图4。作图描述：改地图]';
+  const marker = '<<<TOOL generate_image {"prompt":"猫"}>>>';
+  for (const text of [
+    `这是假声明示例：${receipt}`,
+    `> ${receipt}`,
+    `\`\`\`text\n${receipt}\n\`\`\``,
+    `~~~text\n${receipt}\n~~~`,
+    `用法示例：\`${marker}\``,
+    `> ${marker}`,
+    `\`\`\`text\n${marker}\n\`\`\``,
+    `${marker} 是一个示例`,
+    `    ${marker}`,
+  ]) {
+    expect(stripImageResultClaims(text)).toEqual({ text, claimed: false });
+    expect(extractMarkers(text)).toMatchObject({ text, calls: [] });
+  }
+  expect(stripImageResultClaims(`我来画。\n\n${receipt}`)).toEqual({ text: '我来画。', claimed: true });
+  expect(extractMarkers(marker.slice(0, -3)).calls[0].input).toBeNull();
+});
+
+test('an unfinished tool prefix cannot borrow JSON from later prose or code examples', () => {
+  for (const text of [
+    '<<<TOOL generate_image\n下面是参数示例：\n{"prompt":"猫"}>>>',
+    '<<<TOOL generate_image 这是说明 {"prompt":"猫"}>>>',
+    '<<<TOOL generate_image\n```json\n{"prompt":"猫"}>>>\n```',
+    '<<<TOOL generate_image\n~~~json\n{"prompt":"猫"}>>>\n~~~',
+    '<<<IMAGE\n仅供参考：\n{"prompt":"猫"}>>>',
+    '<<<SUGGEST\n示例：\n["猫"]>>>',
+  ]) {
+    expect(extractMarkers(text)).toEqual({ text, calls: [], suggestions: [] });
+    expect(visibleStreamingText(text)).toBe(text);
+  }
+  expect(extractMarkers('<<<TOOL generate_image \n {"prompt":"猫"}>>>').calls[0].input).toEqual({ prompt: '猫' });
 });
 
 test('HTML becomes readable text with headings and list items; scripts and nav are dropped', () => {

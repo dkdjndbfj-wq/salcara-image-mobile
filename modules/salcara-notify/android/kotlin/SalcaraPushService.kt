@@ -1,7 +1,6 @@
 package expo.modules.salcaranotify
 
 import android.app.ActivityManager
-import android.app.NotificationManager
 import android.content.Context
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -18,6 +17,7 @@ class SalcaraPushService : FirebaseMessagingService() {
   override fun onMessageReceived(message: RemoteMessage) {
     val data = message.data
     if (data["type"] != "salcara.task") return
+    if (!SalcaraNotifyModule.notificationsAllowed(this)) return
     // In the foreground the app shows this itself.
     if (inForeground(this)) return
     val deviceId = data["deviceId"].orEmpty()
@@ -28,14 +28,16 @@ class SalcaraPushService : FirebaseMessagingService() {
     val (title, body) = when (data["kind"]) {
       "done" -> "$agent 完成了任务" to "点开查看结果"
       "failed" -> "$agent 的任务没有完成" to "点开查看原因"
-      "ask" -> "$agent 需要你批准" to "点开在手机上处理"
-      "question" -> "$agent 有问题想问你" to "点开回答"
+      "reply" -> "$agent 有新回复" to "点开查看回复"
       else -> return
     }
     SalcaraNotifyModule.ensureChannels(this)
-    val payload = JSONObject().put("deviceId", deviceId).put("sessionKey", sessionKey).toString()
-    val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-    manager.notify(id.hashCode(), SalcaraNotifyModule.build(this, SalcaraNotifyModule.TASK_CHANNEL, title, body, payload, false))
+    val scope = data["notificationScope"].orEmpty().takeIf { it.matches(Regex("ns1_[a-f0-9]{64}")) }
+    val payload = JSONObject().put("deviceId", deviceId).put("sessionKey", sessionKey)
+      .apply { if (scope != null) put("notificationScope", scope) }.toString()
+    // The same device/thread IDs may exist on another Hub or a new pairing.
+    val notificationId = "${scope ?: "legacy"}:$id".hashCode()
+    SalcaraNotifyModule.postTaskNotification(this, notificationId, SalcaraNotifyModule.build(this, SalcaraNotifyModule.TASK_CHANNEL, title, body, payload, false))
   }
 
   override fun onNewToken(token: String) {

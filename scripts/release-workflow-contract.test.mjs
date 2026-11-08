@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -61,4 +61,50 @@ test('manual artifact verifier is read-only and excludes the target release from
   assert.match(verifier, /\.tagName != \$current/);
   assert.match(verifier, /SOURCE_SHA.*c47d0a481d8e372f37098651cedc8a73fac9697d/);
   assert.match(verifier, /9f33363cda8abeeda83fa4a7a891fa89f97f308e315b15c0eac4fab933b3fea9/);
+});
+
+test('exact release notes resolve deterministically and missing/empty/ambiguous notes stop the build', () => {
+  const section = workflow.match(/name: Validate exact release notes[^\r\n]*\r?\n[\s\S]*?run: \|\r?\n((?: {10}[^\r\n]*\r?\n)+)/);
+  assert.ok(section, 'notes must be validated before building and before importing signing credentials');
+  assert.ok(workflow.indexOf('name: Validate exact release notes') < workflow.indexOf('name: Restore release keystore'));
+  const script = section[1].replace(/^ {10}/gm, '');
+  const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash';
+  const cases = [
+    { files: { 'RELEASE-v1.8.2.md': '# Version 1.8.2' }, expected: 'docs/RELEASE-v1.8.2.md' },
+    { files: { 'RELEASE-1.8.2.md': '# Version 1.8.2' }, expected: 'docs/RELEASE-1.8.2.md' },
+    { files: {} },
+    { files: { 'RELEASE-1.8.2.md': '' } },
+    { files: { 'RELEASE-1.8.2.md': ' \n\t' } },
+    { files: { 'RELEASE-v1.8.2.md': '# A', 'RELEASE-1.8.2.md': '# B' } },
+    { files: { 'RELEASE-v1.8.1.md': '# Another version' } },
+    { files: { 'RELEASE-1.8.2.md': '# Version 1.8.2' }, tag: 'v1.8.2/../../other' },
+  ];
+  for (const item of cases) {
+    const fixture = mkdtempSync(join(tmpdir(), 'salcara-release-notes-test-'));
+    try {
+      mkdirSync(join(fixture, 'docs'));
+      for (const [name, content] of Object.entries(item.files)) writeFileSync(join(fixture, 'docs', name), content);
+      const output = join(fixture, 'github-output');
+      const result = spawnSync(bash, ['-c', script], { cwd: fixture, encoding: 'utf8', env: {
+        ...process.env, RELEASE_TAG: item.tag || 'v1.8.2', GITHUB_OUTPUT: output.replaceAll('\\', '/'),
+      } });
+      assert.equal(result.error, undefined);
+      if (item.expected) {
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(readFileSync(output, 'utf8'), `path=${item.expected}\n`);
+      } else {
+        assert.notEqual(result.status, 0, 'invalid notes cannot silently become generated release notes');
+        assert.equal(existsSync(output), false);
+      }
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  }
+  assert.match(script, /! -L "\$candidate"/);
+});
+
+test('publication consumes only the checked release notes and never generates a substitute', () => {
+  const publish = workflow.slice(workflow.indexOf('- name: Publish GitHub Release'), workflow.indexOf('- name: Publish released-only update manifest'));
+  assert.match(publish, /RELEASE_NOTES: \$\{\{ steps\.notes\.outputs\.path \}\}/);
+  assert.match(publish, /--notes-file "\$RELEASE_NOTES"/);
+  assert.match(publish, /! -L "\$RELEASE_NOTES"/);
+  assert.doesNotMatch(publish, /--generate-notes|--notes /);
 });

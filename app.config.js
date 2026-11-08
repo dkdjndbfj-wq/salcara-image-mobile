@@ -2,19 +2,36 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Firebase (push while the app is closed) is used only when its config file is
- * present: google-services.json for the normal app, google-services.remotetest.json
- * for the remote test build. Without it the build is unchanged and phones fall
- * back to 后台待命.
+ * FCM is optional. Android uses google-services.json; iOS uses
+ * GoogleService-Info.plist and APNs via Firebase Messaging. Keep credentials
+ * outside the repository and omit push configuration from builds that lack it.
  */
-function withFirebase(config, file) {
-  if (!fs.existsSync(path.join(__dirname, file))) return config;
-  return { ...config, android: { ...config.android, googleServicesFile: `./${file}` } };
+function withFirebase(config, androidFile, iosFile) {
+  const next = { ...config };
+  if (fs.existsSync(path.join(__dirname, androidFile))) {
+    next.android = { ...config.android, googleServicesFile: `./${androidFile}` };
+  }
+  if (fs.existsSync(path.join(__dirname, iosFile))) {
+    const profile = process.env.EAS_BUILD_PROFILE;
+    const apsEnvironment = process.env.SALCARA_APS_ENVIRONMENT
+      ?? (profile ? (profile === 'development' ? 'development' : 'production') : 'development');
+    if (apsEnvironment !== 'development' && apsEnvironment !== 'production') {
+      throw new Error('SALCARA_APS_ENVIRONMENT must be development or production.');
+    }
+    next.ios = {
+      ...config.ios,
+      googleServicesFile: `./${iosFile}`,
+      entitlements: { ...config.ios?.entitlements, 'aps-environment': apsEnvironment },
+    };
+  }
+  return next;
 }
 
-/** The default build remains exactly the app.json configuration (plus Firebase when configured). */
+/** The default build remains exactly the app.json configuration plus configured Firebase. */
 module.exports = ({ config }) => {
-  if (process.env.SALCARA_TEST_BUILD !== '1') return withFirebase(config, 'google-services.json');
+  if (process.env.SALCARA_TEST_BUILD !== '1') {
+    return withFirebase(config, 'google-services.json', 'GoogleService-Info.plist');
+  }
 
   // The private workflow gets a monotonically increasing range of its own.
   const suppliedBuildNumber = process.env.SALCARA_TEST_BUILD_NUMBER
@@ -46,5 +63,5 @@ module.exports = ({ config }) => {
       salcaraBuildChannel: 'remote-test',
       salcaraTestCommit: process.env.GITHUB_SHA ?? 'local',
     },
-  }, 'google-services.remotetest.json');
+  }, 'google-services.remotetest.json', 'GoogleService-Info.remotetest.plist');
 };

@@ -1,0 +1,6 @@
+{
+  "name": "salcara-direct-transport",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Certificate-pinned WSS transport for direct Salcara device connections"
+}

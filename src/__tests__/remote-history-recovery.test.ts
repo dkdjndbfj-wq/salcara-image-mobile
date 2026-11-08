@@ -1,6 +1,7 @@
 import { HubError, setHubFetch, type DeviceStatus, type FetchLike, type HubEvent, type SessionInfo } from '../remote/client';
 import { applyEvent, applyRecoveredEvent, bootRemote, connectStation, EMPTY_TIMELINE, getRemoteState, mergeHistory, openSession, pairRemoteQr,
-  parseRemoteQr, resetRemoteForTests, syncSessionEvents, timelineKey, loadEarlierHistory, loadSessions, loadMoreSessions, preloadRecentSessionMessages } from '../remote/store';
+  parseRemoteQr, resetRemoteForTests, syncSessionEvents, sessionCursor, timelineKey, approvalStateKey, loadEarlierHistory, loadSessions, loadMoreSessions, preloadRecentSessionMessages } from '../remote/store';
+import { attachMaterializedUri, remoteDeliveryScope } from '../remote/store';
 
 const mockSettings = new Map<string, string>();
 const mockSecrets = new Map<string, string>();
@@ -80,7 +81,7 @@ test('earlier history preserves current content and approvals without starting o
   const timeline = getRemoteState().timelines[timelineKey('pc', key)];
   expect(timeline.items.find(item => item.id === 'overlap')).toMatchObject({ text: 'current version' });
   expect(timeline.items.map(item => item.id)).toEqual(['oldest', 'overlap', 'current']);
-  expect(getRemoteState().approvals.current).toBeTruthy(); expect(getRemoteState().approvals.stale).toBeUndefined();
+  expect(getRemoteState().approvals[approvalStateKey('pc', key, 'current')]).toBeTruthy(); expect(getRemoteState().approvals[approvalStateKey('pc', key, 'stale')]).toBeUndefined();
   expect(commands).toEqual(['session.open', 'session.open']); expect(timeline.nextCursor).toBeUndefined();
 });
 
@@ -267,8 +268,37 @@ test('a live question during snapshot read survives an older snapshot and keeps 
   await pair(); await openSession('pc', key); const reading = openSession('pc', key); await started;
   await syncSessionEvents('pc', key);
   release({ ok: true, result: { session, events: [] } }); await reading;
-  expect(getRemoteState().approvals['concurrent-question']).toBeTruthy();
+  expect(getRemoteState().approvals[approvalStateKey('pc', key, 'concurrent-question')]).toBeTruthy();
   expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'concurrent-question', state: 'pending' })]));
+});
+
+test.each(['head','earlier'] as const)('a concurrent revert discards a boundary-free late %s page and reads the fresh head once',async kind=>{
+  let opens=0,release!:(value:unknown)=>void,entered!:()=>void;
+  const started=new Promise<void>(resolve=>{entered=resolve;});
+  const original=event('reverted-user',3,{role:'user',turnId:'reverted-turn'});
+  const terminal:HubEvent={type:'turn',deviceId:'pc',sessionKey:key,tool:'codex',ts:6,turnId:'reverted-turn',status:'completed'};
+  const reverted:HubEvent={type:'session.reverted',deviceId:'pc',sessionKey:key,tool:'codex',ts:30,seq:1,id:'reverted-user',turnId:'reverted-turn',operationId:'revert-op'};
+  const newer=event('new-user',31,{role:'user',turnId:'new-turn',seq:2});
+  setHubFetch(transport((url,command)=>{
+    if(command){
+      opens++;
+      if(opens===1)return {ok:true,result:{session,events:[original,terminal],nextCursor:'old-cursor'}};
+      if(opens===2){entered();return new Promise(resolve=>{release=resolve;});}
+      expect(command.cursor).toBeUndefined();
+      return {ok:true,result:{session,events:[newer,event('fresh-answer',32,{turnId:'new-turn'})],nextCursor:'fresh-cursor'}};
+    }
+    if(url.searchParams.get('limit')==='1')return {events:[],lastSeq:0,nextSeq:0};
+    return {events:[reverted,newer],lastSeq:2,nextSeq:2,hasMore:false};
+  }));
+  await pair();await openSession('pc',key);
+  const reading=kind==='head'?openSession('pc',key):loadEarlierHistory('pc',key);
+  await started;await syncSessionEvents('pc',key);
+  release({ok:true,result:{session,events:[event('unattributed-stale-answer',5)],nextCursor:'stale-cursor'}});
+  await reading;
+  const current=getRemoteState().timelines[timelineKey('pc',key)];
+  expect(opens).toBe(3);expect(current.items.map(item=>item.id)).not.toContain('unattributed-stale-answer');
+  expect(current.items.map(item=>item.id)).toEqual(expect.arrayContaining(['new-user','fresh-answer']));
+  expect(current.nextCursor).toBe('fresh-cursor');expect(current.historyExpanded).toBe(false);
 });
 
 test('snapshot reads the event baseline first, so progress arriving during the read is not skipped', async () => {
@@ -287,6 +317,82 @@ test('snapshot reads the event baseline first, so progress arriving during the r
   expect(commands).toEqual(['session.open']);
 });
 
+test('parallel sync requests for one conversation share its cursor in order while different sessions remain isolated', async () => {
+  let releaseFirst!: (value: unknown) => void;
+  let enteredFirst!: () => void;
+  const firstEntered = new Promise<void>(resolve => { enteredFirst = resolve; });
+  const after: string[] = [];
+  setHubFetch(transport((url, command) => {
+    if (command) return { ok: true, result: { session, events: [] } };
+    if (url.searchParams.get('limit') === '1') return { events: [], nextSeq: 0, lastSeq: 10 };
+    const cursor = url.searchParams.get('after')!; after.push(cursor);
+    if (cursor === '10') { enteredFirst(); return new Promise(resolve => { releaseFirst = resolve; }); }
+    return { events: [event(`progress-${cursor}`, Number(cursor) + 1, { seq: Number(cursor) + 1 })], nextSeq: Number(cursor) + 1, lastSeq: Number(cursor) + 1 };
+  }));
+  await pair(); await openSession('pc', key);
+  const first = syncSessionEvents('pc', key);
+  await firstEntered;
+  const second = syncSessionEvents('pc', key);
+  releaseFirst({ events: [event('progress-10', 11, { seq: 11 })], nextSeq: 11, lastSeq: 11 });
+  await Promise.all([first, second]);
+  expect(after).toEqual(['10', '11']);
+  expect(sessionCursor('pc', key)).toBe(12);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items.map(item => item.id)).toEqual(['progress-10', 'progress-11']);
+});
+
+test('different conversations may finish out of order without crossing same-id messages or cursors', async () => {
+  const otherKey = 'codex:parallel';
+  const waiters = new Map<string, (value: unknown) => void>();
+  let entered = 0;
+  let releaseBoth!: () => void;
+  const bothEntered = new Promise<void>(resolve => { releaseBoth = resolve; });
+  setHubFetch(transport((url, command) => {
+    if (command) {
+      const sessionKey = String(command.sessionKey);
+      return { ok: true, result: { session: { ...session, sessionKey, title: sessionKey }, events: [] } };
+    }
+    const sessionKey = url.searchParams.get('sessionKey')!;
+    if (url.searchParams.get('limit') === '1') return { events: [], nextSeq: 0, lastSeq: 10 };
+    entered += 1;
+    if (entered === 2) releaseBoth();
+    return new Promise(resolve => { waiters.set(sessionKey, resolve); });
+  }));
+  await pair();
+  await Promise.all([openSession('pc', key), openSession('pc', otherKey)]);
+  const first = syncSessionEvents('pc', key);
+  const second = syncSessionEvents('pc', otherKey);
+  await bothEntered;
+  const page = (sessionKey: string, text: string) => ({ events: [{ type: 'message', deviceId: 'pc', sessionKey, tool: 'codex',
+    id: 'same-message-id', role: 'assistant', text, final: true, ts: 11, seq: 11 }], nextSeq: 11, lastSeq: 11 });
+  waiters.get(otherKey)?.(page(otherKey, 'parallel response'));
+  await second;
+  waiters.get(key)?.(page(key, 'original response'));
+  await first;
+  expect(sessionCursor('pc', key)).toBe(11);
+  expect(sessionCursor('pc', otherKey)).toBe(11);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual([expect.objectContaining({ id: 'same-message-id', text: 'original response' })]);
+  expect(getRemoteState().timelines[timelineKey('pc', otherKey)].items).toEqual([expect.objectContaining({ id: 'same-message-id', text: 'parallel response' })]);
+});
+
+test('a page made only of a future event status advances past it and receives the following page', async () => {
+  let reads = 0;
+  const after: string[] = [];
+  setHubFetch(transport((url, command) => {
+    if (command) return { ok: true, result: { session, events: [] } };
+    if (url.searchParams.get('limit') === '1') return { events: [], nextSeq: 0, lastSeq: 10 };
+    reads += 1;
+    after.push(url.searchParams.get('after')!);
+    if (reads === 1) return { events: [{ type: 'tool', deviceId: 'pc', sessionKey: key, tool: 'codex', id: 'future-tool', kind: 'command',
+      title: 'Queued build', status: 'queued', ts: 11, seq: 11 }], nextSeq: 11, lastSeq: 12, hasMore: true };
+    return { events: [{ type: 'message', deviceId: 'pc', sessionKey: key, tool: 'codex', id: 'after-future', role: 'assistant',
+      text: 'received', final: true, ts: 12, seq: 12 }], nextSeq: 12, lastSeq: 12 };
+  }));
+  await pair(); await openSession('pc', key); await syncSessionEvents('pc', key);
+  expect(after).toEqual(['10', '11']);
+  expect(sessionCursor('pc', key)).toBe(12);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items.map(item => item.id)).toEqual(['after-future']);
+});
+
 test.each(['bridge-marker', 'server-cursor-gap'])('%s only reloads the original session and removes stale actionable approvals', async (kind) => {
   let opens = 0;
   const gap = { type: 'notice', deviceId: 'pc', sessionKey: key, tool: 'codex', ts: 501, seq: 501,
@@ -301,11 +407,11 @@ test.each(['bridge-marker', 'server-cursor-gap'])('%s only reloads the original 
     return { events: kind === 'bridge-marker' ? [gap] : [], nextSeq: 501, lastSeq: 600, resetRequired: kind === 'server-cursor-gap' };
   }));
   await pair(); await openSession('pc', key);
-  expect(getRemoteState().approvals).toHaveProperty('old-approval');
+  expect(getRemoteState().approvals[approvalStateKey('pc', key, 'old-approval')]).toBeDefined();
   await syncSessionEvents('pc', key);
   expect(opens).toBe(2);
   expect(commands).toEqual(['session.open', 'session.open']);
-  expect(getRemoteState().approvals).not.toHaveProperty('old-approval');
+  expect(getRemoteState().approvals[approvalStateKey('pc', key, 'old-approval')]).toBeUndefined();
   const timeline = getRemoteState().timelines[timelineKey('pc', key)];
   expect(timeline.items.map((item) => item.id)).toEqual(expect.arrayContaining(['already-loaded-old', 'current-from-computer']));
   expect(timeline.items.some((item) => item.kind === 'approval' && item.state === 'pending')).toBe(false);
@@ -401,6 +507,52 @@ test('a known-offline computer fails a read-only recovery and returns online aft
   expect(commands).toEqual(['session.open', 'session.open']);
 });
 
+test.each(['app_read_capacity', undefined])('event read capacity (%s) preserves connectivity and resumes the exact cursor', async code => {
+  let saturated = true;
+  const cursors: string[] = [], waits: string[] = [];
+  const fallback = transport((url, command) => command
+    ? { ok: true, result: { session, events: [event('snapshot', 10)] } }
+    : { events: [], nextSeq: 0, lastSeq: 10 });
+  setHubFetch(async (endpoint, init) => {
+    if (endpoint.endsWith('/ping')) return response({ service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1,
+      authModes: ['device-pairing'], capabilities: [...capabilities, 'events.wait.v1'] });
+    const url = new URL(endpoint);
+    if (url.pathname.endsWith('/app/events') && url.searchParams.get('limit') !== '1') {
+      cursors.push(url.searchParams.get('after')!); waits.push(url.searchParams.get('wait')!);
+      if (saturated) return { ok: false, status: 429, text: async () => JSON.stringify({ error: 'read capacity fixture', ...(code ? { code } : {}) }) };
+      return response({ events: [event('later-progress', 11, { seq: 11 })], nextSeq: 11, lastSeq: 11 });
+    }
+    return fallback(endpoint, init);
+  });
+  await pair(); await openSession('pc', key);
+  const before = getRemoteState().timelines[timelineKey('pc', key)].items;
+  await expect(syncSessionEvents('pc', key, 20)).rejects.toMatchObject({ status: 429, ...(code ? { code } : {}) });
+  expect(getRemoteState().connection).toBe('open'); expect(getRemoteState().connectionError).toBeUndefined();
+  expect(getRemoteState().devices[0].online).toBe(true);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual(before);
+  expect(commands).toEqual(['session.open']);
+  saturated = false; await syncSessionEvents('pc', key, 20);
+  expect(cursors).toEqual(['10', '10']); expect(waits).toEqual(['20', '20']);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items.map(item => item.id)).toEqual(['snapshot', 'later-progress']);
+  expect(getRemoteState().connection).toBe('open'); expect(commands).toEqual(['session.open']);
+});
+
+test.each([0, 401, 403, 503])('event read status %s remains an error and a later capacity rejection cannot claim recovery', async status => {
+  let failure = new HubError('unavailable fixture', status);
+  setHubFetch(transport((url, command) => {
+    if (command) return { ok: true, result: { session, events: [event('snapshot', 10)] } };
+    if (url.searchParams.get('limit') === '1') return { events: [], nextSeq: 0, lastSeq: 10 };
+    throw failure;
+  }));
+  await pair(); await openSession('pc', key);
+  await expect(syncSessionEvents('pc', key)).rejects.toBe(failure);
+  expect(getRemoteState().connection).toBe('error'); expect(getRemoteState().connectionError).toBe('unavailable fixture');
+  failure = new HubError('read capacity fixture', 429, 'app_read_capacity');
+  await expect(syncSessionEvents('pc', key)).rejects.toBe(failure);
+  expect(getRemoteState().connection).toBe('error'); expect(getRemoteState().connectionError).toBe('unavailable fixture');
+  expect(commands).toEqual(['session.open']);
+});
+
 test('a recovery page preserves final replies and tools, consumes only nextSeq, and trusts only current registry approvals', async () => {
   let opens = 0;
   const reads: string[] = [];
@@ -430,10 +582,10 @@ test('a recovery page preserves final replies and tools, consumes only nextSeq, 
     expect.objectContaining({ id: 'page-final', text: 'page-final', final: true }),
     expect.objectContaining({ id: 'second-page-final', text: 'second-page-final', final: true }),
   ]));
-  expect(Object.keys(getRemoteState().approvals)).toEqual(['current-registry-approval']);
+  expect(Object.values(getRemoteState().approvals).map(item => item.approvalId)).toEqual(['current-registry-approval']);
   await syncSessionEvents('pc', key);
   expect(reads).toEqual(['10', '14', '16']);
-  expect(Object.keys(getRemoteState().approvals).sort()).toEqual(['current-registry-approval', 'new-live-approval']);
+  expect(Object.values(getRemoteState().approvals).map(item => item.approvalId).sort()).toEqual(['current-registry-approval', 'new-live-approval']);
   expect(commands).toEqual(['session.open', 'session.open']);
 });
 
@@ -446,13 +598,100 @@ test('a final authoritative snapshot is not downgraded by earlier partial progre
   expect(timeline.items[1]).toMatchObject({ status: 'done', output: 'PASS' });
 });
 
+test('a terminal turn with only a streamed prefix silently rereads and completes the message', async () => {
+  let opens = 0;
+  const partial = event('assistant-message', 10, { text: '一起', final: false, turnId: 'turn-1' });
+  const complete = event('assistant-message', 12, { text: '一起去玩', final: true, turnId: 'turn-1' });
+  setHubFetch(transport((url, command) => {
+    if (command?.type === 'session.open') {
+      opens += 1;
+      return { ok: true, result: { session, events: [opens === 1 ? partial : complete] } };
+    }
+    if (url.searchParams.get('limit') === '1') return { events: [], nextSeq: 0, lastSeq: opens ? 11 : 10 };
+    return { events: [{ type: 'turn', deviceId: 'pc', sessionKey: key, tool: 'codex', ts: 11, seq: 11, status: 'completed', turnId: 'turn-1' }], nextSeq: 11, lastSeq: 11 };
+  }));
+  await pair(); await openSession('pc', key); await syncSessionEvents('pc', key);
+  expect(opens).toBe(2);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'assistant-message', text: '一起去玩', final: true }),
+  ]));
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items.some(item => item.kind === 'message' && item.streamState)).toBe(false);
+  expect(commands).toEqual(['session.open', 'session.open']);
+});
+
+test('Claude Code stream block IDs let a transcript repair replace the same partial bubble', async () => {
+  const claudeKey = 'claude:worker';
+  const claudeSession: SessionInfo = { ...session, sessionKey: claudeKey, tool: 'claude', client: 'Claude Code' };
+  let opens = 0;
+  const claudeMessage = (text: string, final: boolean, ts: number): HubEvent => ({ type: 'message', deviceId: 'pc', sessionKey: claudeKey,
+    tool: 'claude', id: 'msg_X:1', role: 'assistant', text, final, ts, seq: ts, turnId: 'claude-turn' } as HubEvent);
+  setHubFetch(transport((url, command) => {
+    if (command?.type === 'session.open') {
+      opens += 1;
+      return { ok: true, result: { session: claudeSession, events: [claudeMessage(opens === 1 ? '一起' : '一起去玩', opens > 1, opens === 1 ? 10 : 12)] } };
+    }
+    if (url.searchParams.get('limit') === '1') return { events: [], nextSeq: 0, lastSeq: 10 };
+    return { events: [{ type: 'turn', deviceId: 'pc', sessionKey: claudeKey, tool: 'claude', ts: 11, seq: 11, status: 'completed', turnId: 'claude-turn' }], nextSeq: 11, lastSeq: 11 };
+  }));
+  await pair(); await openSession('pc', claudeKey); await syncSessionEvents('pc', claudeKey);
+  const items = getRemoteState().timelines[timelineKey('pc', claudeKey)].items;
+  expect(opens).toBe(2);
+  expect(items.filter(item => item.kind === 'message' && item.role === 'assistant')).toHaveLength(1);
+  expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'msg_X:1', text: '一起去玩', final: true })]));
+});
+
+test('an unrecoverable terminal prefix stays quiet for a minute and requires another successful read before warning', async () => {
+  let now = 1_000;
+  const dateNow = jest.spyOn(Date, 'now').mockImplementation(() => now);
+  let opens = 0;
+  const partial = event('assistant-message', 10, { text: '一起', final: false, turnId: 'turn-stuck' });
+  setHubFetch(transport((url, command) => {
+    if (command?.type === 'session.open') {
+      opens += 1;
+      return { ok: true, result: { session, events: [partial] } };
+    }
+    if (url.searchParams.get('limit') === '1') return { events: [], nextSeq: 0, lastSeq: 10 };
+    return { events: [{ type: 'turn', deviceId: 'pc', sessionKey: key, tool: 'codex', ts: 11, seq: 11, status: 'completed', turnId: 'turn-stuck' }], nextSeq: 11, lastSeq: 11 };
+  }));
+  try {
+    await pair(); await openSession('pc', key); await syncSessionEvents('pc', key);
+    expect(opens).toBe(2); // initial snapshot plus first quiet repair
+    expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'assistant-message', text: '一起', final: false, streamState: 'terminal-unconfirmed' }),
+    ]));
+
+    now += 1_000;
+    await syncSessionEvents('pc', key);
+    expect(opens).toBe(3);
+    now += 5_000;
+    await syncSessionEvents('pc', key);
+    expect(opens).toBe(4);
+    expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'assistant-message', text: '一起', final: false, streamState: 'terminal-unconfirmed' }),
+    ]));
+    now += 15_000;
+    await syncSessionEvents('pc', key);
+    expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'assistant-message', final: false, streamState: 'terminal-unconfirmed' }),
+    ]));
+    now = 61_000;
+    await syncSessionEvents('pc', key);
+    expect(getRemoteState().timelines[timelineKey('pc', key)].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'assistant-message', text: '一起', final: false, streamState: 'incomplete' }),
+    ]));
+    expect(commands).toEqual(Array(6).fill('session.open'));
+  } finally {
+    dateNow.mockRestore();
+  }
+});
+
 test('first baseline may skip buffered approvals because the fresh computer registry returns current requests', async () => {
   setHubFetch(transport((url, command) => command ? { ok: true, result: { session, events: [{ type: 'approval.request', deviceId: 'pc', sessionKey: key,
     tool: 'codex', ts: 10, approvalId: 'current', kind: 'command', title: 'Still waiting locally' }] } }
     : { events: [{ type: 'approval.request', deviceId: 'pc', sessionKey: key, tool: 'codex', ts: 9, seq: 9,
       approvalId: 'expired', kind: 'command', title: 'Stale Hub buffer' }], nextSeq: 10, lastSeq: 10 }));
   await pair(); await openSession('pc', key);
-  expect(Object.keys(getRemoteState().approvals)).toEqual(['current']);
+  expect(Object.values(getRemoteState().approvals).map(item => item.approvalId)).toEqual(['current']);
   expect(commands).toEqual(['session.open']);
 });
 
@@ -460,4 +699,35 @@ test('a fresh snapshot replaces the optimistic bubble instead of showing the mes
   const sent = { ...EMPTY_TIMELINE, items: [{ kind: 'message' as const, id: 'local:1', role: 'user' as const, text: '修一下', final: true, ts: 5, local: true }] };
   const next = mergeHistory(sent, session, [event('u1', 1, { role: 'user', text: '修一下' }), event('a1', 1)]);
   expect(next.items.map((item) => item.id)).toEqual(['u1', 'a1']);
+});
+
+test.each(['message', 'tool'])('a %s metadata update cannot keep a local URI verified for older content', kind => {
+  const ref = { id: `att_${'a'.repeat(32)}`, mime: 'image/png', size: 24, sha256: 'b'.repeat(64) };
+  const seed = kind === 'message' ? event('image-row', 1, { attachments: [ref] })
+    : { type: 'tool', deviceId: 'pc', sessionKey: key, tool: 'codex', ts: 1, id: 'image-row', kind: 'image_generation', title: 'Image', status: 'done', attachments: [ref] } as HubEvent;
+  let timeline = applyEvent(EMPTY_TIMELINE, seed);
+  timeline = { ...timeline, items: timeline.items.map(item => item.kind === 'message' || item.kind === 'tool'
+    ? { ...item, attachments: [{ ...ref, uri: 'file:///fixture/old.png' }], ...(item.kind === 'message' ? { images: ['file:///fixture/old.png'] } : {}) } : item) };
+  const repeated = applyEvent(timeline, { ...seed, ts: 2 } as HubEvent);
+  expect(repeated.items[0]).toMatchObject({ attachments: [{ ...ref, uri: 'file:///fixture/old.png' }] });
+  const changed = applyEvent(timeline, { ...seed, ts: 3, attachments: [{ ...ref, sha256: 'c'.repeat(64) }] } as HubEvent);
+  expect(changed.items[0]).toMatchObject({ attachments: [{ ...ref, sha256: 'c'.repeat(64) }] });
+  expect(JSON.stringify(changed.items)).not.toContain('old.png');
+});
+
+test('materialization results require exact content metadata and pairing, including optional-field upgrades', async () => {
+  const current = { id: `att_${'a'.repeat(32)}`, mime: 'image/png', size: 24, sha256: 'b'.repeat(64) };
+  setHubFetch(transport((_url, command) => command ? { ok: true, result: { session, events: [event('image', 10, { attachments: [current] })], lastSeq: 0 } }
+    : { events: [], nextSeq: 0, lastSeq: 0 }));
+  await pair(); await openSession('pc', key);
+  const owner = remoteDeliveryScope();
+  const read = () => getRemoteState().timelines[timelineKey('pc', key)].items[0];
+  expect(attachMaterializedUri('pc', key, { id: current.id, mime: current.mime }, 'file:///fixture/late-unverified.png', owner)).toBe(false);
+  expect(attachMaterializedUri('pc', key, { ...current, sha256: 'c'.repeat(64) }, 'file:///fixture/wrong-digest.png', owner)).toBe(false);
+  expect(attachMaterializedUri('pc', key, current, 'file:///fixture/other-pairing.png', `${owner}-other`)).toBe(false);
+  expect(attachMaterializedUri('pc', key, current, 'https://private.example/credential', owner)).toBe(false);
+  expect(read()).toMatchObject({ attachments: [current] });
+  expect(attachMaterializedUri('pc', key, current, 'file:///fixture/current.png', owner)).toBe(true);
+  expect(attachMaterializedUri('pc', key, { id: current.id, mime: current.mime }, 'file:///fixture/late.png', owner)).toBe(false);
+  expect(read()).toMatchObject({ attachments: [{ ...current, uri: 'file:///fixture/current.png' }], images: ['file:///fixture/current.png'] });
 });

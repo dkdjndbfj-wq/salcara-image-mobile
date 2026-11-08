@@ -21,6 +21,8 @@ android {
 }
 
 dependencies {
+  // Android's platform Ed25519 provider is not available on every supported API.
+  implementation 'com.google.crypto.tink:tink-android:1.15.0'
   // Push for task news while the app is closed. Inactive (no Firebase app) unless the
   // build includes google-services.json; see app.config.js.
   implementation 'com.google.firebase:firebase-messaging:24.1.0'

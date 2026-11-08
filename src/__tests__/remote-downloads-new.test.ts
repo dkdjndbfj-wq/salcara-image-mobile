@@ -7,10 +7,10 @@ jest.mock('../components/ui', () => ({ showToast: (...args: unknown[]) => mockTo
 
 beforeEach(() => { jest.clearAllMocks(); mockOpen.mockResolvedValue(undefined); });
 
-test('the temporary entry opens only the GitHub homepage, not a guessed desktop repository', async () => {
-  expect(DESKTOP_GITHUB_URL).toBe('https://github.com/');
+test('the download entry opens the verified desktop repository latest release', async () => {
+  expect(DESKTOP_GITHUB_URL).toBe('https://github.com/dkdjndbfj-wq/salcara-desktop/releases/latest');
   await openDesktopGithub();
-  expect(mockOpen).toHaveBeenCalledWith('https://github.com/');
+  expect(mockOpen).toHaveBeenCalledWith(DESKTOP_GITHUB_URL);
   expect(mockToast).not.toHaveBeenCalled();
 });
 
@@ -28,6 +28,7 @@ test.each(['https://github.com/example/desktop', 'https://github.com/example/des
 });
 
 test.each([
+  'https://github.com/',
   'http://github.com/example/desktop', 'https://github.com.attacker.example/example/desktop',
   'https://example.github.com/example/desktop', 'https://token@github.com/example/desktop',
   'https://github.com/example/desktop?key=fixture-secret', 'https://github.com/example/desktop#fixture-secret',

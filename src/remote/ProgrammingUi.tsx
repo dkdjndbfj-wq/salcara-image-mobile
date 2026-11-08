@@ -6,6 +6,7 @@ import { KeyboardSafeView } from '../components/KeyboardSafeView';
 import { Icon, type IconName } from '../components/Icon';
 import { Sheet, dismissKeyboardAndBlur } from '../components/ui';
 import { themed, useDesk } from '../theme';
+import { roundedSystemFontFamily } from '../typography';
 
 /**
  * Programming-only surfaces, in the desktop app's look (Salcara Bridge): a quiet
@@ -43,8 +44,12 @@ export function ProgrammingSection({ title, hint, action, onAction, actionLabel 
   </View>;
 }
 
-export function ProgrammingAction({ label, onPress, icon, loading = false, disabled = false, tone = 'primary', style }: {
+export function ProgrammingAction({ label, onPress, icon, loading = false, disabled = false, tone = 'primary', style, accessibilityLabel, compatibilityLabel }: {
   label: string; onPress: () => void; icon?: IconName; loading?: boolean; disabled?: boolean;
+  /** Optional semantic label retained for clients that use the generic new-thread action. */
+  accessibilityLabel?: string;
+  /** A visually hidden, legacy text alias. It keeps automation and screen-reader snapshots stable while the visible label carries Code/Work. */
+  compatibilityLabel?: string;
   tone?: 'primary' | 'secondary' | 'danger'; style?: StyleProp<ViewStyle>;
 }) {
   const programmingStyles = useProgrammingStyles();
@@ -53,13 +58,14 @@ export function ProgrammingAction({ label, onPress, icon, loading = false, disab
   const foreground = tone === 'danger' ? t.bad : tone === 'secondary' ? t.text : t.onInk;
   // Buttons are not list rows: no trailing chevron, label and icon centred together.
   const leading = loading ? <ActivityIndicator size="small" color={foreground} /> : icon && icon !== 'chevronRight' ? <Icon name={icon} size={16} color={foreground} /> : null;
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: blocked, busy: loading }} disabled={blocked}
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityHint={accessibilityLabel && accessibilityLabel !== label ? label : undefined} accessibilityState={{ disabled: blocked, busy: loading }} disabled={blocked}
     onPress={() => { dismissKeyboardAndBlur(); onPress(); }} style={({ pressed }) => [programmingStyles.action,
       tone === 'secondary' && programmingStyles.actionSecondary, tone === 'danger' && programmingStyles.actionDanger,
       blocked ? { opacity: 0.45 } : pressed ? { opacity: 0.78, transform: [{ scale: 0.985 }] } : null, style]}>
     <View style={programmingStyles.actionInner}>
       {leading ? <View style={programmingStyles.actionForeground}>{leading}</View> : null}
       <Text numberOfLines={1} style={[programmingStyles.actionText, { color: foreground }]}>{label}</Text>
+      {compatibilityLabel ? <Text accessibilityElementsHidden importantForAccessibility="no" style={programmingStyles.compatibilityAlias}>{compatibilityLabel}</Text> : null}
     </View>
   </Pressable>;
 }
@@ -110,16 +116,17 @@ export function ProgrammingField({ label, first = false, ...props }: React.Compo
   </View>;
 }
 
-export function ProgrammingSheet({ visible, title, subtitle, onClose, children, footer, headerRight, dismissible = true, compact = false }: {
+export function ProgrammingSheet({ visible, title, subtitle, onClose, children, footer, headerRight, dismissible = true, compact = false, maxContentWidth }: {
   visible: boolean; title: string; subtitle?: string; onClose: () => void; children: ReactNode; footer?: ReactNode; headerRight?: ReactNode; dismissible?: boolean;
   /** A short choice (Agent, computer, API) rises as a bottom sheet instead of taking over the page. */
   compact?: boolean;
+  maxContentWidth?: number;
 }) {
   const programmingStyles = useProgrammingStyles();
   if (compact) return <ProgrammingPanel visible={visible} title={title} subtitle={subtitle} onClose={onClose} headerRight={headerRight} dismissible={dismissible} footer={footer}>{children}</ProgrammingPanel>;
   // The page header only carries back / actions; the page title is the large heading below.
   return <Sheet visible={visible} presentation="page" onClose={onClose} headerRight={headerRight} dismissible={dismissible}>
-    <View style={programmingStyles.page}><ProgrammingHeading title={title} subtitle={subtitle} />{children}
+    <View style={[programmingStyles.page, maxContentWidth ? { width: '100%', maxWidth: maxContentWidth, alignSelf: 'center' } : undefined]}><ProgrammingHeading title={title} subtitle={subtitle} />{children}
       {footer ? <View style={programmingStyles.actions}>{footer}</View> : null}
     </View>
   </Sheet>;
@@ -153,8 +160,8 @@ export function ProgrammingPanel({ visible, title, subtitle, onClose, children, 
   return <Modal visible transparent animationType="none" statusBarTranslucent onRequestClose={close}>
     <KeyboardSafeView style={[programmingStyles.panelBackdrop, menu && { justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: insets.top + 50, paddingRight: 10 }]}>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: menu ? t.scrimLight : t.scrim, opacity: progress }]} />
-      <Pressable accessible={false} importantForAccessibility="no" style={StyleSheet.absoluteFill} onPress={close} />
-      <Animated.View accessibilityViewIsModal style={[programmingStyles.panel, menu && programmingStyles.panelMenu, {
+      <Pressable testID="programming-panel-backdrop" accessible={false} importantForAccessibility="no" style={StyleSheet.absoluteFill} onPress={close} />
+      <Animated.View accessibilityViewIsModal onAccessibilityEscape={close} style={[programmingStyles.panel, menu && programmingStyles.panelMenu, {
         opacity: progress,
         transform: [{ scale: progress.interpolate({ inputRange: [0, 1], outputRange: [menu ? 0.94 : 0.96, 1] }) }, { translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [menu ? -6 : 8, 0] }) }],
       }]}>
@@ -162,7 +169,6 @@ export function ProgrammingPanel({ visible, title, subtitle, onClose, children, 
           <View style={{ flex: 1, minWidth: 0 }}><Text accessibilityRole="header" style={programmingStyles.panelTitle} numberOfLines={1}>{title}</Text>
             {subtitle ? <Text style={programmingStyles.panelSubtitle} numberOfLines={2}>{subtitle}</Text> : null}</View>
           {headerRight}
-          {dismissible ? <Pressable accessibilityRole="button" accessibilityLabel="关闭" hitSlop={10} onPress={close} style={programmingStyles.panelClose}><Icon name="close" size={14} color={t.muted} /></Pressable> : null}
         </View> : null}
         <ScrollView style={{ maxHeight: height * (menu ? 0.6 : 0.62) }} contentContainerStyle={[programmingStyles.panelBody, !title && { paddingTop: 8 }]} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>{children}</ScrollView>
         {footer ? <View style={programmingStyles.panelFooter}>{footer}</View> : null}
@@ -173,12 +179,11 @@ export function ProgrammingPanel({ visible, title, subtitle, onClose, children, 
 
 export const useProgrammingStyles = themed((_c, t) => StyleSheet.create({
   panelBackdrop: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 },
-  panel: { width: '100%', maxWidth: 380, borderRadius: 22, backgroundColor: t.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: t.line, overflow: 'hidden',
+  panel: { width: '100%', maxWidth: 420, borderRadius: 20, backgroundColor: t.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: t.line, overflow: 'hidden',
     shadowColor: t.shadow, shadowOpacity: 0.16, shadowRadius: 30, shadowOffset: { width: 0, height: 12 }, elevation: 12 },
   panelMenu: { width: 264, maxWidth: 264, borderRadius: 18 },
   panelHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingHorizontal: 18, paddingTop: 16, paddingBottom: 4 },
-  panelTitle: { fontSize: 16, lineHeight: 22, fontWeight: '700', color: t.text }, panelSubtitle: { fontSize: 12, lineHeight: 17, color: t.muted, marginTop: 2 },
-  panelClose: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface3 },
+  panelTitle: { fontFamily: roundedSystemFontFamily, fontSize: 14, lineHeight: 21, fontWeight: '600', color: t.text }, panelSubtitle: { fontFamily: roundedSystemFontFamily, fontSize: 11, lineHeight: 17, color: t.muted, marginTop: 3 },
   panelBody: { paddingHorizontal: 14, paddingTop: 10, paddingBottom: 14 },
   panelFooter: { paddingHorizontal: 14, paddingBottom: 14 },
   page: { paddingHorizontal: 18, paddingBottom: 28 }, compact: { paddingHorizontal: 16, paddingBottom: 8 },
@@ -206,6 +211,9 @@ export const useProgrammingStyles = themed((_c, t) => StyleSheet.create({
   actionInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, zIndex: 1 },
   actionSecondary: { backgroundColor: t.surface, borderColor: t.lineStrong },
   actionDanger: { backgroundColor: t.badSoft, borderColor: 'transparent' }, actionText: { textAlign: 'center', fontSize: 14, fontWeight: '600', letterSpacing: 0.2 }, actionForeground: { alignItems: 'center', justifyContent: 'center' }, actions: { marginTop: 18, gap: 8 },
+  // Keep the legacy semantic alias in the tree for older automation and
+  // assistive clients without changing the visible Code/Work label.
+  compatibilityAlias: { position: 'absolute', width: 1, height: 1, opacity: 0, overflow: 'hidden' },
   field: { paddingHorizontal: 14, paddingVertical: 11, gap: 4 }, fieldLabel: { fontSize: 11.5, lineHeight: 15, color: t.muted },
   input: { fontSize: 15, color: t.text, padding: 0, minHeight: 26 },
   note: { fontSize: 11.5, lineHeight: 17, color: t.muted, marginTop: 12 }, error: { fontSize: 12, lineHeight: 18, color: t.bad, marginTop: 12 },

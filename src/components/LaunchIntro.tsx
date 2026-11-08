@@ -91,14 +91,12 @@ const out = Easing.out(Easing.cubic);
 const inOut = Easing.inOut(Easing.cubic);
 const soft = Easing.inOut(Easing.quad);
 
-export function LaunchIntro({ ready, onDone, onFirstFrame }: { ready: boolean; onDone: () => void; onFirstFrame?: () => void }) {
+export function LaunchIntro({ onDone, onFirstFrame }: { onDone: () => void; onFirstFrame?: () => void }) {
   const styles = useStyles();
   const clock = useRef(new Animated.Value(0)).current;
   const reduced = useReducedMotion();
   const { width, height } = useWindowDimensions();
   const phase = useRef<'intro' | 'holding' | 'leaving'>('intro');
-  const readyRef = useRef(ready);
-  readyRef.current = ready;
   const onDoneRef = useRef(onDone);
   onDoneRef.current = onDone;
 
@@ -116,12 +114,12 @@ export function LaunchIntro({ ready, onDone, onFirstFrame }: { ready: boolean; o
       : Animated.timing(clock, { toValue: HOLD_AT, duration: HOLD_AT, easing: Easing.linear, useNativeDriver: true });
     intro.start(() => {
       phase.current = 'holding';
-      if (readyRef.current) leave();
+      // Keep startup latency out of the brand animation. The app underneath
+      // exposes its own loading state while local storage finishes opening.
+      leave();
     });
     return () => intro.stop();
   }, [clock, leave, reduced]);
-
-  useEffect(() => { if (ready && phase.current === 'holding') leave(); }, [ready, leave]);
 
   const logo = SPLASH_LOGO_SIZE;
   const glow = Math.min(width, height) * 1.15;

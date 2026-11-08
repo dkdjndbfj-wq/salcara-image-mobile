@@ -24,9 +24,10 @@ import { deleteCharacterRecords, listAboutUserNotes, loadBox, loadCharacters, re
 import type { BackupProgress } from '../storage/backup';
 import { createCompanionToolbox } from '../memorybox/tools';
 import { tagErrorStage, withStagePrefix } from '../api/error-stage';
-import { editImage, generateImage, IMAGE_TASK_FAILED, normalizeError, type ImageTaskRef } from '../api/image-api';
+import { editImages, generateImages, IMAGE_TASK_FAILED, normalizeError, type ImageTaskRef } from '../api/image-api';
 import { validateAttachments } from '../document-inputs';
-import type { AspectRatio, ChatMessage, Conversation, ProviderProfile, Quality, ReferenceImage, ResolutionTier } from '../domain';
+import type { AspectRatio, ChatMessage, Conversation, GeneratedImage, ProviderProfile, Quality, ReferenceImage, ResolutionTier } from '../domain';
+import { generatedImageSlotMapping, messageGeneratedImages, normalizeGeneratedImages, validateImageCount } from '../generated-images';
 import { createConversationTitle, createId, sizeFor } from '../domain-utils';
 import { createReferenceFromGenerated, previewDataUrl } from '../image-inputs';
 import {
@@ -37,7 +38,7 @@ import {
 import { deleteLocalFile, downloadPng, RemoteImageDownloadError, sweepUnreferencedFiles } from '../storage/files';
 import { deleteProviderKey, getProviderKey } from '../storage/secure-keys';
 import { clearLiveText, setLiveText } from './live-text';
-import { describeImageDefaults, faithfulPrompt, deleteMessageFiles, pickChat, pickImage } from './app-helpers';
+import { describeImageDefaults, faithfulPrompt, deleteMessageFiles, imageCountFromPrompt, pickChat, pickImage } from './app-helpers';
 import type { AppContextValue, ProviderPatch, RequestPhase, SendInput, Space } from './app-types';
 
 // The types and helpers live in their own modules; existing imports from here keep working.
@@ -62,6 +63,19 @@ interface RunHandle {
   /** Settles when the run has fully finished (final state written). */
   done: Promise<void>;
   finish: () => void;
+}
+
+function withImageResults(message: ChatMessage, images: GeneratedImage[]): ChatMessage {
+  const results = normalizeGeneratedImages(images);
+  return { ...message, generatedImages: results, imageUri: results.find((image) => image.status === 'complete' && image.uri)?.uri ?? null,
+    remoteImageUrl: results.length === 1 && !results[0].uri ? results[0].remoteUrl ?? null : null };
+}
+
+function finishedImageStatus(message: ChatMessage): Pick<ChatMessage, 'status' | 'error'> {
+  const images = messageGeneratedImages(message);
+  return images.length && !images.some((image) => image.status === 'complete' && image.uri)
+    ? { status: 'error', error: images.find((image) => image.error)?.error || '没有取得图片' }
+    : { status: 'complete', error: null };
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -92,12 +106,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const chatProviderRefLate = useRef<ProviderProfile | null>(null);
   /** Latest in-memory copy of messages touched this session (streamed text is not persisted until done). */
   const liveRef = useRef(new Map<string, ChatMessage>());
+  /** Progress and terminal snapshots must reach SQLite in the order they were published. */
+  const messageWrites = useRef(new Map<string, Promise<void>>());
+  const latestCommit = useRef(new Map<string, ChatMessage>());
+  const deletedConversations = useRef(new Set<string>());
+  const messageMutations = useRef(new Set<string>());
+  const restoringBackup = useRef(false);
   const messagesRef = useRef<ChatMessage[]>([]);
   messagesRef.current = messages;
   const hasOlderRef = useRef(false);
   hasOlderRef.current = hasOlderMessages;
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeConversationId;
+  /** Guards async history loads: the latest user intent wins when rows resolve out of order. */
+  const conversationOpenSeq = useRef(0);
+  /** Prevents a slower refresh after rename/delete from repainting an older list. */
+  const conversationRefreshSeq = useRef(0);
 
   const chatProvider = useMemo(() => pickChat(providers, chatProviderId), [providers, chatProviderId]);
   chatProviderRefLate.current = chatProvider;
@@ -114,19 +138,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const activeAgentId = activeConversationId ? activeConversation?.agentId ?? null : draftAgentId;
 
   const refreshConversations = useCallback(async () => {
+    const seq = (conversationRefreshSeq.current += 1);
     const next = await listConversations();
-    setConversations(next);
+    if (seq === conversationRefreshSeq.current) setConversations(next);
     return next;
   }, []);
 
   const restoreBackup = useCallback(async (onProgress?: (progress: BackupProgress) => void) => {
-    // Loaded on first use: the picker and zip code are only needed here.
-    const { pickAndRestoreBackup } = require('../storage/backup') as typeof import('../storage/backup');
-    const result = await pickAndRestoreBackup(onProgress);
-    if (!result) return null;
-    await refreshConversations();
-    await Promise.all([loadAgents(true), loadMemories(true), reloadMemoryStore()]).catch(() => undefined);
-    return result;
+    if (restoringBackup.current) throw new Error('正在恢复备份，请稍后');
+    // Restored rows retain their IDs. Old runs and queued checkpoints must finish
+    // before a deleted ID can safely belong to a restored conversation again.
+    if (runsRef.current.size || messageWrites.current.size || messageMutations.current.size) throw new Error('请等待当前回复保存完成后再恢复备份');
+    restoringBackup.current = true;
+    try {
+      // Loaded on first use: the picker and zip code are only needed here.
+      const { pickAndRestoreBackup } = require('../storage/backup') as typeof import('../storage/backup');
+      const result = await pickAndRestoreBackup(onProgress);
+      if (!result) return null;
+      const restored = await refreshConversations();
+      restored.forEach((conversation) => deletedConversations.current.delete(conversation.id));
+      await Promise.all([loadAgents(true), loadMemories(true), reloadMemoryStore()]).catch(() => undefined);
+      return result;
+    } finally { restoringBackup.current = false; }
   }, [refreshConversations]);
 
   const reloadProviders = useCallback(async () => {
@@ -193,6 +226,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   /** Claims the conversation's slot synchronously, so a double tap can't start two replies. */
   const beginRun = useCallback((conversationId: string) => {
+    if (restoringBackup.current) throw new Error('正在恢复备份，请稍后再发送');
+    if (deletedConversations.current.has(conversationId)) throw new Error('这条对话已删除，请新建对话');
+    if (messageMutations.current.has(conversationId)) throw new Error('这条对话的消息正在更新');
     if (runsRef.current.has(conversationId)) throw new Error('请先等待或停止当前回复');
     let finish: () => void = () => undefined;
     const done = new Promise<void>((resolve) => { finish = resolve; });
@@ -237,6 +273,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const newChat = useCallback((agentId: string | null = null) => {
     // Idempotent: tapping “新对话” repeatedly always lands on the same blank
     // draft. Nothing is written until a message is sent.
+    conversationOpenSeq.current += 1;
     setHasOlderMessages(false);
     setDraftAgentId(agentId);
     draftAgentRef.current = agentId;
@@ -249,9 +286,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Every conversation opens with its newest page; older messages load while scrolling up.
   // Sending and regenerating still give the model the whole history (fullHistory below).
   const openConversation = useCallback(async (conversationId: string, paged = true) => {
+    const seq = (conversationOpenSeq.current += 1);
     // Load first, then switch: a message sent in between must see the full history.
     // A reply still running in that conversation shows its live (unsaved) text.
     const rows = paged ? await listRecentMessages(conversationId, PAGE_SIZE + 1) : await listMessages(conversationId);
+    // A fast second tap, a new draft, or a space switch may have superseded this
+    // read. Never let a slower database response repaint the newer conversation.
+    if (seq !== conversationOpenSeq.current) return;
     const older = paged && rows.length > PAGE_SIZE;
     const loaded = (older ? rows.slice(1) : rows).map((item) => liveRef.current.get(item.id) ?? item);
     setMessages(loaded);
@@ -265,8 +306,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const openMessage = useCallback(async (conversationId: string, messageId: string) => {
     const shown = activeIdRef.current === conversationId && messagesRef.current.some((item) => item.id === messageId);
     if (!shown) {
+      const seq = (conversationOpenSeq.current += 1);
       // Loads from a few messages before the hit to the end; anything older loads while scrolling up as usual.
       const rows = await listMessages(conversationId);
+      if (seq !== conversationOpenSeq.current) return;
       const index = rows.findIndex((item) => item.id === messageId);
       if (index < 0) { await openConversation(conversationId); return; }
       const start = Math.max(0, Math.min(index - 4, rows.length - PAGE_SIZE));
@@ -308,12 +351,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const showConversation = useCallback(async (conversationId: string | null, paged: boolean) => {
     if (conversationId) { await openConversation(conversationId, paged).catch(() => undefined); return; }
+    conversationOpenSeq.current += 1;
     setActiveConversationId(null); activeIdRef.current = null; setMessages([]); messagesRef.current = []; setHasOlderMessages(false);
   }, [openConversation]);
 
   const switchSpace = useCallback((next: Space) => {
     if (next === spaceRef.current) return;
     openSeq.current += 1; // a character still opening must not land in the other space
+    conversationOpenSeq.current += 1;
     spacePlaces.current[spaceRef.current] = activeIdRef.current;
     setSpace(next);
     spaceRef.current = next;
@@ -401,26 +446,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const deleteConversation = useCallback(async (conversationId: string) => {
+    if (messageMutations.current.has(conversationId)) throw new Error('这条对话的消息正在更新');
+    if (restoringBackup.current) throw new Error('正在恢复备份');
+    messageMutations.current.add(conversationId);
+    try {
+    conversationOpenSeq.current += 1;
     const run = runsRef.current.get(conversationId);
     if (run) {
       // Let the aborted run write its final state first, so files it just
       // produced are deleted with the rows instead of being orphaned.
       run.controller.abort();
-      await Promise.race([run.done, new Promise((resolve) => setTimeout(resolve, 5000))]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { await Promise.race([run.done, new Promise((resolve) => { timer = setTimeout(resolve, 5000); })]); }
+      finally { if (timer) clearTimeout(timer); }
     }
     const removed = await deleteConversationRecord(conversationId);
+    deletedConversations.current.add(conversationId);
+    // A slow checkpoint can still be queued after the bounded wait above.
+    const pending = [...latestCommit.current.values()].filter((message) => message.conversationId === conversationId);
+    const discarded = [...removed, ...pending];
     void deleteConversationSummary(conversationId);
     void setSetting(`draft.assistant.${conversationId}`, null).catch(() => undefined);
-    removed.forEach((message) => liveRef.current.delete(message.id));
-    for (const message of removed) {
-      traceFileUris(message.agent).forEach((uri) => { deleteGeneratedFile(uri); deleteLocalFile(uri); });
-      deleteLocalFile(message.imageUri);
-      deleteLocalFile(message.maskUri);
-      message.references.forEach((reference) => deleteLocalFile(reference.uri));
-      message.documents?.forEach((document) => deleteLocalFile(document.uri));
-    }
+    discarded.forEach((message) => { liveRef.current.delete(message.id); latestCommit.current.delete(message.id); clearLiveText(message.id); });
+    await deleteMessageFiles(discarded);
     await refreshConversations();
     if (conversationId === activeIdRef.current) { setActiveConversationId(null); activeIdRef.current = null; setMessages([]); messagesRef.current = []; }
+    } finally { messageMutations.current.delete(conversationId); }
   }, [refreshConversations]);
 
   const deleteCharacter = useCallback(async (id: string) => {
@@ -461,25 +512,77 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [chatProviderId, imageProviderId, deleteConversation, refreshConversations]);
 
   const commit = useCallback(async (message: ChatMessage, persist = true) => {
-    // Kept for the session (not deleted on completion) so a conversation opened
-    // while this write is in flight still sees the newest version.
-    liveRef.current.set(message.id, message);
-    // The list now carries this text; the bubble stops reading the typewriter's copy.
-    clearLiveText(message.id);
-    // Show first, then save: a slow write must never put an older version back on screen.
-    if (message.conversationId === activeIdRef.current) {
-      setMessages((current) => {
-        const next = current.map((item) => (item.id === message.id ? message : item));
-        messagesRef.current = next;
-        return next;
-      });
+    const discarded = () => {
+      if (!deletedConversations.current.has(message.conversationId)) return false;
+      void deleteMessageFiles([message]).catch(() => undefined);
+      return true;
+    };
+    if (discarded()) return;
+    latestCommit.current.set(message.id, message);
+    // A picture must be recoverable before it appears. Text/progress stays
+    // immediate; a delayed image checkpoint may never repaint a newer snapshot.
+    const previous = liveRef.current.get(message.id);
+    const savedUris = new Set(previous ? messageGeneratedImages(previous).map((image) => image.uri) : []);
+    const checkpointImage = persist && messageGeneratedImages(message).some((image) => image.uri && !savedUris.has(image.uri));
+    const publish = () => {
+      if (discarded()) return;
+      if (latestCommit.current.get(message.id) !== message) return;
+      liveRef.current.set(message.id, message);
+      clearLiveText(message.id);
+      if (message.conversationId === activeIdRef.current) {
+        setMessages((current) => {
+          const next = current.map((item) => (item.id === message.id ? message : item));
+          messagesRef.current = next;
+          return next;
+        });
+      }
+    };
+    if (!checkpointImage) publish();
+    if (persist) {
+      const previous = messageWrites.current.get(message.id);
+      const write = (previous ?? Promise.resolve()).catch(() => undefined).then(() => { if (!discarded()) return updateMessage(message); });
+      messageWrites.current.set(message.id, write);
+      const clear = () => { if (messageWrites.current.get(message.id) === write) messageWrites.current.delete(message.id); };
+      void write.then(clear, clear);
+      await write;
     }
-    if (persist) await updateMessage(message);
+    if (checkpointImage) publish();
   }, []);
 
   /** Executes the paid image request described by a saved assistant message. */
-  const drawImage = useCallback(async (message: ChatMessage, signal: AbortSignal): Promise<ChatMessage> => {
-    if (message.remoteImageUrl) {
+  const drawImage = useCallback(async (message: ChatMessage, signal: AbortSignal, onImages?: (images: GeneratedImage[]) => Promise<void>): Promise<ChatMessage> => {
+    const taskKey = `image_task:${message.id}`;
+    const taskJson = await getSetting(taskKey);
+    let savedTask: (ImageTaskRef & { fingerprint?: string; at?: number }) | null = null;
+    if (taskJson) {
+      try {
+        const saved: unknown = JSON.parse(taskJson);
+        if (!saved || typeof saved !== 'object' || !('url' in saved)) throw new Error('invalid task');
+        savedTask = saved as ImageTaskRef & { fingerprint?: string; at?: number };
+      } catch { throw new Error('已保存的图片任务信息无效，本次没有重新发起生成'); }
+    }
+    // Existing result URLs are already-paid artifacts. Resume only their downloads.
+    // An unfinished accepted task takes precedence over a partial artifact list.
+    if (!savedTask && message.generatedImages?.some((image) => image.uri || image.remoteUrl)) {
+      let images = messageGeneratedImages(message);
+      setRunPhase(message.conversationId, 'downloading');
+      for (let index = 0; index < images.length; index += 1) {
+        const item = images[index];
+        if (item.uri || !item.remoteUrl) continue;
+        let next: GeneratedImage;
+        if (signal.aborted) next = { ...item, status: 'error', error: '图片下载已停止' };
+        else {
+          images = images.map((image, position) => position === index ? { ...item, status: 'pending', error: null } : image);
+          await onImages?.(images);
+          try { next = { ...item, uri: await downloadPng(item.remoteUrl, signal), remoteUrl: null, status: 'complete', error: null }; }
+          catch (error) { next = { ...item, status: 'error', error: signal.aborted ? '图片下载已停止' : normalizeError(error).message }; }
+        }
+        images = images.map((image, position) => position === index ? next : image);
+        await onImages?.(images);
+      }
+      return withImageResults(message, images);
+    }
+    if (!savedTask && message.remoteImageUrl) {
       setRunPhase(message.conversationId, 'downloading');
       const imageUri = await downloadPng(message.remoteImageUrl, signal).catch((error: unknown) => { throw tagErrorStage(error, 'drawing'); });
       return { ...message, imageUri, remoteImageUrl: null };
@@ -491,37 +594,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setRunPhase(message.conversationId, 'drawing');
     const prompt = message.preparedPrompt || message.prompt;
     // An async task the provider already accepted for this exact job is resumed on retry instead of paid for again.
-    const taskKey = `image_task:${message.id}`;
-    const fingerprint = [provider.id, provider.baseUrl, message.model, prompt, message.size, message.quality, message.transparent, message.references.map((item) => item.uri).join(','), message.maskUri ?? ''].join('|');
-    let resumeTask: ImageTaskRef | null = null;
-    try {
-      const saved = JSON.parse((await getSetting(taskKey)) || 'null') as (ImageTaskRef & { fingerprint?: string; at?: number }) | null;
-      if (saved?.fingerprint === fingerprint && Date.now() - (saved.at ?? 0) < 24 * 3600_000) resumeTask = { id: saved.id, url: saved.url };
-    } catch { resumeTask = null; }
+    const count = validateImageCount(message.imageCount);
+    const legacyFingerprint = [provider.id, provider.baseUrl, message.model, prompt, message.size, message.quality, message.transparent, message.references.map((item) => item.uri).join(','), message.maskUri ?? ''].join('|');
+    const fingerprint = count === 1 ? legacyFingerprint : `${legacyFingerprint}|count:${count}`;
+    if (savedTask && savedTask.fingerprint !== fingerprint) throw new Error('已接受的图片任务与当前服务或参数不匹配，本次没有重新发起生成');
+    const resumeTask: ImageTaskRef | null = savedTask ? {
+      id: savedTask.id, url: savedTask.url,
+      ...(savedTask.results ? { results: savedTask.results } : {}),
+      ...(savedTask.terminal !== undefined ? { terminal: savedTask.terminal } : {}),
+    } : null;
     let taskSaved = Boolean(resumeTask);
-    const onTask = (task: ImageTaskRef) => { taskSaved = true; void setSetting(taskKey, JSON.stringify({ ...task, fingerprint, at: Date.now() })).catch(() => undefined); };
+    const onTask = async (task: ImageTaskRef) => {
+      if (deletedConversations.current.has(message.conversationId)) throw new Error('这条图片任务已删除');
+      await setSetting(taskKey, JSON.stringify({ ...task, fingerprint, at: Date.now() }));
+      if (deletedConversations.current.has(message.conversationId)) {
+        await deleteMessageFiles([message]);
+        throw new Error('这条图片任务已删除');
+      }
+      taskSaved = true;
+    };
     const common = {
       baseUrl: provider.baseUrl, apiKey, model: message.model, prompt,
-      quality: message.quality, size: message.size, transparent: message.transparent, signal, resumeTask, onTask,
+      quality: message.quality, size: message.size, transparent: message.transparent, count, signal, resumeTask, onTask, onImages,
+      resultIds: messageGeneratedImages(message).map((image) => image.id),
     };
-    let imageUri: string;
+    let images: GeneratedImage[];
     try {
-      imageUri = message.references.length
-        ? await editImage({ ...common, references: message.references, maskUri: message.maskUri })
-        : await generateImage(common);
+      images = message.references.length
+        ? await editImages({ ...common, references: message.references, maskUri: message.maskUri })
+        : await generateImages(common);
     } catch (error) {
       const code = (error as { code?: unknown } | null)?.code;
-      if (code && code === IMAGE_TASK_FAILED) void setSetting(taskKey, null).catch(() => undefined);
+      if (code && code === IMAGE_TASK_FAILED) await setSetting(taskKey, null);
       throw tagErrorStage(error, 'drawing');
     }
-    if (taskSaved) void setSetting(taskKey, null).catch(() => undefined);
-    return { ...message, imageUri, remoteImageUrl: null };
+    if (taskSaved) await setSetting(taskKey, null);
+    return withImageResults(message, images);
   }, [setRunPhase]);
 
   /** Turns a tool call into a saved, retryable image job on the assistant message. */
   const prepareImageJob = useCallback(async (
     message: ChatMessage, call: ImageToolCall, images: Map<string, LabeledImage>, userMessage: ChatMessage, provider: ProviderProfile,
   ): Promise<ChatMessage> => {
+    const missing = call.referenceImages.find((label) => !images.has(label));
+    if (missing) throw new Error(`所引用的图片“${missing}”当前不可用，本次没有发起生成`);
+    const count = validateImageCount(call.count);
     const references: ReferenceImage[] = [];
     for (const label of call.referenceImages) {
       const image = images.get(label);
@@ -548,6 +665,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       size: sizeFor(ratio, tier, provider.model),
       transparent: call.transparent,
       preparedPrompt: prompt,
+      imageCount: count,
+      generatedImages: count > 1 ? Array.from({ length: count }, (_, index) => ({ id: `image-${index + 1}`, uri: null, status: 'pending' as const })) : [],
       references,
       maskUri: usesMask ? userMessage.maskUri : null,
     };
@@ -573,7 +692,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     let lastPersist = Date.now();
     let summaryModel: SummaryModel | null = null;
     /** The picture a redraw in progress would replace; put back if the redraw doesn't finish. */
-    let replacedImage: string | null = null;
+    let replacedImages: GeneratedImage[] | null = null;
+    const checkpointImages = async (images: GeneratedImage[]) => {
+      working = withImageResults(working, images);
+      await commit(working);
+    };
     try {
       if (mode === 'agent') {
         const saved = (await listProviders()).find((item) => item.id === assistant.analysisProviderId && (item.chatModel || assistant.analysisModel));
@@ -599,6 +722,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         let ticker: ReturnType<typeof setInterval> | null = null;
         const stopTicker = () => { if (ticker) { clearInterval(ticker); ticker = null; } };
         const tick = () => {
+          if (controller.signal.aborted || working.status !== 'pending') { stopTicker(); return; }
           const remaining = target.length - shown;
           if (remaining <= 0) { stopTicker(); return; }
           shown = Math.min(target.length, shown + Math.max(2, Math.ceil(remaining / 6)));
@@ -607,16 +731,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           working = { ...working, text: target.slice(0, shown) };
           // Each step only re-renders the bubble being written (live-text.ts). The message
           // list and the saved copy follow now and then, so a killed app keeps what was written.
-          if (Date.now() - lastPersist > 1200) { lastPersist = Date.now(); void commit(working, true); }
+          if (Date.now() - lastPersist > 1200) { lastPersist = Date.now(); void commit(working, true).catch(() => undefined); }
           else setLiveText(working.id, working.text ?? null);
         };
         const updateTrace = (update: (trace: AgentTrace) => AgentTrace) => {
-          if (controller.signal.aborted) return;
+          if (controller.signal.aborted || working.status !== 'pending') return;
           working = { ...working, agent: update(working.agent ?? emptyTrace()) };
           lastPersist = Date.now();
           // Progress resets the budget: a long research turn is fine as long as each step moves.
           armTimeout();
-          void commit(working);
+          void commit(working).catch(() => undefined);
         };
 
         // Images the model can refer to, plus any it draws during this turn.
@@ -628,26 +752,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // A redraw keeps the first picture as a draft of this turn.
           if (working.imageUri) {
             const trace = working.agent ?? emptyTrace();
-            replacedImage = working.imageUri;
-            working = { ...working, imageUri: null, agent: { ...trace, drafts: [...(trace.drafts ?? []), working.imageUri] } };
+            replacedImages = messageGeneratedImages(working);
+            working = { ...working, imageUri: null, generatedImages: [], agent: { ...trace, drafts: [...(trace.drafts ?? []), ...replacedImages.flatMap((image) => image.uri ? [image.uri] : [])] } };
           }
           const job = await prepareImageJob(working, call, labeled, userMessage, image);
           working = { ...job, text: working.text, agent: working.agent, status: 'pending' };
           // Saved before the paid request: a retry repeats only the image call.
           await commit(working);
           armTimeout();
-          const drawn = await drawImage(working, controller.signal);
-          working = { ...working, imageUri: drawn.imageUri, remoteImageUrl: drawn.remoteImageUrl };
-          replacedImage = null;
+          const drawn = await drawImage(working, controller.signal, checkpointImages);
+          working = withImageResults(working, messageGeneratedImages(drawn));
+          if (working.imageUri) replacedImages = null;
           await commit(working);
-          const label = `图${nextLabel}`;
-          nextLabel += 1;
-          if (working.imageUri) labeled.set(label, { label, uri: working.imageUri, name: `${label}.png`, mimeType: 'image/png', size: 0 });
+          const labels: string[] = [];
+          const previews: string[] = [];
+          for (const image of messageGeneratedImages(working)) {
+            if (!image.uri || image.status !== 'complete') continue;
+            const label = `图${nextLabel++}`;
+            labels.push(label);
+            labeled.set(label, { label, uri: image.uri, name: `${label}.png`, mimeType: 'image/png', size: 0 });
+            if (preview) { try { previews.push(await previewDataUrl(image.uri)); } catch { /* the result remains usable without a model preview */ } }
+          }
+          if (!labels.length) throw new Error(finishedImageStatus(working).error || '没有取得图片');
           setRunPhase(conversationId, 'thinking');
           armTimeout();
-          let previewUrl: string | undefined;
-          if (preview && working.imageUri) { try { previewUrl = await previewDataUrl(working.imageUri); } catch { previewUrl = undefined; } }
-          return { label, preview: previewUrl };
+          const results = messageGeneratedImages(working);
+          return { label: labels.join('、'), preview: previews[0], previews, partial: results.some((image) => image.status === 'error'),
+            slotMapping: generatedImageSlotMapping(results, (uri) => [...labeled.values()].find((image) => image.uri === uri)?.label) };
         };
         // Chat space: the character's persona, memory box and recent turns; assistant space: tools and agents.
         const character = options.characterId ? (await loadCharacters()).find((item) => item.id === options.characterId) ?? null : null;
@@ -723,6 +854,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         labeled = new Map(labelConversationImages(modelHistory, userMessage.references).map((item) => [item.label, item]));
         nextLabel = labeled.size + 1;
         const showText = (text: string) => {
+          if (controller.signal.aborted || working.status !== 'pending') return;
           // Text normally only grows; it shrinks when a hidden marker or a
           // pre-tool remark is removed, and then never shows more than the new text.
           if (!(text.length >= target.length && text.startsWith(target))) {
@@ -764,20 +896,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           working = { ...working, status: 'pending' };
           await commit(working);
           armTimeout();
-          working = await drawImage(working, controller.signal);
+          const drawn = await drawImage(working, controller.signal, checkpointImages);
+          working = withImageResults(working, messageGeneratedImages(drawn));
         }
         if (!working.text && !working.imageUri && !working.agent?.files?.length && !working.agent?.actions?.length) {
           working = { ...working, text: '这一轮没有得到文字回答。可以点“重新生成”再试一次。' };
         }
       } else {
         await commit(working);
-        working = await drawImage(working, controller.signal);
+        const drawn = await drawImage(working, controller.signal, checkpointImages);
+        working = withImageResults(working, messageGeneratedImages(drawn));
         // A retried drawing inside an agent turn: its failed step is now done.
-        if (working.agent) {
-          working = { ...working, agent: { ...working.agent, steps: working.agent.steps.map((step) => (step.kind === 'image' && step.status === 'error' ? { ...step, status: 'done' as const, error: undefined, detail: '已生成' } : step)) } };
+        if (working.agent && working.imageUri) {
+          const partial = messageGeneratedImages(working).some((image) => image.status === 'error');
+          working = { ...working, agent: { ...working.agent, steps: working.agent.steps.map((step) => (step.kind === 'image' && step.status === 'error' ? { ...step, status: 'done' as const, error: undefined, detail: partial ? '部分图片已取得' : '已生成' } : step)) } };
         }
       }
-      working = { ...working, status: 'complete', error: null, elapsedMs: Date.now() - startedAt };
+      working = { ...working, ...finishedImageStatus(working), elapsedMs: Date.now() - startedAt };
       await commit(working);
       // Fold old turns into the rolling summary in the background (rarely needs a call).
       if (summaryModel) void compactConversation(conversationId, summaryModel).catch(() => undefined);
@@ -789,17 +924,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           ? '等待超过 10 分钟，已停止等待。图片可能仍在服务商处生成，请先查看服务商记录再重新绘制，以免重复扣费'
           : '等待超过 10 分钟，已停止等待，请稍后重试'
         : withStagePrefix(normalizeError(error).message, error);
-      if (replacedImage && !working.imageUri && mode === 'agent' && !(error instanceof RemoteImageDownloadError)) {
+      if (replacedImages && !working.imageUri && mode === 'agent' && !(error instanceof RemoteImageDownloadError)) {
         // A redraw that was stopped or failed: the turn keeps the picture it already had.
-        const kept = replacedImage;
+        // The async tool callback populates this snapshot; control-flow analysis cannot see that assignment.
+        const kept = replacedImages as GeneratedImage[];
         const previous = working.agent ?? emptyTrace();
         const drafts = previous.drafts ?? [];
-        const index = drafts.lastIndexOf(kept);
+        const keptUris = new Set(kept.map((image) => image.uri));
         const now = Date.now();
         working = {
-          ...working, imageUri: kept, remoteImageUrl: null, status: 'complete', error: null, elapsedMs: now - startedAt,
+          ...withImageResults(working, kept), remoteImageUrl: null, status: 'complete', error: null, elapsedMs: now - startedAt,
           agent: {
-            ...previous, drafts: index >= 0 ? [...drafts.slice(0, index), ...drafts.slice(index + 1)] : drafts,
+            ...previous, drafts: drafts.filter((uri) => !keptUris.has(uri)),
             steps: [...previous.steps.map((step) => (step.status === 'running' ? { ...step, status: 'error' as const, error: cancelled ? '已停止' : '未完成', endedAt: now } : step)),
               { id: createId(), kind: 'image' as const, title: cancelled ? '已停止重画，保留了之前的图片' : '重画没有完成，保留了之前的图片', status: 'error' as const, error: cancelled ? '已停止' : message, startedAt: now, endedAt: now }],
           },
@@ -808,19 +944,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       const trace = working.agent;
-      if (!cancelled && !timedOut && working.imageUri && mode === 'agent') {
+      if (working.imageUri) {
         // The picture was already delivered; a failure in the follow-up (e.g. self-check) must not
         // turn it into an error whose retry would pay for the image again.
         working = {
-          ...working, status: 'complete', error: null, elapsedMs: Date.now() - startedAt,
+          ...working, generatedImages: messageGeneratedImages(working).map((image) => image.status === 'pending'
+            ? { ...image, status: 'error' as const, error: cancelled ? '已停止' : message } : image), status: 'complete', error: null, elapsedMs: Date.now() - startedAt,
           agent: trace ? { ...trace, steps: [...trace.steps.map((step) => (step.status === 'running' ? { ...step, status: 'error' as const, error: '未完成', endedAt: Date.now() } : step)),
-            { id: createId(), kind: 'check' as const, title: '画完后的检查没有完成', status: 'error' as const, error: message, startedAt: Date.now(), endedAt: Date.now() }] } : trace,
+            { id: createId(), kind: 'check' as const, title: cancelled ? '已停止后续处理，图片已保留' : '画完后的检查没有完成，图片已保留', status: 'error' as const, error: cancelled ? '已停止' : message, startedAt: Date.now(), endedAt: Date.now() }] } : trace,
         };
         await commit(working);
         return;
       }
       working = {
         ...working,
+        generatedImages: messageGeneratedImages(working).map((image) => image.status === 'pending'
+          ? { ...image, status: 'error' as const, error: cancelled ? '已停止' : message } : image),
         status: cancelled ? 'cancelled' : 'error',
         error: cancelled ? '已停止' : message,
         remoteImageUrl: error instanceof RemoteImageDownloadError ? error.remoteImageUrl : working.remoteImageUrl,
@@ -907,7 +1046,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (!chatProvider) {
         // Image-only setup: every message is a drawing request.
         mode = 'image-only';
-        assistant = await prepareImageJob(assistant, { prompt, referenceImages: images.map((_, index) => `图${index + 1}`), aspectRatio: null, transparent: /透明/.test(prompt) },
+        assistant = await prepareImageJob(assistant, { prompt, count: imageCountFromPrompt(prompt), referenceImages: images.map((_, index) => `图${index + 1}`), aspectRatio: null, transparent: /透明/.test(prompt) },
           new Map(images.map((image, index) => [`图${index + 1}`, { ...image, label: `图${index + 1}` }])), userMessage, imageProvider!);
         assistant = { ...assistant, status: 'pending' };
       }
@@ -976,7 +1115,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // A drawing that never arrived is repeated as-is (no new conversation step, no double charge).
       // An image that exists is regenerated with a fresh turn; image-only setups simply redraw.
       const savedJob = Boolean(message.preparedPrompt && (message.mode === 'generate' || message.mode === 'edit'));
-      const imageJob = savedJob && (!message.imageUri || !message.analysisProviderId || !chatProvider);
+      const acceptedTask = savedJob ? await getSetting(`image_task:${message.id}`) : null;
+      const imageJob = savedJob && (Boolean(acceptedTask) || !message.imageUri || !message.analysisProviderId || !chatProvider);
       const conversation = (await listConversations()).find((item) => item.id === conversationId);
       const research = Boolean(message.agent?.research);
       const characterId = conversation?.kind === 'companion' ? conversation.characterId ?? null : null;
@@ -986,12 +1126,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const agent = conversation?.agentId ? (await loadAgents().catch(() => [])).find((item) => item.id === conversation.agentId) ?? null : null;
         current = chatFor(agent);
       }
+      const retainedImages = imageJob && (acceptedTask || (message.status !== 'complete' && message.generatedImages?.some((image) => image.uri || image.remoteUrl)))
+        ? messageGeneratedImages(message) : [];
       const reset: ChatMessage = {
         ...message, status: 'pending', error: null, imageUri: null, elapsedMs: null,
+        generatedImages: acceptedTask
+          ? retainedImages.map((image) => image.uri ? image : { ...image, status: 'pending' as const, error: null })
+          : retainedImages,
         ...(imageJob ? {} : {
           ...(current?.chat && current.chatModel ? { analysisProviderId: current.chat.id, analysisModel: current.chatModel, model: current.chatModel, analysisApi: current.chat.chatApi, requestApi: current.chat.chatApi } : {}),
           text: null, agent: research ? { ...emptyTrace(), research: true } : null,
-          mode: 'chat' as const, preparedPrompt: null, references: [], maskUri: null, remoteImageUrl: null,
+          mode: 'chat' as const, preparedPrompt: null, references: [], maskUri: null, remoteImageUrl: null, imageCount: 1,
         }),
       };
       await commit(reset);
@@ -1009,14 +1154,45 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       if (latest && latest.status === 'complete') {
-        const keep = new Set([latest.imageUri, latest.maskUri, ...latest.references.map((item) => item.uri), ...userMessage.references.map((item) => item.uri), userMessage.maskUri, ...traceFileUris(latest.agent)]);
-        const previous = [message.imageUri, ...message.references.map((item) => item.uri), ...traceFileUris(message.agent)];
+        const keep = new Set([latest.imageUri, ...messageGeneratedImages(latest).map((image) => image.uri), latest.maskUri, ...latest.references.map((item) => item.uri), ...userMessage.references.map((item) => item.uri), userMessage.maskUri, ...traceFileUris(latest.agent)]);
+        const previous = [...new Set([message.imageUri, ...messageGeneratedImages(message).map((image) => image.uri), ...message.references.map((item) => item.uri), ...traceFileUris(message.agent)])];
         previous.forEach((uri) => { if (uri && !keep.has(uri)) { deleteGeneratedFile(uri); deleteLocalFile(uri); } });
       }
     } finally {
       endRun(conversationId, run);
     }
   }, [beginRun, chatFor, chatProvider, commit, endRun, fullHistory, runTurn]);
+
+  /** Retry exactly one already-paid artifact; never submit a new generation. */
+  const retryImage = useCallback(async (message: ChatMessage, imageId: string, failedUri?: string) => {
+    const run = beginRun(message.conversationId);
+    try {
+      const stored = (await listMessages(message.conversationId)).find((item) => item.id === message.id && item.role === 'assistant');
+      if (!stored) throw new Error('这条图片消息已不存在');
+      let working = liveRef.current.get(message.id) ?? stored;
+      const images = messageGeneratedImages(working);
+      const selected = images.find((image) => image.id === imageId);
+      if (!selected?.remoteUrl || (selected.uri && selected.uri !== failedUri)) throw new Error('这张图片没有可重新下载的地址');
+      const unreadableUri = selected.uri;
+      const url = selected.remoteUrl;
+      setRunPhase(message.conversationId, 'downloading');
+      const replace = async (patch: Partial<GeneratedImage>, terminal = false) => {
+        working = withImageResults(working, messageGeneratedImages(working).map((image) => image.id === imageId ? { ...image, ...patch } : image));
+        working = { ...working, ...(terminal ? finishedImageStatus(working) : { status: 'pending' as const, error: null }) };
+        await commit(working);
+      };
+      await replace({ status: 'pending', error: null });
+      let uri: string;
+      try { uri = await downloadPng(url, run.controller.signal); }
+      catch (error) {
+        await replace({ uri: null, status: 'error', error: run.controller.signal.aborted ? '图片下载已停止' : normalizeError(error).message }, true);
+        if (unreadableUri) deleteLocalFile(unreadableUri);
+        return;
+      }
+      await replace({ uri, remoteUrl: null, status: 'complete', error: null }, true);
+      if (unreadableUri && unreadableUri !== uri) deleteLocalFile(unreadableUri);
+    } finally { endRun(message.conversationId, run); }
+  }, [beginRun, commit, endRun, setRunPhase]);
 
   /** Files that belonged to removed messages, except ones still in use (`keep`). */
 
@@ -1038,7 +1214,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!chatProvider && !imageProvider) throw new Error('还没有添加 API，请先在“设置 → API 管理”里添加');
     // The edited message and every turn after it go; the new message then sees exactly the history before it.
     const removed = await deleteMessagesFrom(conversationId, target.createdAt);
-    removed.forEach((item) => liveRef.current.delete(item.id));
+    removed.forEach((item) => { liveRef.current.delete(item.id); latestCommit.current.delete(item.id); });
     if (activeIdRef.current === conversationId) {
       const kept = messagesRef.current.filter((item) => item.createdAt < target.createdAt);
       setMessages(kept); messagesRef.current = kept;
@@ -1046,28 +1222,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     await forgetRemoved(conversationId, target.createdAt);
     // Attachments carried over into the edited message stay; everything else of the removed turns is deleted.
     const keep = new Set<string | null | undefined>([...(input.images ?? []).map((item) => item.uri), ...(input.documents ?? []).map((item) => item.uri), input.maskUri]);
-    try { await send(input); } finally { deleteMessageFiles(removed, keep); }
+    try { await send(input); } finally { await deleteMessageFiles(removed, keep); }
   }, [chatProvider, imageProvider, forgetRemoved, send]);
 
   const deleteMessage = useCallback(async (messageId: string) => {
     const conversationId = activeIdRef.current;
     if (!conversationId) return;
+    if (restoringBackup.current) throw new Error('正在恢复备份');
+    if (messageMutations.current.has(conversationId)) throw new Error('这条对话的消息正在更新');
+    // The run is claimed before its first database read; the visible message
+    // may still look complete while a per-image retry is starting.
+    if (runsRef.current.has(conversationId)) throw new Error('当前回复还在进行中，暂时不能删除消息');
     const all = messagesRef.current;
     const index = all.findIndex((item) => item.id === messageId);
     if (index < 0) return;
     const target = all[index];
     // A question goes together with its answer, so the model never sees an answer without its question.
     const answer = target.role === 'user' && all[index + 1]?.role === 'assistant' ? all[index + 1] : null;
-    if (runsRef.current.has(conversationId) && (target.status === 'pending' || answer?.status === 'pending')) throw new Error('这条回复还在进行中，请先停止');
+    messageMutations.current.add(conversationId);
+    try {
     const removed = await deleteMessageRecords(conversationId, [target.id, ...(answer ? [answer.id] : [])]);
-    removed.forEach((item) => liveRef.current.delete(item.id));
+    removed.forEach((item) => { liveRef.current.delete(item.id); latestCommit.current.delete(item.id); });
     const gone = new Set(removed.map((item) => item.id));
     if (activeIdRef.current === conversationId) {
       const kept = messagesRef.current.filter((item) => !gone.has(item.id));
       setMessages(kept); messagesRef.current = kept;
     }
     await forgetRemoved(conversationId, target.createdAt);
-    deleteMessageFiles(removed);
+    await deleteMessageFiles(removed);
+    } finally { messageMutations.current.delete(conversationId); }
   }, [forgetRemoved]);
 
   /** Changes one phone action card on a finished message. */
@@ -1114,11 +1297,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AppContextValue>(() => ({
     ready, providers, chatProvider, imageProvider, conversations, activeConversationId, activeConversation, messages,
     busy, anyBusy, runningConversationIds, phase, activeAgentId, reloadProviders, selectChatProvider, selectImageProvider, updateProvider, removeProvider,
-    newChat, openConversation, openMessage, jumpRequest, restoreBackup, deleteConversation, renameConversation, send, stop, retry, editAndResend, deleteMessage, recordVoiceExchange, runAction, dismissAction,
+    newChat, openConversation, openMessage, jumpRequest, restoreBackup, deleteConversation, renameConversation, send, stop, retry, retryImage, editAndResend, deleteMessage, recordVoiceExchange, runAction, dismissAction,
     space, switchSpace, activeCharacterId, openCharacter, closeCharacter, createCharacter, editCharacter, deleteCharacter, hasOlderMessages, loadOlderMessages,
   }), [ready, providers, chatProvider, imageProvider, conversations, activeConversationId, activeConversation, messages,
     busy, anyBusy, runningConversationIds, phase, activeAgentId, reloadProviders, selectChatProvider, selectImageProvider, updateProvider, removeProvider,
-    newChat, openConversation, openMessage, jumpRequest, restoreBackup, deleteConversation, renameConversation, send, stop, retry, editAndResend, deleteMessage, recordVoiceExchange, runAction, dismissAction,
+    newChat, openConversation, openMessage, jumpRequest, restoreBackup, deleteConversation, renameConversation, send, stop, retry, retryImage, editAndResend, deleteMessage, recordVoiceExchange, runAction, dismissAction,
     space, switchSpace, activeCharacterId, openCharacter, closeCharacter, createCharacter, editCharacter, deleteCharacter, hasOlderMessages, loadOlderMessages]);
 
   return <AppContext.Provider value={value}><ElapsedContext.Provider value={elapsedSeconds}>{children}</ElapsedContext.Provider></AppContext.Provider>;

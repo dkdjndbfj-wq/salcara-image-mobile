@@ -21,6 +21,7 @@ import { loadVoiceSettings, type VoiceSettings } from './settings';
 import { takeSentences, toSpeakable } from './speech-text';
 
 import { liveText, useLiveVersion } from '../state/live-text';
+import { handleSystemPermissionError, isSystemPermissionError } from '../system-permissions';
 export type LivePhase = 'connecting' | 'listening' | 'hearing' | 'thinking' | 'speaking' | 'error';
 export type LiveEngine = 'cascade' | 'realtime';
 
@@ -539,7 +540,7 @@ export function useVoiceConversation(active: boolean) {
           await startRealtime(native, settings, check, listen);
           return;
         } catch (caught) {
-          if (caught instanceof Superseded || settings.conversationEngine === 'realtime') throw caught;
+          if (caught instanceof Superseded || isSystemPermissionError(caught) || settings.conversationEngine === 'realtime') throw caught;
           realtime.current?.close();
           realtime.current = null;
           setNotice(`实时语音不可用（${caught instanceof Error ? caught.message : '连接失败'}），已改用分段语音`);
@@ -554,8 +555,12 @@ export function useVoiceConversation(active: boolean) {
         own.forEach((off) => off());
         return;
       }
+      // Native capture may fail after the realtime socket/player were opened.
+      // Release this generation's resources before presenting permission recovery.
+      teardown();
       setError(caught instanceof Error ? caught.message : '无法开始语音对话');
       setPhaseBoth('error');
+      handleSystemPermissionError(caught);
     }
   }, [micLevel, setPhaseBoth, startCascade, startRealtime, teardown]);
 

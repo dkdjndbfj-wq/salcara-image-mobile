@@ -315,6 +315,74 @@ test('agent reads Claude tool_use streams and resolves image labels to conversat
   expect(body.messages.map((message: { role: string }) => message.role)).toEqual(['user', 'assistant', 'user']);
 });
 
+test.each(['chat-completions', 'responses', 'anthropic'] as const)('history image receipts are application context rather than assistant speech (%s)', async (api) => {
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'u1', prompt: '画海边的小屋' },
+    { ...baseMessage, id: 'a1', role: 'assistant', imageUri: 'file:///generated.png', preparedPrompt: '海边小屋', text: '我来画。\n\n[我调用了 generate_image，已生成 图1。作图描述：海边小屋]' },
+  ];
+  const body = await buildChatBody({ ...request, api, prompt: '把刚才那张改成夜景', history, ...imageTool });
+  const messages = (api === 'responses' ? body.input : body.messages) as Array<{ role: string; content: unknown }>;
+  const assistants = JSON.stringify(messages.filter((message) => message.role === 'assistant'));
+  const context = JSON.stringify(messages.filter((message) => message.role === 'user'));
+  expect(assistants).toContain('我来画。');
+  expect(assistants).not.toContain('generate_image');
+  expect(assistants).not.toContain('生成描述');
+  expect(context).toContain('应用记录：上一轮结果');
+  expect(context).toContain('图片：图1。生成描述：海边小屋');
+  expect(context).toContain('图1（上一轮你生成的图片）');
+  expect(context).toContain('把刚才那张改成夜景');
+});
+
+test.each(['native', 'text'] as const)('a copied historical image receipt is a protocol error, never a generated image (%s)', async (toolMode) => {
+  const seen: string[] = [];
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '我来改地图上的坐标。\n\n[我调用了 generate_image，已生成 图4。作图描述：地图上的坐标一个地方一个]' } }] }]));
+  await expect(runAgentTurn({ ...request, ...imageTool, toolMode }, (value) => seen.push(value))).rejects.toThrow('本轮未生成图片');
+  expect(mockFetch).toHaveBeenCalledTimes(1);
+  expect(seen.at(-1)).toBe('');
+});
+
+test('a real image call wins over a copied receipt but the receipt is never displayed', async () => {
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: {
+    content: '我来改。\n[我调用了 generate_image，已生成 图4。作图描述：改地图]',
+    tool_calls: [{ index: 0, id: 'image', function: { name: 'generate_image', arguments: '{"prompt":"每个城市保留一个标记","reference_images":["图3"]}' } }],
+  } }] }]));
+  const result = await runAgentTurn({ ...request, ...imageTool });
+  expect(result.text).toBe('我来改。');
+  expect(result.imageCall).toMatchObject({ prompt: '每个城市保留一个标记', referenceImages: ['图3'] });
+  expect(mockFetch).toHaveBeenCalledTimes(1);
+});
+
+test('native mode does not silently finish when a relay returns only a text image marker', async () => {
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '我来画。\n<<<TOOL generate_image {"prompt":"猫"}>>>' } }] }]));
+  await expect(runAgentTurn({ ...request, ...imageTool })).rejects.toThrow('没有发起有效的绘图调用');
+  expect(mockFetch).toHaveBeenCalledTimes(1);
+  // The user retries deliberately: the next request offers the explicit text
+  // protocol instead of repeating the same silently unsupported native mode.
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '我来画。\n<<<TOOL generate_image {"prompt":"猫"}>>>' } }] }]));
+  const result = await runAgentTurn({ ...request, ...imageTool });
+  expect(mockFetch).toHaveBeenCalledTimes(2);
+  expect(result.imageCall?.prompt).toBe('猫');
+  expect(JSON.parse(mockFetch.mock.calls[1][1].body).tools).toBeUndefined();
+  expect(JSON.parse(mockFetch.mock.calls[1][1].body).messages[0].content).toContain('<<<TOOL 工具名');
+});
+
+test('a text protocol marker missing its closing delimiter cannot start a drawing', async () => {
+  mockFetch.mockResolvedValueOnce(sse([{ choices: [{ delta: { content: '我来画。\n<<<TOOL generate_image {"prompt":"猫"}' } }] }]));
+  await expect(runAgentTurn({ ...request, ...imageTool, toolMode: 'text' })).rejects.toThrow('本轮未生成图片');
+  expect(mockFetch).toHaveBeenCalledTimes(1);
+});
+
+test('ordinary non-image conversation history remains unchanged', async () => {
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'u1', prompt: '你好' },
+    { ...baseMessage, id: 'a1', role: 'assistant', text: '你好，有什么能帮你？' },
+  ];
+  const body = await buildChatBody({ ...request, history, ...imageTool });
+  const assistants = (body.messages as Array<{ role: string; content: unknown }>).filter((message) => message.role === 'assistant');
+  expect(assistants).toEqual([{ role: 'assistant', content: '你好，有什么能帮你？' }]);
+  expect(JSON.stringify(body.messages)).not.toContain('应用记录：');
+});
+
 test('agent accepts a non-streaming Responses payload with a function call', async () => {
   mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ output: [
     { type: 'message', content: [{ type: 'output_text', text: '马上画' }] },
@@ -364,6 +432,130 @@ test('labels images in conversation order and only resends recent history pixels
   await buildChatBody({ ...request, history, references: [image], ...imageTool });
   const read = mockReadBase64.mock.calls.map(([uri]) => uri);
   expect(read).toEqual(['file:///gen-2.png', 'file:///gen-3.png', 'file:///gen-4.png', image.uri]);
+});
+
+test('a ten-image batch keeps all tool references in order without duplicating its legacy imageUri', async () => {
+  const generatedImages = Array.from({ length: 10 }, (_, index) => ({ id: `batch-${index + 1}`, uri: `file:///batch-${index + 1}.png`, status: 'complete' as const }));
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'batch-question', prompt: '画十张风景' },
+    { ...baseMessage, id: 'batch-answer', role: 'assistant', imageUri: generatedImages[0].uri, imageCount: 10, generatedImages },
+  ];
+  mockFetch.mockResolvedValue(sse([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'edit-batch', function: {
+      name: 'generate_image', arguments: JSON.stringify({ prompt: '以第十张为主图，参考第二张改成夜景', reference_images: ['图10', '图2'] }),
+    } }] }, finish_reason: 'tool_calls' }] },
+  ]));
+  const result = await runAgentTurn({ ...request, prompt: '用第十张参考第二张改成夜景', history, references: [image], ...imageTool });
+  expect(result.images.size).toBe(11);
+  expect([...result.images.entries()].map(([label, entry]) => [label, entry.uri])).toEqual([
+    ...generatedImages.map((entry, index) => [`图${index + 1}`, entry.uri]), ['图11', image.uri],
+  ]);
+  expect(result.imageCall?.referenceImages).toEqual(['图10', '图2']);
+  expect(result.imageCall?.referenceImages.map((label) => result.images.get(label)?.uri)).toEqual(['file:///batch-10.png', 'file:///batch-2.png']);
+  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+  const serialized = JSON.stringify(body.messages);
+  for (let index = 1; index <= 10; index += 1) {
+    expect(serialized.split(`图${index}（上一轮你生成的图片）`)).toHaveLength(2);
+  }
+  expect(serialized).toContain('图11（用户本轮上传）');
+  expect(mockReadBase64.mock.calls.map(([uri]) => uri)).toEqual(['file:///batch-8.png', 'file:///batch-9.png', 'file:///batch-10.png', image.uri]);
+});
+
+test('partial batches and legacy single images share the same labels across all chat protocols', async () => {
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'u-batch', references: [image] },
+    { ...baseMessage, id: 'a-batch', role: 'assistant', imageUri: 'file:///batch-first.png', generatedImages: [
+      { id: 'first', uri: 'file:///batch-first.png', status: 'complete' },
+      { id: 'failed', uri: null, remoteUrl: 'https://cdn.example/failed.png', status: 'error', error: 'download failed' },
+      { id: 'third', uri: 'file:///batch-third.png', status: 'complete' },
+    ] },
+    { ...baseMessage, id: 'u-legacy' },
+    { ...baseMessage, id: 'a-legacy', role: 'assistant', imageUri: 'file:///legacy.png' },
+  ];
+  expect(labelConversationImages(history).map((entry) => [entry.label, entry.uri])).toEqual([
+    ['图1', image.uri], ['图2', 'file:///batch-first.png'], ['图3', 'file:///batch-third.png'], ['图4', 'file:///legacy.png'],
+  ]);
+  for (const api of ['chat-completions', 'responses', 'anthropic'] as const) {
+    mockReadBase64.mockClear();
+    const body = await buildChatBody({ ...request, api, history, ...imageTool });
+    const serialized = JSON.stringify(api === 'responses' ? body.input : body.messages);
+    for (const label of ['图2', '图3', '图4']) expect(serialized.split(`${label}（上一轮你生成的图片）`)).toHaveLength(2);
+    expect(serialized).not.toContain('https://cdn.example/failed.png');
+    expect(mockReadBase64.mock.calls.map(([uri]) => uri)).toEqual(['file:///batch-first.png', 'file:///batch-third.png', 'file:///legacy.png']);
+  }
+});
+
+test.each(['chat-completions', 'responses', 'anthropic'] as const)('a failed first slot keeps gallery positions distinct from global image labels (%s)', async (api) => {
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'u-old', references: [image] },
+    { ...baseMessage, id: 'a-old', role: 'assistant', imageUri: 'file:///old.png' },
+    { ...baseMessage, id: 'u-batch', prompt: '再画三张' },
+    { ...baseMessage, id: 'a-batch', role: 'assistant', imageCount: 3, generatedImages: [
+      { id: 'first', uri: null, status: 'error', error: 'private upstream error' },
+      { id: 'second', uri: 'file:///second.png', status: 'complete' },
+      { id: 'third', uri: 'file:///third.png', status: 'complete' },
+    ] },
+  ];
+  const body = await buildChatBody({ ...request, api, prompt: '把第二张改成夜景', history, ...imageTool });
+  const serialized = JSON.stringify(api === 'responses' ? body.input : body.messages);
+  expect(serialized).toContain('本组图片位置（共3张，失败或未完成项保留原位）：第1张：生成失败，不可引用；第2张：图3；第3张：图4。');
+  expect(serialized).toContain('图3（上一轮你生成的图片）[本组第2张，共3张]');
+  expect(serialized).toContain('图4（上一轮你生成的图片）[本组第3张，共3张]');
+  expect(serialized).not.toContain('[本组第1张，共3张]');
+  expect(serialized).not.toContain('private upstream error');
+  expect(JSON.stringify(body)).toContain('失败或未完成项也占位，不能跳过');
+  expect(labelConversationImages(history).map((entry) => [entry.label, entry.uri])).toEqual([
+    ['图1', image.uri], ['图2', 'file:///old.png'], ['图3', 'file:///second.png'], ['图4', 'file:///third.png'],
+  ]);
+});
+
+test('an edit of the second gallery slot resolves its mapped label after the first slot fails', async () => {
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'u-batch', prompt: '画两张' },
+    { ...baseMessage, id: 'a-batch', role: 'assistant', imageCount: 2, generatedImages: [
+      { id: 'first', uri: null, status: 'error' },
+      { id: 'second', uri: 'file:///second.png', status: 'complete' },
+    ] },
+  ];
+  mockFetch.mockResolvedValue(sse([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'edit-second-slot', function: {
+      name: 'generate_image', arguments: JSON.stringify({ prompt: '将本组第二张改成夜景', reference_images: ['图1'] }),
+    } }] }, finish_reason: 'tool_calls' }] },
+  ]));
+  const result = await runAgentTurn({ ...request, prompt: '把第二张改成夜景', history, ...imageTool });
+  expect(result.images.size).toBe(1);
+  expect(result.imageCall?.referenceImages).toEqual(['图1']);
+  expect(result.images.get('图1')?.uri).toBe('file:///second.png');
+  const serialized = JSON.stringify(JSON.parse(mockFetch.mock.calls[0][1].body).messages);
+  expect(serialized).toContain('第1张：生成失败，不可引用；第2张：图1');
+  expect(serialized).toContain('图1（上一轮你生成的图片）[本组第2张，共2张]');
+});
+
+test.each(['chat-completions', 'responses', 'anthropic'] as const)('an all-failed batch remains the latest group instead of falling back to an older success (%s)', async (api) => {
+  const history: ChatMessage[] = [
+    { ...baseMessage, id: 'u-old', prompt: '旧的一张' },
+    { ...baseMessage, id: 'a-old', role: 'assistant', imageUri: 'file:///old.png' },
+    { ...baseMessage, id: 'u-failed', prompt: '新的三张' },
+    { ...baseMessage, id: 'a-failed', role: 'assistant', status: 'error', imageCount: 3, generatedImages: [
+      { id: 'first', uri: null, status: 'error' },
+      { id: 'second', uri: null, remoteUrl: 'https://cdn.example/second.png?token=private', status: 'error' },
+      { id: 'third', uri: null, status: 'pending' },
+    ] },
+    { ...baseMessage, id: 'u-empty', prompt: '没有内容的失败回合不进入历史' },
+    { ...baseMessage, id: 'a-empty', role: 'assistant', status: 'error' },
+    { ...baseMessage, id: 'u-pending', prompt: '仍在进行的回合不进入历史' },
+    { ...baseMessage, id: 'a-pending', role: 'assistant', status: 'pending', generatedImages: [{ id: 'pending', uri: null, status: 'pending' }] },
+  ];
+  const body = await buildChatBody({ ...request, api, prompt: '第二张怎么样了', history, ...imageTool });
+  const serialized = JSON.stringify(api === 'responses' ? body.input : body.messages);
+  expect(serialized).toContain('新的三张');
+  expect(serialized).toContain('本组图片位置（共3张，失败或未完成项保留原位）：第1张：生成失败，不可引用；第2张：未下载，不可引用；第3张：尚未完成，不可引用。');
+  expect(serialized.lastIndexOf('本组图片位置')).toBeGreaterThan(serialized.indexOf('图1（上一轮你生成的图片）'));
+  expect(serialized).not.toContain('https://cdn.example');
+  expect(serialized).not.toContain('没有内容的失败回合不进入历史');
+  expect(serialized).not.toContain('仍在进行的回合不进入历史');
+  expect(labelConversationImages(history).map((entry) => [entry.label, entry.uri])).toEqual([['图1', 'file:///old.png']]);
+  expect(mockReadBase64.mock.calls.map(([uri]) => uri)).toEqual(['file:///old.png']);
 });
 
 test('a 400 that is not about tools does not disable native tools for later turns', async () => {

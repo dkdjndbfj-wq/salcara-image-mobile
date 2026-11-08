@@ -10,6 +10,7 @@ import type { Character, MemoryMode } from '../memorybox/types';
 import { useApp } from '../state/AppContext';
 import { colors, themed } from '../theme';
 import { deleteAvatar, pickAvatar } from './avatar';
+import { handleSystemPermissionError } from '../system-permissions';
 import { CharacterAvatar } from './CharacterAvatar';
 import { warm } from './theme';
 
@@ -65,7 +66,7 @@ export function CharacterSheet({ visible, characterId, onClose, onCreated }: {
       picked.current.push(uri);
       set({ avatarUri: uri });
     } catch (error) {
-      showToast(error instanceof Error ? error.message : '没有选到图片', 'alert');
+      if (!handleSystemPermissionError(error)) showToast(error instanceof Error ? error.message : '没有选到图片', 'alert');
     }
   };
   const save = async () => {

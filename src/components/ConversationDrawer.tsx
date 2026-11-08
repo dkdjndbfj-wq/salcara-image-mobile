@@ -3,6 +3,7 @@ import { Animated, Easing, Modal, PanResponder, Pressable, ScrollView, StyleShee
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { CustomAgent, HistoryHit } from '../agent/types';
+import { useAgents } from '../agent/agents';
 import type { Conversation } from '../domain';
 import { shareConversationMarkdown } from '../storage/backup';
 import { searchMessages } from '../storage/database';
@@ -12,11 +13,14 @@ import { BrandMark } from './Brand';
 import { Icon } from './Icon';
 import { AppDialog, dismissKeyboardAndBlur, MotionPressable, useReducedMotion, type DialogAction } from './ui';
 
-export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings, onOpenAgents, onStartAgent }: {
+export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings, onOpenAgents, onStartAgent, docked = false }: {
   visible: boolean; onClose: () => void; onNewChat: () => void; onOpenSettings: () => void; onOpenAgents: () => void; onStartAgent: (agent: CustomAgent) => void;
+  /** Tablet layout: the sidebar stays open beside the conversation instead of sliding over it. */
+  docked?: boolean;
 }) {
   const styles = useStyles();
   const { conversations, activeConversationId, chatProvider, imageProvider, openConversation, openMessage, deleteConversation, renameConversation, runningConversationIds } = useApp();
+  const agents = useAgents();
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<HistoryHit[]>([]);
   // Full-text search over messages, a moment after typing stops.
@@ -88,11 +92,7 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
   const engineSummary = [prettyModel(chatProvider?.chatModel), prettyModel(imageProvider?.model)].filter(Boolean).join(' · ') || '连接你的 AI 服务';
 
   let rowIndex = 0;
-  return <Modal visible={mounted} transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
-    <View style={styles.overlay}>
-      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.shade, { opacity: progress }]} />
-      <Pressable accessibilityLabel="关闭侧边栏" style={StyleSheet.absoluteFill} onPress={onClose} />
-      <Animated.View {...pan.panHandlers} style={[styles.panel, { width, transform: [{ translateX: Animated.add(drag, progress.interpolate({ inputRange: [0, 1], outputRange: [-width - 20, 0] })) }] }]}>
+  const panelBody = <>
         <SafeAreaView style={styles.drawer} edges={['top', 'bottom']}>
           <View style={styles.topRow}>
             <View style={styles.search}>
@@ -101,7 +101,7 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
               {query ? <Pressable accessibilityLabel="清空搜索" hitSlop={8} onPress={() => setQuery('')}><Icon name="close" size={15} color={colors.subtle} strokeWidth={2} /></Pressable> : null}
             </View>
             <MotionPressable scaleTo={0.88} accessibilityRole="button" accessibilityLabel="新对话" onPress={() => { dismissKeyboardAndBlur(); onNewChat(); onClose(); }} style={styles.compose}>
-              <Icon name="compose" size={21} color={colors.text} />
+              <Icon name="compose" size={19} color={colors.card} accent="#7CC6FF" />
             </MotionPressable>
           </View>
           {!query ? <>
@@ -109,6 +109,20 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
               <BrandMark size={30} />
               <Text style={styles.brand}>Salcara</Text>
             </Pressable>
+            {agents.length ? <View style={styles.agentSection}>
+              <Pressable accessibilityRole="button" accessibilityLabel="打开智能体" onPress={() => { onClose(); onOpenAgents(); }} style={({ pressed }) => [styles.agentHeader, pressed && { backgroundColor: colors.surface }]}>
+                <View style={styles.agentHeaderIcon}><Icon name="bot" size={16} color={colors.primary} /></View>
+                <Text style={styles.agentHeaderText}>智能体</Text>
+                <Text style={styles.agentCount}>{agents.length}</Text>
+                <Icon name="chevronRight" size={16} color={colors.faint} />
+              </Pressable>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.agentPills} keyboardShouldPersistTaps="handled">
+                {agents.slice(0, 5).map((agent) => <Pressable key={agent.id} accessibilityRole="button" accessibilityLabel={`和 ${agent.name} 对话`} onPress={() => { dismissKeyboardAndBlur(); onStartAgent(agent); onClose(); }} style={({ pressed }) => [styles.agentPill, pressed && { backgroundColor: colors.surfaceStrong }]}>
+                  <View style={[styles.agentGlyph, { backgroundColor: `${agent.color}1F` }]}><Text style={[styles.agentGlyphText, { color: agent.color }]}>{agent.icon}</Text></View>
+                  <Text style={styles.agentPillText} numberOfLines={1}>{agent.name}</Text>
+                </Pressable>)}
+              </ScrollView>
+            </View> : null}
           </> : null}
 
           <ScrollView style={styles.list} contentContainerStyle={{ paddingBottom: 16 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
@@ -145,9 +159,8 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
             <Icon name="chevronRight" size={18} color={colors.faint} />
           </Pressable>
         </SafeAreaView>
-      </Animated.View>
-    </View>
-
+  </>;
+  const dialogs = <>
     <AppDialog visible={Boolean(menuFor)} title={menuFor?.title ?? ''} icon="chat" onClose={() => setMenuFor(null)} actions={[
       { label: '重命名', tone: 'secondary', onPress: () => { const c = menuFor; setMenuFor(null); if (c) { setRenameText(c.title); setRenaming(c); } } },
       { label: '导出为 Markdown', tone: 'secondary', onPress: () => { const c = menuFor; setMenuFor(null); if (c) void shareConversationMarkdown(c).catch((error) => report('没有导出', error)); } },
@@ -160,6 +173,18 @@ export function ConversationDrawer({ visible, onClose, onNewChat, onOpenSettings
       <TextInput value={renameText} onChangeText={setRenameText} autoFocus selectTextOnFocus maxLength={60} style={styles.renameInput} placeholder="对话名称" placeholderTextColor={colors.subtle} />
     </AppDialog>
     <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} icon={dialog?.icon} actions={dialog?.actions} onClose={() => setDialog(null)} />
+  </>;
+  if (docked) return <View testID="conversation-sidebar-docked" style={styles.docked}>{panelBody}{dialogs}</View>;
+  return <Modal visible={mounted} transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
+    <View style={styles.overlay}>
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.shade, { opacity: progress }]} />
+      <Pressable accessibilityLabel="关闭侧边栏" style={StyleSheet.absoluteFill} onPress={onClose} />
+      <Animated.View {...pan.panHandlers} style={[styles.panel, { width, transform: [{ translateX: Animated.add(drag, progress.interpolate({ inputRange: [0, 1], outputRange: [-width - 20, 0] })) }] }]}>
+        {panelBody}
+      </Animated.View>
+    </View>
+
+    {dialogs}
   </Modal>;
 }
 
@@ -199,15 +224,26 @@ function RunningDot() {
 const useStyles = themed((c, d) => StyleSheet.create({
   overlay: { flex: 1 },
   shade: { backgroundColor: colors.scrim },
-  panel: { flex: 1, backgroundColor: colors.card, ...shadow.float },
+  docked: { width: 300, height: '100%', backgroundColor: colors.surface, borderRightWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  panel: { flex: 1, backgroundColor: colors.card, borderTopRightRadius: 26, borderBottomRightRadius: 26, overflow: 'hidden', ...shadow.float },
   drawer: { flex: 1, paddingHorizontal: 12 },
   topRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 8 },
-  search: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, height: 42, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.surfaceStrong },
+  search: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, height: 42, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.surface },
   searchInput: { flex: 1, height: 42, color: colors.text, fontSize: 15, padding: 0 },
-  compose: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
+  compose: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.text },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 12, height: 48, paddingHorizontal: 8, marginTop: 14, borderRadius: 14 },
   brandIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
   brand: { color: colors.text, fontSize: 15.5, fontWeight: '600' },
+  agentSection: { marginTop: 2, marginBottom: 2 },
+  agentHeader: { flexDirection: 'row', alignItems: 'center', gap: 9, height: 36, paddingHorizontal: 8, borderRadius: 12 },
+  agentHeaderIcon: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
+  agentHeaderText: { flex: 1, color: colors.textSecondary, fontSize: 13.5, fontWeight: '600' },
+  agentCount: { color: colors.subtle, fontSize: 12 },
+  agentPills: { gap: 7, paddingLeft: 8, paddingRight: 4, paddingBottom: 2 },
+  agentPill: { flexDirection: 'row', alignItems: 'center', gap: 7, maxWidth: 145, minHeight: 34, paddingHorizontal: 8, borderRadius: 17, backgroundColor: colors.surface },
+  agentGlyph: { width: 23, height: 23, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  agentGlyphText: { fontSize: 12, fontWeight: '700' },
+  agentPillText: { flexShrink: 1, color: colors.textSecondary, fontSize: 12.5, fontWeight: '500' },
   agentRow: { flexDirection: 'row', alignItems: 'center', gap: 12, height: 44, paddingHorizontal: 8, borderRadius: 14 },
   agentIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
   agentName: { flex: 1, color: colors.textSecondary, fontSize: 15 },
@@ -221,7 +257,7 @@ const useStyles = themed((c, d) => StyleSheet.create({
   empty: { paddingVertical: 64, alignItems: 'center', gap: 12 },
   emptyText: { color: colors.subtle, fontSize: 13.5 },
   row: { height: 44, flexDirection: 'row', alignItems: 'center', borderRadius: 12, paddingLeft: 10, marginBottom: 1 },
-  rowActive: { backgroundColor: colors.surfaceStrong },
+  rowActive: { backgroundColor: colors.primarySoft },
   rowTitle: { flex: 1, color: colors.textSecondary, fontSize: 15 },
   rowTitleActive: { color: colors.text, fontWeight: '500' },
   runningDot: { width: 7, height: 7, borderRadius: 4, marginLeft: 8, backgroundColor: colors.primary },

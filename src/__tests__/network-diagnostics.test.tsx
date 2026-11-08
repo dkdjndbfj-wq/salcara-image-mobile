@@ -96,7 +96,7 @@ test('closing diagnostics aborts the active request', async () => {
   const screen = await render(<NetworkDiagnostics visible onClose={onClose} providerId="provider" baseUrl="https://api.example" />);
   await fireEvent.press(screen.getByText('检测当前网络'));
   await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
-  await fireEvent.press(screen.getByLabelText('关闭'));
+  await fireEvent.press(screen.getByTestId('sheet-backdrop'));
   expect(mockFetch.mock.calls[0][1].signal.aborted).toBe(true);
   expect(onClose).toHaveBeenCalledTimes(1);
 });

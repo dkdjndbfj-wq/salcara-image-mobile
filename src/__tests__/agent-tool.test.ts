@@ -21,6 +21,16 @@ test('each protocol receives its own tool schema shape', () => {
   expect(imageToolDefinition('anthropic')).toMatchObject({ name: 'generate_image', input_schema: { type: 'object' } });
 });
 
+test('image tool count is optional for old calls and strictly limited to ten', () => {
+  expect(parseImageToolArguments({ prompt: '风景' })).not.toHaveProperty('count');
+  expect(parseImageToolArguments({ prompt: '十张风景', count: 10 })).toMatchObject({ count: 10 });
+  for (const count of [0, -1, 11, 1.5, '2', null, NaN, Infinity]) {
+    expect(parseImageToolArguments({ prompt: '风景', count })).toBeNull();
+  }
+  expect(imageToolDefinition('responses')).toMatchObject({ parameters: { properties: { count: { type: 'integer', minimum: 1, maximum: 10 } } } });
+  expect(extractTextToolCall('画两张。\n<<<IMAGE {"prompt":"风景","count":2}>>>').call).toMatchObject({ count: 2 });
+});
+
 test('text-mode tool markers are extracted and never shown while streaming', () => {
   const raw = '好的，画一张。\n<<<IMAGE {"prompt":"星空","reference_images":["图3"]}>>>';
   expect(extractTextToolCall(raw)).toEqual({ text: '好的，画一张。', call: { prompt: '星空', referenceImages: ['图3'], aspectRatio: null, transparent: false } });

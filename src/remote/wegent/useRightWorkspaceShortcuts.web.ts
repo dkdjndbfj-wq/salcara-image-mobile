@@ -1,0 +1,80 @@
+/**
+ * Copyright Wegent contributors. Licensed under Apache-2.0.
+ * Source: wecode-ai/Wegent @ ac8951007b336c573ee8d34517e31ecfed047cbd.
+ * See THIRD_PARTY_NOTICES.md and licenses/Wegent-APACHE-2.0.txt.
+ */
+// Only import paths and the exported options type differ from upstream.
+import { useEffect } from 'react'
+import { keybindingFromKeyboardEvent, shouldIgnoreWorkbenchShortcut } from './keybindings'
+import { getPlatform } from './platform'
+
+export interface RightWorkspaceShortcutOptions {
+  active: boolean
+  canOpenReview: boolean
+  allowTemporaryChat: boolean
+  canBrowseFiles: boolean
+  onNavigate: (action: () => void) => void
+  onSelectReview: () => void
+  onSelectBrowser: () => void
+  onSelectChat: () => void
+  onSelectFiles: () => void
+}
+
+export function useRightWorkspaceShortcuts({
+  active,
+  canOpenReview,
+  allowTemporaryChat,
+  canBrowseFiles,
+  onNavigate,
+  onSelectReview,
+  onSelectBrowser,
+  onSelectChat,
+  onSelectFiles,
+}: RightWorkspaceShortcutOptions) {
+  const primary = getPlatform() === 'mac' ? 'Command' : 'Control'
+
+  useEffect(() => {
+    if (!active) return
+
+    const altPrimary = primary === 'Control' ? 'Control+Alt' : 'Alt+Command'
+    const actions: Record<string, (() => void) | false> = {
+      [`${primary}+T`]: onSelectBrowser,
+      [`${altPrimary}+R`]: canOpenReview && onSelectReview,
+      [`${altPrimary}+S`]: allowTemporaryChat && onSelectChat,
+      [`${altPrimary}+F`]: canBrowseFiles && onSelectFiles,
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return
+      const action = actions[keybindingFromKeyboardEvent(event)]
+      if (!action) return
+      const target = event.target
+      const workbench =
+        target instanceof HTMLElement ? target.closest('[data-active-workbench-pane]') : null
+      if (
+        (target instanceof HTMLElement &&
+          target.closest('[role="dialog"], [role="alertdialog"]')) ||
+        (workbench && workbench.getAttribute('data-active-workbench-pane') !== 'true')
+      ) {
+        return
+      }
+      if (shouldIgnoreWorkbenchShortcut(event) && !workbench) return
+      event.preventDefault()
+      event.stopPropagation()
+      onNavigate(action)
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
+  }, [
+    active,
+    allowTemporaryChat,
+    canBrowseFiles,
+    canOpenReview,
+    onNavigate,
+    onSelectBrowser,
+    onSelectChat,
+    onSelectFiles,
+    onSelectReview,
+    primary,
+  ])
+}

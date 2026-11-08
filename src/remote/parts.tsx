@@ -7,6 +7,7 @@ import { colors, radius, desk, themed, useDesk } from '../theme';
 import type { Desk } from '../theme';
 import { AgentBrand, type AgentBrandProps } from './AgentBrand';
 import type { SessionInfo, SessionStatus } from './client';
+import { agentDisplayName } from './agent-catalog';
 
 export const mono = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
@@ -25,7 +26,7 @@ export function relTime(ms: number, now = Date.now()): string {
   return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
-export const toolName = (tool: string) => tool === 'codex' ? 'Codex' : tool === 'claude' ? 'Claude Code' : tool;
+export const toolName = (tool: string) => agentDisplayName(tool);
 
 /** Keep the shared badge API while rendering the product's official bundled icon. */
 export function ToolBadge(props: AgentBrandProps) {
@@ -41,6 +42,7 @@ const statusLook = (dk: Desk): Record<SessionStatus, { label: string; fg: string
   waiting_approval: { label: '等待批准', fg: dk.warn, bg: dk.warnSoft },
   idle: { label: '空闲', fg: dk.muted, bg: dk.surface3 },
   failed: { label: '失败', fg: dk.bad, bg: dk.badSoft },
+  unknown: { label: '需在电脑确认', fg: dk.muted, bg: dk.surface3 },
 });
 
 export function StatusPill({ status }: { status: SessionStatus }) {

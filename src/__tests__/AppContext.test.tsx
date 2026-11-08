@@ -1,7 +1,7 @@
 import { act, render, waitFor } from '@testing-library/react-native';
 import React from 'react';
 
-import type { ChatMessage, Conversation, ProviderProfile, ReferenceImage } from '../domain';
+import type { ChatMessage, Conversation, GeneratedImage, ProviderProfile, ReferenceImage } from '../domain';
 
 let mockProviders: ProviderProfile[] = [];
 let mockConversations: Conversation[] = [];
@@ -16,6 +16,10 @@ const mockCopyGenerated = jest.fn();
 const mockInsertConversation = jest.fn();
 const mockDeleteEmpty = jest.fn();
 const mockDeleteFile = jest.fn();
+const mockListMessages = jest.fn();
+const mockListRecentMessages = jest.fn();
+const mockUpdateMessage = jest.fn();
+const mockPickAndRestoreBackup = jest.fn();
 
 jest.mock('expo-crypto', () => {
   let next = 0;
@@ -26,12 +30,25 @@ jest.mock('../agent/web', () => ({ hostOf: (url: string) => url, webSearch: asyn
 jest.mock('../api/image-api', () => ({
   generateImage: (...args: unknown[]) => mockGenerate(...args),
   editImage: (...args: unknown[]) => mockEdit(...args),
+  generateImages: async (request: { onImages?: (images: unknown[]) => Promise<void> }) => {
+    const result = await mockGenerate(request);
+    const images = Array.isArray(result) ? result : [{ id: 'image-1', uri: result, status: 'complete' }];
+    await request.onImages?.(images);
+    return images;
+  },
+  editImages: async (request: { onImages?: (images: unknown[]) => Promise<void> }) => {
+    const result = await mockEdit(request);
+    const images = Array.isArray(result) ? result : [{ id: 'image-1', uri: result, status: 'complete' }];
+    await request.onImages?.(images);
+    return images;
+  },
   normalizeError: (error: unknown) => error instanceof Error ? error : new Error('请求失败'),
 }));
 jest.mock('../document-inputs', () => ({ validateAttachments: () => undefined }));
 jest.mock('../image-inputs', () => ({ createReferenceFromGenerated: (...args: unknown[]) => mockCopyGenerated(...args), previewDataUrl: async () => 'data:image/jpeg;base64,AAAA' }));
 jest.mock('expo-keep-awake', () => ({ activateKeepAwakeAsync: async () => undefined, deactivateKeepAwake: async () => undefined }));
 jest.mock('../storage/secure-keys', () => ({ getProviderKey: async () => 'key', deleteProviderKey: async () => undefined }));
+jest.mock('../storage/backup', () => ({ pickAndRestoreBackup: (...args: unknown[]) => mockPickAndRestoreBackup(...args) }));
 jest.mock('../storage/files', () => ({
   downloadPng: (...args: unknown[]) => mockDownload(...args),
   deleteLocalFile: (...args: unknown[]) => mockDeleteFile(...args),
@@ -59,9 +76,8 @@ jest.mock('../storage/database', () => ({
     mockConversations = mockConversations.filter((item) => item.id !== id);
     return removed;
   },
-  listMessages: async (id: string) => mockMessages.filter((item) => item.conversationId === id),
-  listRecentMessages: async (id: string, limit: number, before?: number) =>
-    mockMessages.filter((item) => item.conversationId === id && (before === undefined || item.createdAt < before)).slice(-limit),
+  listMessages: (...args: unknown[]) => mockListMessages(...args),
+  listRecentMessages: (...args: unknown[]) => mockListRecentMessages(...args),
   deleteMessageRecords: async (id: string, ids: string[]) => {
     const removed = mockMessages.filter((item) => item.conversationId === id && ids.includes(item.id));
     mockMessages = mockMessages.filter((item) => !removed.includes(item));
@@ -76,17 +92,17 @@ jest.mock('../storage/database', () => ({
   listMemories: async () => [],
   listAgents: async () => [],
   searchMessages: async () => [],
-  updateMessage: async (message: ChatMessage) => {
-    if (message.preparedPrompt && message.status === 'pending' && !message.imageUri) mockOrder.push('saved-image-job');
-    mockMessages = mockMessages.map((item) => item.id === message.id ? message : item);
-  },
+  updateMessage: (message: ChatMessage) => mockUpdateMessage(message),
 }));
 
 import { AppProvider, faithfulPrompt, useApp } from '../state/AppContext';
 import { RemoteImageDownloadError } from '../storage/files';
+import { liveText } from '../state/live-text';
+import { imageCountFromPrompt } from '../state/app-helpers';
 
 let app: ReturnType<typeof useApp>;
 function Probe() { app = useApp(); return null; }
+function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
 async function mount() {
   await render(<AppProvider><Probe /></AppProvider>);
   await waitFor(() => expect(app.ready).toBe(true));
@@ -106,8 +122,15 @@ beforeEach(() => {
   mockMessages = [];
   mockSettings = {};
   mockOrder.length = 0;
-  [mockAgent, mockGenerate, mockEdit, mockDownload, mockCopyGenerated, mockInsertConversation, mockDeleteEmpty, mockDeleteFile].forEach((mock) => mock.mockReset());
+  [mockAgent, mockGenerate, mockEdit, mockDownload, mockCopyGenerated, mockInsertConversation, mockDeleteEmpty, mockDeleteFile, mockPickAndRestoreBackup].forEach((mock) => mock.mockReset());
+  mockListMessages.mockReset().mockImplementation(async (id: string) => mockMessages.filter((item) => item.conversationId === id));
+  mockListRecentMessages.mockReset().mockImplementation(async (id: string, limit: number, before?: number) =>
+    mockMessages.filter((item) => item.conversationId === id && (before === undefined || item.createdAt < before)).slice(-limit));
   mockCopyGenerated.mockImplementation(async (uri: string) => ({ id: 'copy', uri: `${uri}.copy.png`, name: 'copy.png', mimeType: 'image/png', size: 1 }));
+  mockUpdateMessage.mockReset().mockImplementation(async (message: ChatMessage) => {
+    if (message.preparedPrompt && message.status === 'pending' && !message.imageUri) mockOrder.push('saved-image-job');
+    mockMessages = mockMessages.map((item) => item.id === message.id ? message : item);
+  });
 });
 
 test('new chat is an unsaved draft: repeated taps never create empty conversations', async () => {
@@ -349,6 +372,146 @@ test('a failed drawing inside a turn is retried alone and its step then shows as
   expect(app.messages[1].agent?.steps[0]).toMatchObject({ status: 'done' });
 });
 
+test('a slow progress write cannot land after the completed image snapshot', async () => {
+  const progressWrite = deferred<void>();
+  const drawing = deferred<string>();
+  const drawingStarted = deferred<void>();
+  const persist = mockUpdateMessage.getMockImplementation()!;
+  mockUpdateMessage.mockImplementation(async (message: ChatMessage) => {
+    if (message.status === 'pending' && message.agent?.plan?.length) await progressWrite.promise;
+    await persist(message);
+  });
+  mockGenerate.mockImplementation(() => { drawingStarted.resolve(); return drawing.promise; });
+  mockAgent.mockImplementation(async (request: { toolkit: { execute: (call: unknown, context: unknown) => Promise<unknown> } }) => {
+    const image = request.toolkit.execute({ id: 'image', name: 'generate_image', input: { prompt: '星星' }, raw: '' }, { step: 0, mode: 'native' });
+    await drawingStarted.promise;
+    await request.toolkit.execute({ id: 'plan', name: 'update_plan', input: { steps: [{ title: '整理图片' }] }, raw: '' }, { step: 1, mode: 'native' });
+    await image;
+    return { text: '画好了', imageCall: null, images: new Map(), toolMode: 'native' };
+  });
+  await mount();
+  let pending!: Promise<void>;
+  await act(async () => { pending = app.send({ text: '画星星' }); });
+  await waitFor(() => expect(mockUpdateMessage.mock.calls.some(([item]: [ChatMessage]) => item.agent?.plan?.length)).toBe(true));
+  await act(async () => { drawing.resolve('file:///stars.png'); });
+  // Until the older snapshot has reached disk, the newer image checkpoint is queued.
+  expect(mockUpdateMessage.mock.calls.some(([item]: [ChatMessage]) => item.imageUri)).toBe(false);
+  expect(app.messages[1].imageUri).toBeNull();
+  await act(async () => { progressWrite.resolve(); await pending; });
+  expect(mockMessages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///stars.png', text: '画好了' });
+});
+
+test.each(['stop', 'timeout'] as const)('%s during post-image work retains the delivered picture as complete', async (reason) => {
+  mockGenerate.mockResolvedValueOnce('file:///delivered.png');
+  mockAgent.mockImplementationOnce(async (request: { signal: AbortSignal; toolkit: { execute: (call: unknown, context: unknown) => Promise<unknown> } }) => {
+    await request.toolkit.execute({ id: 'c1', name: 'generate_image', input: { prompt: '星星' }, raw: '' }, { step: 0, mode: 'native' });
+    return new Promise((_resolve, reject) => request.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+  });
+  await mount();
+  if (reason === 'timeout') jest.useFakeTimers();
+  try {
+    let pending!: Promise<void>;
+    await act(async () => { pending = app.send({ text: '画星星' }); });
+    await waitFor(() => expect(app.messages[1]?.imageUri).toBe('file:///delivered.png'));
+    await act(async () => {
+      if (reason === 'stop') app.stop();
+      else await jest.advanceTimersByTimeAsync(10 * 60_000 + 1);
+      await pending;
+    });
+    expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///delivered.png', error: null });
+    expect(mockMessages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///delivered.png', error: null });
+    expect(app.messages[1].agent?.steps.at(-1)?.title).toContain('图片已保留');
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    expect(app.busy).toBe(false);
+  } finally { jest.useRealTimers(); }
+});
+
+test('deleting a chat during a blocked image checkpoint cleans up its late result', async () => {
+  const checkpoint = deferred<void>();
+  const persist = mockUpdateMessage.getMockImplementation()!;
+  mockUpdateMessage.mockImplementation(async (message: ChatMessage) => {
+    if (message.imageUri) await checkpoint.promise;
+    await persist(message);
+  });
+  mockAgent.mockResolvedValue({ text: '', imageCall: { prompt: '星星', referenceImages: [], aspectRatio: null, transparent: false }, images: new Map(), toolMode: 'native' });
+  mockGenerate.mockResolvedValue('file:///late-checkpoint.png');
+  await mount();
+  jest.useFakeTimers();
+  try {
+    let sending!: Promise<void>;
+    await act(async () => { sending = app.send({ text: '画星星' }); });
+    await waitFor(() => expect(mockUpdateMessage.mock.calls.some(([item]: [ChatMessage]) => item.imageUri)).toBe(true));
+    let removing!: Promise<void>;
+    await act(async () => {
+      removing = app.deleteConversation(app.activeConversationId!);
+      await jest.advanceTimersByTimeAsync(5001);
+      await removing;
+    });
+    expect(mockDeleteFile).toHaveBeenCalledWith('file:///late-checkpoint.png');
+    await expect(app.restoreBackup()).rejects.toThrow('保存完成');
+    expect(mockPickAndRestoreBackup).not.toHaveBeenCalled();
+    await act(async () => { checkpoint.resolve(); await sending; });
+    expect(mockMessages).toEqual([]);
+    expect(app.messages).toEqual([]);
+    expect(app.activeConversationId).toBeNull();
+    expect(app.anyBusy).toBe(false);
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+  } finally { jest.useRealTimers(); }
+});
+
+test('a deleted conversation restored from backup can receive new replies in the same session', async () => {
+  mockAgent.mockResolvedValue({ text: '你好', imageCall: null, images: new Map(), toolMode: 'native' });
+  await mount();
+  await act(async () => { await app.send({ text: '你好' }); });
+  const conversation = mockConversations[0];
+  const history = [...mockMessages];
+  await act(async () => { await app.deleteConversation(conversation.id); });
+  mockPickAndRestoreBackup.mockImplementationOnce(async () => {
+    mockConversations = [conversation];
+    mockMessages = history;
+    return { conversations: 1, messages: 2, characters: 0, files: 0 };
+  });
+  await act(async () => { await app.restoreBackup(); await app.openConversation(conversation.id); });
+  await act(async () => { await app.send({ text: '继续聊' }); });
+  expect(app.messages).toHaveLength(4);
+  expect(app.messages[3]).toMatchObject({ conversationId: conversation.id, status: 'complete', text: '你好' });
+});
+
+test.each(['cancel', 'error'] as const)('backup restoration blocks new runs and releases its guard after %s', async (outcome) => {
+  const picker = deferred<void>();
+  mockPickAndRestoreBackup.mockImplementationOnce(async () => {
+    await picker.promise;
+    if (outcome === 'error') throw new Error('备份损坏');
+    return null;
+  });
+  mockAgent.mockResolvedValue({ text: '你好', imageCall: null, images: new Map(), toolMode: 'native' });
+  await mount();
+  let restoring!: Promise<unknown>;
+  await act(async () => { restoring = app.restoreBackup().catch((error: Error) => error.message); });
+  await expect(app.send({ text: '你好' })).rejects.toThrow('正在恢复备份');
+  await expect(app.restoreBackup()).rejects.toThrow('正在恢复备份');
+  expect(mockInsertConversation).not.toHaveBeenCalled();
+  expect(mockAgent).not.toHaveBeenCalled();
+  await act(async () => { picker.resolve(); await restoring; });
+  await act(async () => { await app.send({ text: '你好' }); });
+  expect(app.messages[1]).toMatchObject({ status: 'complete', text: '你好' });
+});
+
+test('late streamed text cannot overwrite a finished reply', async () => {
+  let showText!: (text: string) => void;
+  mockAgent.mockImplementationOnce(async (_request: unknown, onText: typeof showText) => {
+    showText = onText;
+    return { text: '最终回复', imageCall: null, images: new Map(), toolMode: 'native' };
+  });
+  await mount();
+  await act(async () => { await app.send({ text: '你好' }); });
+  const reply = app.messages[1];
+  await act(async () => { showText('晚到的进度'); });
+  expect(liveText(reply.id)).toBeUndefined();
+  expect(app.messages[1]).toMatchObject({ text: '最终回复', status: 'complete' });
+  expect(mockMessages[1]).toMatchObject({ text: '最终回复', status: 'complete' });
+});
+
 test('a redraw that fails keeps the picture the turn already had', async () => {
   mockAgent.mockImplementation(async (request: { toolkit: { execute: (call: unknown, context: unknown) => Promise<unknown> } }) => {
     await request.toolkit.execute({ id: 'c1', name: 'generate_image', input: { prompt: '灯塔' }, raw: '' }, { step: 0, mode: 'native' });
@@ -441,4 +604,221 @@ test('a search hit opens its conversation at that message', async () => {
   expect(app.messages[app.messages.length - 1].id).toBe('m199');
   expect(app.hasOlderMessages).toBe(true);
   expect(app.jumpRequest).toMatchObject({ messageId: 'm10' });
+});
+
+test('a late conversation read cannot overwrite a newer navigation', async () => {
+  const firstRows = deferred<ChatMessage[]>();
+  const secondRows = deferred<ChatMessage[]>();
+  const first = { id: 'c1', title: '第一条', providerId: 'chat', transparent: false, createdAt: 1, updatedAt: 1 } as Conversation;
+  const second = { id: 'c2', title: '第二条', providerId: 'chat', transparent: false, createdAt: 2, updatedAt: 2 } as Conversation;
+  mockConversations = [first, second];
+  mockListMessages.mockImplementation((id: string) => id === 'c1' ? firstRows.promise : secondRows.promise);
+  await mount();
+  let firstOpen!: Promise<void>;
+  let secondOpen!: Promise<void>;
+  await act(async () => { firstOpen = app.openConversation('c1', false); secondOpen = app.openConversation('c2', false); await Promise.resolve(); });
+  secondRows.resolve([{ ...seeded('c2-message', 'assistant', 2), conversationId: 'c2' }]);
+  await act(async () => { await secondOpen; });
+  firstRows.resolve([{ ...seeded('c1-message', 'assistant', 1), conversationId: 'c1' }]);
+  await act(async () => { await firstOpen; });
+  expect(app.activeConversationId).toBe('c2');
+  expect(app.messages[0].conversationId).toBe('c2');
+});
+
+const batch = (): GeneratedImage[] => [
+  { id: 'image-1', uri: 'file:///batch-one.png', status: 'complete' },
+  { id: 'image-2', uri: null, remoteUrl: 'https://cdn.example/two.png', status: 'error', error: '图片下载失败' },
+  { id: 'image-3', uri: 'file:///batch-three.png', status: 'complete' },
+];
+function batchCall() {
+  mockAgent.mockResolvedValue({ text: '画好了', imageCall: { prompt: '三张风景', count: 3, referenceImages: [], aspectRatio: null, transparent: false }, images: new Map(), toolMode: 'native' });
+}
+
+test('a batch retains every delivered image and retries only the selected already-paid download', async () => {
+  batchCall(); mockGenerate.mockResolvedValue(batch());
+  await mount();
+  await act(async () => { await app.send({ text: '生成三张风景' }); });
+  const old = app.messages[1];
+  expect(old).toMatchObject({ status: 'complete', imageCount: 3, imageUri: 'file:///batch-one.png', generatedImages: batch() });
+  mockDownload.mockResolvedValue('file:///batch-two.png');
+  await act(async () => { await app.retryImage(old, 'image-2'); });
+  expect(mockDownload).toHaveBeenCalledWith('https://cdn.example/two.png', expect.any(AbortSignal));
+  expect(app.messages[1].generatedImages?.map((image) => image.uri)).toEqual(['file:///batch-one.png', 'file:///batch-two.png', 'file:///batch-three.png']);
+  expect(mockMessages[1].generatedImages).toEqual(app.messages[1].generatedImages);
+  expect(mockGenerate).toHaveBeenCalledTimes(1);
+  expect(mockAgent).toHaveBeenCalledTimes(1);
+  await act(async () => { await expect(app.retryImage(old, 'image-2')).rejects.toThrow('没有可重新下载'); });
+  expect(mockDownload).toHaveBeenCalledTimes(1);
+});
+
+test('a second image waits for its own disk checkpoint even when the first image is already visible', async () => {
+  batchCall();
+  const nextImage = deferred<void>(), checkpoint = deferred<void>();
+  const first = [{ ...batch()[0] }, { ...batch()[1], status: 'pending' as const }, { id: 'image-3', uri: null, status: 'pending' as const }];
+  const persist = mockUpdateMessage.getMockImplementation()!;
+  mockUpdateMessage.mockImplementation(async (message: ChatMessage) => {
+    if (message.generatedImages?.[2]?.uri) await checkpoint.promise;
+    await persist(message);
+  });
+  mockGenerate.mockImplementation(async (request: { onImages: (images: GeneratedImage[]) => Promise<void> }) => {
+    await request.onImages(first);
+    await nextImage.promise;
+    return batch();
+  });
+  await mount();
+  let sending!: Promise<void>;
+  await act(async () => { sending = app.send({ text: '生成三张风景' }); });
+  await waitFor(() => expect(app.messages[1]?.imageUri).toBe('file:///batch-one.png'));
+  await act(async () => { nextImage.resolve(); });
+  await waitFor(() => expect(mockUpdateMessage.mock.calls.some(([message]: [ChatMessage]) => message.generatedImages?.[2]?.uri)).toBe(true));
+  expect(app.messages[1].generatedImages?.[2]?.uri).toBeNull();
+  await act(async () => { checkpoint.resolve(); await sending; });
+  expect(app.messages[1].generatedImages?.[2]?.uri).toBe('file:///batch-three.png');
+});
+
+test('stopping a per-image download preserves the other results and repeated taps cannot start another download', async () => {
+  batchCall(); mockGenerate.mockResolvedValue(batch());
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  const original = app.messages[1];
+  mockDownload.mockImplementation((_url: string, signal: AbortSignal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('已停止')))));
+  let retrying!: Promise<void>;
+  await act(async () => { retrying = app.retryImage(original, 'image-2'); });
+  await waitFor(() => expect(mockDownload).toHaveBeenCalledTimes(1));
+  await act(async () => { await expect(app.retryImage(original, 'image-2')).rejects.toThrow('当前回复'); app.stop(); await retrying; });
+  expect(app.messages[1]).toMatchObject({ status: 'complete', imageUri: 'file:///batch-one.png' });
+  expect(app.messages[1].generatedImages?.[1]).toMatchObject({ status: 'error', remoteUrl: 'https://cdn.example/two.png', error: '图片下载已停止' });
+  expect(mockGenerate).toHaveBeenCalledTimes(1);
+});
+
+test('a batch with no successful image keeps all download URLs and retry never submits another paid request', async () => {
+  batchCall();
+  mockGenerate.mockResolvedValue(batch().map((image, index) => ({ ...image, uri: null, status: 'error', remoteUrl: `https://cdn.example/${index}.png`, error: '离线' })));
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  expect(app.messages[1].status).toBe('error');
+  mockDownload.mockImplementation(async (url: string) => `file:///${url.split('/').pop()}`);
+  await act(async () => { await app.retry(app.messages[1]); });
+  expect(app.messages[1].generatedImages?.every((image) => image.status === 'complete')).toBe(true);
+  expect(app.messages[1].status).toBe('complete');
+  expect(mockGenerate).toHaveBeenCalledTimes(1); expect(mockDownload).toHaveBeenCalledTimes(3);
+});
+
+test('regeneration clears the previous batch and deletion reclaims every newly owned image', async () => {
+  batchCall(); mockGenerate.mockResolvedValueOnce(batch()).mockResolvedValueOnce([{ id: 'image-1', uri: 'file:///new.png', status: 'complete' }]);
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  await act(async () => { await app.retry(app.messages[1]); });
+  expect(app.messages[1].generatedImages).toHaveLength(1);
+  expect(mockDeleteFile).toHaveBeenCalledWith('file:///batch-one.png');
+  expect(mockDeleteFile).toHaveBeenCalledWith('file:///batch-three.png');
+  await act(async () => { await app.deleteConversation(app.activeConversationId!); });
+  expect(mockDeleteFile).toHaveBeenCalledWith('file:///new.png');
+});
+
+test('image-only prompts recognize explicit image counts without counting depicted subjects', async () => {
+  expect(imageCountFromPrompt('画三只猫')).toBe(1);
+  expect(imageCountFromPrompt('给我画三张海报')).toBe(3);
+  expect(imageCountFromPrompt('生成10张图片')).toBe(10);
+  expect(imageCountFromPrompt('我只要四张')).toBe(4);
+  expect(imageCountFromPrompt('帮我画五张不同的风景')).toBe(5);
+  expect(() => imageCountFromPrompt('生成十一张图片')).toThrow('1 到 10');
+  mockProviders = [image]; mockGenerate.mockResolvedValue(batch());
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ count: 3 }));
+  expect(app.messages[1].generatedImages).toHaveLength(3);
+});
+
+test('an unavailable image reference cannot turn an edit into a new paid generation', async () => {
+  mockAgent.mockResolvedValue({ text: '', imageCall: { prompt: '修改第二张', referenceImages: ['图2'], aspectRatio: null, transparent: false }, images: images([['图1', 'file:///available.png']]), toolMode: 'native' });
+  await mount(); await act(async () => { await app.send({ text: '修改第二张' }); });
+  expect(app.messages[1]).toMatchObject({ status: 'error', error: expect.stringContaining('图2') });
+  expect(mockGenerate).not.toHaveBeenCalled(); expect(mockEdit).not.toHaveBeenCalled(); expect(mockCopyGenerated).not.toHaveBeenCalled();
+});
+
+test('durable partial tasks retain their files and IDs and resume even after an old timestamp or partial delivery', async () => {
+  batchCall();
+  const task = { id: 'accepted-batch', url: 'https://api.example/v1/images/tasks/accepted-batch', results: [{ localUri: 'file:///generated-images/accepted.png', index: 0 }], terminal: false };
+  mockGenerate.mockImplementationOnce(async (request) => {
+    expect(request.resultIds).toEqual(['image-1', 'image-2', 'image-3']);
+    await request.onTask(task);
+    await request.onImages([{ ...batch()[0], uri: task.results[0].localUri }, ...batch().slice(1)]);
+    throw new Error('查询中断');
+  }).mockResolvedValueOnce(batch());
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  const saved = app.messages[1], key = `image_task:${saved.id}`;
+  mockSettings[key] = JSON.stringify({ ...JSON.parse(mockSettings[key]), at: 1 });
+  await act(async () => { await app.retry(saved); });
+  expect(mockGenerate).toHaveBeenLastCalledWith(expect.objectContaining({ resumeTask: task, resultIds: ['image-1', 'image-2', 'image-3'] }));
+  expect(mockAgent).toHaveBeenCalledTimes(1);
+  expect(mockDownload).not.toHaveBeenCalled();
+  expect(mockSettings[key]).toBeUndefined();
+});
+
+test('changing the API of an accepted task fails without silently submitting a replacement', async () => {
+  batchCall();
+  mockGenerate.mockImplementationOnce(async (request) => { await request.onTask({ id: 'accepted', url: 'https://api.example/tasks/accepted' }); throw new Error('查询中断'); });
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  const saved = app.messages[1];
+  await act(async () => { await app.updateProvider('image', { baseUrl: 'https://another.example' }); await app.retry(saved); });
+  expect(app.messages[1]).toMatchObject({ status: 'error', error: expect.stringContaining('不匹配') });
+  expect(mockGenerate).toHaveBeenCalledTimes(1);
+  expect(mockSettings[`image_task:${saved.id}`]).toBeDefined();
+});
+
+test('resuming an accepted batch preserves empty gallery slots and clears their interrupted state', async () => {
+  batchCall();
+  const task = { id: 'waiting-batch', url: 'https://api.example/tasks/waiting-batch' };
+  let originalIds: string[] = [];
+  let resumedImages: GeneratedImage[] | undefined;
+  mockGenerate.mockImplementationOnce(async (request) => {
+    originalIds = [...request.resultIds];
+    await request.onTask(task);
+    throw new Error('查询中断');
+  }).mockImplementationOnce(async () => {
+    resumedImages = mockMessages[1].generatedImages?.map((image) => ({ ...image }));
+    return batch();
+  });
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  expect(app.messages[1].generatedImages?.every((image) => !image.uri && !image.remoteUrl)).toBe(true);
+  await act(async () => { await app.retry(app.messages[1]); });
+  expect(mockGenerate).toHaveBeenLastCalledWith(expect.objectContaining({ resumeTask: task, resultIds: originalIds }));
+  expect(resumedImages).toEqual(originalIds.map((id) => expect.objectContaining({ id, uri: null, status: 'pending', error: null })));
+  expect(app.messages[1].status).toBe('complete');
+  expect(mockGenerate).toHaveBeenCalledTimes(2);
+  expect(mockAgent).toHaveBeenCalledTimes(1);
+  expect(mockDownload).not.toHaveBeenCalled();
+});
+
+test('deleting an unfinished batch removes durable task files and its saved task', async () => {
+  batchCall();
+  mockGenerate.mockImplementationOnce(async (request) => { await request.onTask({ id: 'accepted', url: 'https://api.example/tasks/accepted', results: [{ localUri: 'file:///generated-images/accepted.png' }] }); throw new Error('查询中断'); });
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  const key = `image_task:${app.messages[1].id}`;
+  await act(async () => { await app.deleteMessage(app.messages[1].id); });
+  expect(mockDeleteFile).toHaveBeenCalledWith('file:///generated-images/accepted.png');
+  expect(mockSettings[key]).toBeUndefined();
+});
+
+test('message deletion cannot race a retry before the retry publishes pending state', async () => {
+  batchCall(); mockGenerate.mockResolvedValue(batch());
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  const saved = app.messages[1], reading = deferred<ChatMessage[]>();
+  mockListMessages.mockImplementationOnce(() => reading.promise);
+  mockDownload.mockResolvedValue('file:///batch-two.png');
+  let retrying!: Promise<void>;
+  await act(async () => { retrying = app.retryImage(saved, 'image-2'); });
+  expect(app.messages[1].status).toBe('complete');
+  await act(async () => { await expect(app.deleteMessage(saved.id)).rejects.toThrow('回复还在进行中'); });
+  await act(async () => { reading.resolve([...mockMessages]); await retrying; });
+  expect(app.messages[1].generatedImages?.[1].uri).toBe('file:///batch-two.png');
+});
+
+test('an unreadable local result can be redownloaded once and stale decode callbacks cannot redownload its replacement', async () => {
+  batchCall(); mockGenerate.mockResolvedValue([{ ...batch()[0], remoteUrl: 'https://cdn.example/one.png' }]);
+  await mount(); await act(async () => { await app.send({ text: '生成三张风景' }); });
+  const saved = app.messages[1];
+  mockDownload.mockResolvedValue('file:///recovered-one.png');
+  await act(async () => { await app.retryImage(saved, 'image-1', 'file:///batch-one.png'); });
+  expect(app.messages[1].generatedImages?.[0].uri).toBe('file:///recovered-one.png');
+  expect(mockDeleteFile).toHaveBeenCalledWith('file:///batch-one.png');
+  await act(async () => { await expect(app.retryImage(saved, 'image-1', 'file:///batch-one.png')).rejects.toThrow('没有可重新下载'); });
+  expect(mockDownload).toHaveBeenCalledTimes(1); expect(mockGenerate).toHaveBeenCalledTimes(1);
 });

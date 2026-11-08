@@ -1,4 +1,4 @@
-import { contextTokens, fitHistory, historyBudget, pairsToFold, summaryInstruction, summaryPrompt } from '../agent/context-window';
+import { contextTokens, fitHistory, historyBudget, pairCharacters, pairsToFold, summaryInstruction, summaryPrompt } from '../agent/context-window';
 import type { ChatMessage } from '../domain';
 
 let clock = 1000;
@@ -24,6 +24,19 @@ test('context sizes follow the model family', () => {
 test('there is no fixed round cap: everything that fits is sent', () => {
   const history = Array.from({ length: 40 }, (_, index) => turn(`q${index}`, `a${index}`)).flat();
   expect(fitHistory(history, null, historyBudget('deepseek-chat')).history).toHaveLength(80);
+});
+
+test('history budgets count every batch image once and keep its whole turn together', () => {
+  const older = turn('旧问题', '旧回答');
+  const [user, assistant] = turn('十张风景', '已完成');
+  const generatedImages = Array.from({ length: 10 }, (_, index) => ({ id: `image-${index}`, uri: `file:///generated-${index}.png`, status: 'complete' as const }));
+  const batch = { ...assistant, imageUri: generatedImages[0].uri, imageCount: 10, generatedImages };
+  const textCost = user.prompt.length + (assistant.text?.length ?? 0) + 200;
+  expect(pairCharacters([user, batch])).toBe(textCost + 10 * 400);
+  const fitted = fitHistory([...older, user, batch], null, textCost + 10 * 400);
+  expect(fitted).toEqual({ history: [user, batch], dropped: 1 });
+  expect(fitted.history[1].generatedImages).toHaveLength(10);
+  expect(summaryPrompt('', [[user, { ...batch, imageUri: null }]])).toContain('助手作图（10 张）');
 });
 
 test('a smaller model keeps the newest turns and reports what did not fit', () => {

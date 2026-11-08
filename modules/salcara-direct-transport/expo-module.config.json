@@ -1,0 +1,9 @@
+{
+  "platforms": ["android", "ios"],
+  "android": {
+    "modules": ["expo.modules.salcaradirecttransport.SalcaraDirectTransportModule"]
+  },
+  "ios": {
+    "modules": ["SalcaraDirectTransportModule"]
+  }
+}

@@ -55,7 +55,7 @@ iOS 见 [iOS 开发指南](IOS-MAC-BUILD.md)；用户分发与开发者源码构
 
 发布顺序是：测试 → 构建并签名 → 产物和升级兼容校验 → 公开 Release 资产 → 更新 updates 清单。校验清单不是独立 Ed25519 签名 feed；Android 最终覆盖安装还由系统验证签名。镜像运营见 [更新镜像部署](UPDATE-MIRROR.md)。
 
-不要编辑旧标签、替换已公开 APK 或变更已宣布版本的字节。只修改文档不需要增加应用版本或重新签发安装包；历史发布证据见 [1.8.0 验收记录](maintainers/RELEASE-1.8.0-VERIFICATION.md)。
+不要编辑旧标签、替换已公开 APK 或变更已宣布版本的字节。只修改文档不需要增加应用版本或重新签发安装包；历史发布证据见 [1.8.1 验收记录](maintainers/RELEASE-1.8.1-VERIFICATION.md)。
 
 ## 提交前检查
 

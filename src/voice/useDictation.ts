@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, PermissionsAndroid, Platform } from 'react-native';
+import { Animated } from 'react-native';
 
 import type { ProviderProfile } from '../domain';
 import { modelById, recognizerOptions } from './catalog';
@@ -8,18 +8,12 @@ import { localEngineAvailable, onVoiceEvent, requireVoiceNative } from './native
 import { maxRecordingMs, missingTargetMessage, resolveTarget, transcribe } from './engines';
 import { voiceSettings, loadVoiceSettings } from './settings';
 import { levelSetter } from './levels';
+import { handleSystemPermissionError, requestMicrophonePermission } from '../system-permissions';
 
 export type DictationState = 'idle' | 'preparing' | 'listening' | 'transcribing';
 const MAX_DICTATION_MS = 5 * 60 * 1000;
 
-export async function ensureMicPermission(): Promise<void> {
-  // iOS: the native startCapture asks for (and reports a missing) microphone permission itself.
-  if (Platform.OS !== 'android') return;
-  const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO, {
-    title: '允许使用麦克风', message: 'Salcara 需要麦克风来听你说话。录音只用于语音输入和语音对话。', buttonPositive: '允许', buttonNegative: '不允许',
-  });
-  if (granted !== PermissionsAndroid.RESULTS.GRANTED) throw new Error('没有麦克风权限，请在系统设置中允许 Salcara 使用麦克风');
-}
+export const ensureMicPermission = requestMicrophonePermission;
 
 /** Joins recognized pieces; a space only between Latin words. */
 export function joinText(base: string, addition: string): string {
@@ -176,7 +170,7 @@ export function useDictation({ providers, chatProvider, onText, onError }: Optio
       if (live.current) { try { requireVoiceNative().cancelCapture(); } catch { /* not available */ } }
       cleanup();
       setStateSafe('idle');
-      if (mounted.current) callbacks.current.onError(error);
+      if (mounted.current && !handleSystemPermissionError(error)) callbacks.current.onError(error);
     } finally {
       starting.current = false;
     }

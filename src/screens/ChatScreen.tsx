@@ -1,7 +1,7 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, BackHandler, FlatList, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
+  ActivityIndicator, BackHandler, FlatList, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View,
 } from 'react-native';
 import { KeyboardSafeView } from '../components/KeyboardSafeView';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -9,14 +9,16 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAgents } from '../agent/agents';
 import type { CustomAgent, GeneratedFile, PhoneAction } from '../agent/types';
 import { MemoryBoxSettingsSheet } from '../companion/MemoryBoxSettingsSheet';
-import { SpaceSwitch } from '../companion/SpaceSwitch';
 import { AboutSheet } from '../components/AboutSheet';
+import { AssistantTopBar } from '../components/AssistantTopBar';
+import { AssistantWelcome, type AssistantPromptSuggestion } from '../components/AssistantWelcome';
 import { AgentAvatar } from '../components/AgentsSheet';
 import { FilePreviewSheet } from '../components/FilePreviewSheet';
 import { PersonalizationSheet } from '../components/PersonalizationSheet';
 import { ToolsSheet } from '../components/ToolsSheet';
 import { AppSettingsSheet } from '../components/AppSettingsSheet';
-import { BrandMark, GradientText, LivingMark } from '../components/Brand';
+import { BrandMark } from '../components/Brand';
+import { Skeleton, SkeletonGroup } from '../components/Skeleton';
 import { useLaunchRevealed } from '../components/LaunchIntro';
 import { LiveMode } from '../components/LiveMode';
 import { VoiceSettingsSheet } from '../components/VoiceSettingsSheet';
@@ -25,8 +27,10 @@ import { Icon } from '../components/Icon';
 import { Composer } from '../components/Composer';
 import { ConversationDrawer } from '../components/ConversationDrawer';
 import { ImagePreview } from '../components/ImagePreview';
+import { useMessageImagePreview } from '../components/useMessageImagePreview';
 import { MaskEditor } from '../components/MaskEditor';
 import { MessageBubble } from '../components/MessageBubble';
+import { useGeneratedImageDraft } from '../components/useGeneratedImageDraft';
 import { ModelSwitcher } from '../components/ModelSwitcher';
 import { Onboarding } from '../components/Onboarding';
 import { NetworkDiagnostics } from '../components/NetworkDiagnostics';
@@ -36,10 +40,11 @@ import { UpdateManager } from '../components/UpdateManager';
 import { isImageAttachment, pickAnyFiles, validateAttachments } from '../document-inputs';
 import type { ChatMessage, DocumentAttachment, ReferenceImage } from '../domain';
 import { pickFromGallery, prepareReferenceForMask, prepareReferenceFromAttachment, takePhoto } from '../image-inputs';
-import { useApp, useElapsedSeconds } from '../state/AppContext';
+import { useApp } from '../state/AppContext';
 import { getSetting, setSetting } from '../storage/database';
 import { useVoiceSettings } from '../voice/settings';
 import { deleteLocalFile, saveToGallery, shareImage } from '../storage/files';
+import { handleSystemPermissionError } from '../system-permissions';
 import { colors, prettyModel, radius, shadow, themed } from '../theme';
 
 type ComposerDraft = { prompt: string; images: ReferenceImage[]; documents: DocumentAttachment[]; maskUri: string | null; research: boolean };
@@ -56,7 +61,7 @@ function dropEditFiles(message: ChatMessage, composer: ComposerDraft) {
 type Dialog = { title: string; message: string; actions?: DialogAction[]; icon?: IconName };
 
 /** Quick tools under the inspiration grid. */
-const SUGGESTIONS: { icon: IconName; title: string; hint: string; prompt?: string; action?: 'files' | 'gallery' | 'camera' | 'research'; draw?: boolean }[] = [
+const SUGGESTIONS: AssistantPromptSuggestion[] = [
   { icon: 'telescope', title: '深度研究', hint: '多轮搜索，写成带来源的报告', action: 'research' },
   { icon: 'wand', title: '改一张照片', hint: '换背景、换风格、局部重绘', action: 'gallery', draw: true },
   { icon: 'file', title: '读懂文件', hint: '总结要点、提炼数据', action: 'files' },
@@ -68,17 +73,24 @@ const ONBOARDING_KEY = 'onboarding_done';
 
 export function ChatScreen() {
   const styles = useStyles();
+  // Tablets keep the conversation list docked beside the chat.
+  const wide = useWindowDimensions().width >= 900;
   const app = useApp();
   const revealed = useLaunchRevealed();
+  const [previewUnlocked, setPreviewUnlocked] = useState(false);
   // First install only: decided once when the app is ready (upgrades with services already set up skip it).
   const [onboarding, setOnboarding] = useState<boolean | null>(null);
   useEffect(() => {
     if (!app.ready || onboarding !== null) return;
     let alive = true;
-    void getSetting(ONBOARDING_KEY).catch(() => '1').then((done) => { if (alive) setOnboarding(!done && app.providers.length === 0); });
+    void getSetting(ONBOARDING_KEY).catch(() => '1').then((done) => {
+      if (!alive) return;
+      setPreviewUnlocked(Boolean(done));
+      setOnboarding(!done && app.providers.length === 0);
+    });
     return () => { alive = false; };
   }, [app.ready, app.providers.length, onboarding]);
-  const finishOnboarding = useCallback(() => { setOnboarding(false); void setSetting(ONBOARDING_KEY, '1').catch(() => undefined); }, []);
+  const finishOnboarding = useCallback(() => { setPreviewUnlocked(true); setOnboarding(false); void setSetting(ONBOARDING_KEY, '1').catch(() => undefined); }, []);
   const voiceSettings = useVoiceSettings();
   const voiceReady = Boolean((voiceSettings.inputEngine === 'local' && voiceSettings.localModel) || voiceSettings.transcribeProviderId || voiceSettings.ttsProviderId || voiceSettings.realtimeProviderId);
   const listRef = useRef<FlatList<ChatMessage>>(null);
@@ -89,7 +101,6 @@ export function ChatScreen() {
   const instantScrollRef = useRef(true);
   const lastFollowRef = useRef(0);
   const loadingOlderRef = useRef(false);
-  const elapsedSeconds = useElapsedSeconds();
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ReferenceImage[]>([]);
   const [documents, setDocuments] = useState<DocumentAttachment[]>([]);
@@ -106,7 +117,7 @@ export function ChatScreen() {
   const [network, setNetwork] = useState(false);
   const [maskOpen, setMaskOpen] = useState(false);
   const [preparingMask, setPreparingMask] = useState(false);
-  const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const preview = useMessageImagePreview(app.activeConversationId ?? 'new', app.messages);
   const [updateToken, setUpdateToken] = useState(0);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
@@ -123,21 +134,18 @@ export function ChatScreen() {
   const agents = useAgents();
   const activeAgent = agents.find((agent) => agent.id === app.activeAgentId) ?? null;
 
-  const report = useCallback((title: string, error: unknown, icon: IconName = 'alert') =>
-    setDialog({ title, message: error instanceof Error ? error.message : '请稍后再试', icon }), []);
+  const report = useCallback((title: string, error: unknown, icon: IconName = 'alert') => {
+    if (!handleSystemPermissionError(error)) setDialog({ title, message: error instanceof Error ? error.message : '请稍后再试', icon });
+  }, []);
   // Stable callbacks keep memoized message rows from re-rendering on every tick.
-  const { retry: retryMessage, stop } = app;
+  const { retry: retryMessage, retryImage, stop } = app;
   const onRetry = useCallback((message: ChatMessage) => void retryMessage(message).catch((error) => report('无法重试', error)), [retryMessage, report]);
+  const onRetryImage = useCallback((message: ChatMessage, imageId: string, failedUri?: string) => void retryImage(message, imageId, failedUri).catch((error) => report('图片没有下载完成', error)), [retryImage, report]);
   const dictation = useDictation({
     providers: app.providers, chatProvider: app.chatProvider, onText: setPrompt,
     onError: (error) => report('语音输入没有完成', error, 'mic'),
   });
   const { state: dictationState, cancel: cancelDictation } = dictation;
-  useEffect(() => {
-    if (dictationState === 'idle') return;
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => { cancelDictation(); return true; });
-    return () => sub.remove();
-  }, [dictationState, cancelDictation]);
   const sendMessage = app.send;
   const followUp = useCallback((text: string) => {
     followRef.current = true;
@@ -199,6 +207,19 @@ export function ChatScreen() {
   // shortly after typing stops); attachments stay for this run only, since unsent files are swept on start.
   const draftRef = useRef<ComposerDraft>({ prompt, images, documents, maskUri, research });
   draftRef.current = { prompt, images, documents, maskUri, research };
+  const editGeneratedImage = useGeneratedImageDraft({
+    contextKey: app.activeConversationId ?? 'new', images, editingMessage: Boolean(editing),
+    onAdd: (image) => {
+      const draft = draftRef.current;
+      validateAttachments(draft.documents, [image, ...draft.images]);
+      if (draft.maskUri) deleteLocalFile(draft.maskUri);
+      const next = { ...draft, images: [image, ...draft.images], maskUri: null };
+      draftRef.current = next;
+      setImages(next.images); setMaskUri(null);
+      inputRef.current?.focus();
+    },
+    onError: (error) => report('无法编辑图片', error, 'image'),
+  });
   const drafts = useRef(new Map<string, ComposerDraft>());
   const draftKey = useRef(app.activeConversationId ?? 'new');
   const applyDraft = useCallback((draft: ComposerDraft | null | undefined) => {
@@ -208,6 +229,15 @@ export function ChatScreen() {
     setMaskUri(draft?.maskUri ?? null);
     setResearch(draft?.research ?? false);
   }, []);
+  const cancelEditing = useCallback(() => {
+    const edit = editingRef.current;
+    if (!edit) return;
+    dropEditFiles(edit.message, draftRef.current);
+    editingRef.current = null;
+    draftRef.current = edit.stash;
+    setEditing(null);
+    applyDraft(edit.stash);
+  }, [applyDraft]);
   /** The conversation whose saved draft has been read; nothing is saved over a draft before it is read. */
   const loadedDraftKey = useRef<string | null>(null);
   const loadSavedDraft = useCallback((key: string) => {
@@ -243,6 +273,12 @@ export function ChatScreen() {
     if (pendingEdit) setEditing(null);
     if (pendingEdit) dropEditFiles(pendingEdit.message, draftRef.current);
     const current = pendingEdit ? pendingEdit.stash : draftRef.current;
+    // Leaving before the typing debounce fires must still save this conversation's draft.
+    // An unread saved draft must not be overwritten by the initial empty composer.
+    if (loadedDraftKey.current === draftKey.current) {
+      const text = current.prompt.trim() ? current.prompt : '';
+      void setSetting(draftSettingKey(draftKey.current), text || current.research ? JSON.stringify({ prompt: text, research: current.research }) : null).catch(() => undefined);
+    }
     if (current.prompt.trim() || current.images.length || current.documents.length || current.maskUri || current.research) drafts.current.set(draftKey.current, current);
     else drafts.current.delete(draftKey.current);
     const restored = drafts.current.get(next);
@@ -287,8 +323,52 @@ export function ChatScreen() {
     }
     return switches;
   }, [app.messages]);
-  if (!app.ready) {
-    return <SafeAreaView style={styles.loading}><BrandMark size={64} /></SafeAreaView>;
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!app.ready || onboarding || (!app.providers.length && !previewUnlocked)) return false;
+      // Android normally dismisses the IME before dispatching to JS; keep that order
+      // for keyboards that do forward the event. Native Modals own onRequestClose.
+      if (Keyboard.isVisible()) { dismissKeyboardAndBlur(); return true; }
+      if (dictationState !== 'idle') { cancelDictation(); return true; }
+      if (editingRef.current) { cancelEditing(); return true; }
+      if (app.activeConversationId || app.activeAgentId) {
+        dismissKeyboardAndBlur();
+        startChat();
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [app.ready, app.providers.length, app.activeConversationId, app.activeAgentId, onboarding, previewUnlocked, dictationState, cancelDictation, cancelEditing, startChat]);
+  if (!app.ready || (onboarding === null && app.providers.length === 0)) {
+    return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
+      <View style={styles.header}>
+        <Skeleton width={36} height={36} radius={12} />
+        <View style={{ flex: 1 }} />
+        <Skeleton width={36} height={36} radius={18} />
+        <Skeleton width={36} height={36} radius={18} />
+        <View style={styles.headerCenter} pointerEvents="none"><Skeleton width={112} height={30} radius={15} /></View>
+      </View>
+      <KeyboardSafeView style={styles.body}>
+        <SkeletonGroup label="正在准备对话" style={{ flex: 1 }}>
+          <View style={styles.startupBody}>
+            <Skeleton width={74} height={74} radius={25} />
+            <Skeleton width="52%" height={24} />
+            <Skeleton width="74%" height={14} />
+            <View style={styles.startupCards}>
+              <Skeleton width="48%" height={78} radius={16} />
+              <Skeleton width="48%" height={78} radius={16} />
+              <Skeleton width="48%" height={78} radius={16} />
+              <Skeleton width="48%" height={78} radius={16} />
+            </View>
+          </View>
+          <View style={styles.startupComposer}>
+            <Skeleton width="100%" height={52} radius={26} />
+          </View>
+        </SkeletonGroup>
+      </KeyboardSafeView>
+      <ToastHost />
+    </SafeAreaView>;
   }
 
   const addImages = async (source: 'gallery' | 'camera' | 'files') => {
@@ -379,14 +459,6 @@ export function ChatScreen() {
     });
   };
 
-  const cancelEditing = () => {
-    const edit = editing;
-    if (!edit) return;
-    dropEditFiles(edit.message, draftRef.current);
-    setEditing(null);
-    applyDraft(edit.stash);
-  };
-
   const newChat = () => {
     try {
       dismissKeyboardAndBlur();
@@ -431,37 +503,34 @@ export function ChatScreen() {
     </SafeAreaView>;
   }
 
-  if (onboarding === null && !connected) return <View style={styles.screen} />;
-
-  if (!connected) {
+  if (!connected && !previewUnlocked) {
     return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
-      <Welcome key={revealed ? 'shown' : 'intro'} onStart={() => setProvidersOpen(true)} />
+      <Welcome key={revealed ? 'shown' : 'intro'} onStart={() => setProvidersOpen(true)} onSkip={() => { setPreviewUnlocked(true); finishOnboarding(); }} />
       <ProviderManager visible={providersOpen} onClose={() => setProvidersOpen(false)} />
       <ToastHost />
     </SafeAreaView>;
   }
 
-  return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
-    <View style={styles.header}>
-      <IconButton icon="menu" label="打开侧边栏" onPress={() => setDrawer(true)} />
-      <View style={{ flex: 1 }} />
-      <IconButton icon="compose" label="新对话" disabled={isDraft} onPress={newChat} />
-      <View pointerEvents="box-none" style={styles.headerCenter}><SpaceSwitch space="assistant" onSwitch={app.switchSpace} /></View>
-    </View>
-    <View style={styles.modelRow}>
+  return <SafeAreaView style={[styles.screen, wide && styles.screenWide]} edges={['top', 'bottom']}>
+    {wide ? <ConversationDrawer docked visible onClose={() => undefined} onNewChat={newChat} onOpenSettings={() => setSettings(true)}
+      onOpenAgents={() => setAgentsOpen(true)} onStartAgent={startAgent} /> : null}
+    <View style={{ flex: 1, minWidth: 0 }}>
+    <AssistantTopBar onOpenConversations={() => setDrawer(true)} onNewChat={newChat} newChatDisabled={isDraft} onSwitchSpace={app.switchSpace} />
+    {app.messages.length > 0 || activeAgent ? <View style={styles.modelRow}>
       <MotionPressable scaleTo={0.96} accessibilityRole="button" accessibilityLabel={`${headerTitle}${engine ? `，${engine}` : ''}，切换模型`} onPress={() => setModelsOpen(true)} style={styles.titleButton}>
         {activeAgent ? <AgentAvatar agent={activeAgent} size={18} /> : null}
         <Text style={styles.title} numberOfLines={1}>{headerTitle}</Text>
         {headerModel ? <Text style={styles.engine} numberOfLines={1}>{headerModel}</Text> : null}
         <Icon name="chevronDown" size={12} color={colors.subtle} strokeWidth={2} />
       </MotionPressable>
-    </View>
+    </View> : null}
 
     <KeyboardSafeView style={styles.body}>
       {app.messages.length === 0
         ? activeAgent
           ? <AgentHome key={activeAgent.id} agent={activeAgent} onStarter={(text) => { setPrompt(text); setTimeout(() => inputRef.current?.focus(), 60); }} />
-          : <Home key={`${app.activeConversationId ?? 'draft'}${revealed ? '' : ':intro'}`} canDraw={Boolean(app.imageProvider)} onSuggestion={applySuggestion} covered={covered} />
+          : <AssistantWelcome key={`${app.activeConversationId ?? 'draft'}${revealed ? '' : ':intro'}`} title={greeting()}
+            suggestions={SUGGESTIONS.filter((item) => Boolean(app.imageProvider) || !item.draw).slice(0, 4)} onSuggestion={applySuggestion} />
         : <View style={{ flex: 1 }}>
           <FlatList
             ref={listRef}
@@ -522,13 +591,14 @@ export function ChatScreen() {
             </View>}<View style={item.id === highlightId ? styles.highlight : undefined}><MessageBubble
               message={item}
               phase={item.id === lastId ? app.phase : 'idle'}
-              elapsedSeconds={item.id === lastId && item.preparedPrompt ? elapsedSeconds : 0}
               isLast={item.id === lastId}
               onStop={stop}
               onRetry={onRetry}
-              onPreview={setPreviewUri}
+              onPreview={(uri, batch) => preview.open(item.id, uri, batch)}
               onSave={saveImage}
               onShare={share}
+              onEditImage={editGeneratedImage}
+              onRetryImage={onRetryImage}
               onFollowUp={followUp}
               onUserMessageAction={userMessageAction}
               onDelete={confirmDelete}
@@ -553,6 +623,8 @@ export function ChatScreen() {
         documents={documents}
         hasMask={Boolean(maskUri)}
         busy={app.busy}
+        modelLabel={engine || '选择模型'}
+        onOpenModel={() => setModelsOpen(true)}
         onSend={send}
         onStop={app.stop}
         onOpenAttach={() => { dismissKeyboardAndBlur(); setAttachOpen(true); }}
@@ -569,6 +641,7 @@ export function ChatScreen() {
         onOpenLive={openLive}
       />
     </KeyboardSafeView>
+    </View>
 
     <Sheet visible={attachOpen} onClose={() => setAttachOpen(false)}>
       <View style={styles.attachRow}>
@@ -581,7 +654,7 @@ export function ChatScreen() {
         <ToolRow icon="telescope" title="深度研究" detail="先列计划，多轮搜索阅读，写成带来源的报告" active={research} onPress={toggleResearch} />
       </View>
     </Sheet>
-    <ConversationDrawer visible={drawer} onClose={() => setDrawer(false)} onNewChat={newChat} onOpenSettings={() => setSettings(true)}
+    <ConversationDrawer visible={drawer && !wide} onClose={() => setDrawer(false)} onNewChat={newChat} onOpenSettings={() => setSettings(true)}
       onOpenAgents={() => setAgentsOpen(true)} onStartAgent={startAgent} />
     <AppSettingsSheet visible={settings} onClose={() => setSettings(false)}
       onOpenProviders={() => setProvidersOpen(true)} onOpenModels={(tab) => { setModelsTab(tab ?? 'chat'); setModelsOpen(true); }}
@@ -603,7 +676,7 @@ export function ChatScreen() {
       imageUrl={[...app.messages].reverse().find((message) => message.remoteImageUrl)?.remoteImageUrl} />
     <MaskEditor visible={maskOpen} image={images[0] ?? null} onCancel={() => setMaskOpen(false)}
       onConfirm={(uri) => { if (maskUri && maskUri !== uri && !ownedByEdit(editing?.message, maskUri)) deleteLocalFile(maskUri); setMaskUri(uri); setMaskOpen(false); }} />
-    <ImagePreview uri={previewUri} onClose={() => setPreviewUri(null)} onSave={saveImage} onShare={share} />
+    <ImagePreview uri={preview.uri} images={preview.images} onSelect={preview.onSelect} onClose={preview.onClose} onSave={saveImage} onShare={share} />
     <AppDialog visible={Boolean(dialog)} title={dialog?.title ?? ''} message={dialog?.message} icon={dialog?.icon} actions={dialog?.actions} onClose={() => setDialog(null)} />
     <AppDialog visible={preparingMask} title="正在准备图片" message="马上就好…" icon="brush" actions={[{ label: '处理中', disabled: true }]} dismissible={false} onClose={() => undefined}><ActivityIndicator color={colors.primary} /></AppDialog>
     <UpdateManager manualCheckToken={updateToken} />
@@ -614,30 +687,6 @@ export function ChatScreen() {
 function greeting() {
   const hour = new Date().getHours();
   return hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 13 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
-}
-
-function Home({ canDraw, onSuggestion, covered = false }: {
-  canDraw: boolean; covered?: boolean;
-  onSuggestion: (item: typeof SUGGESTIONS[number]) => void;
-}) {
-  const styles = useStyles();
-  const { width } = useWindowDimensions();
-  const items = SUGGESTIONS.filter((item) => canDraw || !item.draw);
-  return <View style={{ flex: 1 }}>
-    <ScrollView contentContainerStyle={styles.home} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
-      <Appear distance={8}><LivingMark size={34} active={!covered} /></Appear>
-      <Appear delay={90} distance={12}><GradientText text={greeting()} fontSize={34} width={Math.min(width - 56, 360)} /></Appear>
-      <Appear delay={170} distance={12}><Text style={styles.homeSubtitle}>{canDraw ? '想聊点什么，\n或者让我画点什么？' : '今天想聊点什么？'}</Text></Appear>
-    </ScrollView>
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.suggestions} keyboardShouldPersistTaps="handled">
-      {items.map((item, index) => <Appear key={item.title} delay={260 + index * 60} distance={10}>
-        <MotionPressable scaleTo={0.96} accessibilityRole="button" accessibilityLabel={item.title} onPress={() => onSuggestion(item)} style={styles.suggestion}>
-          <Icon name={item.icon} size={17} color={colors.primary} />
-          <Text style={styles.suggestionTitle}>{item.title}</Text>
-        </MotionPressable>
-      </Appear>)}
-    </ScrollView>
-  </View>;
 }
 
 /** Home of a custom agent: who it is and a few ways to start. */
@@ -669,7 +718,7 @@ function ToolRow({ icon, title, detail, active = false, onPress }: { icon: IconN
   </MotionPressable>;
 }
 
-function Welcome({ onStart }: { onStart: () => void }) {
+function Welcome({ onStart, onSkip }: { onStart: () => void; onSkip: () => void }) {
   const styles = useStyles();
   return <ScrollView contentContainerStyle={styles.welcome} showsVerticalScrollIndicator={false}>
     <View style={styles.welcomeCenter}>
@@ -683,6 +732,9 @@ function Welcome({ onStart }: { onStart: () => void }) {
       </Appear>
     </View>
     <Appear delay={420}><PrimaryButton label="开始使用" onPress={onStart} /></Appear>
+    <Pressable accessibilityRole="button" accessibilityLabel="跳过配置，先看看界面" onPress={onSkip} style={styles.welcomeSkip}>
+      <Text style={styles.welcomeSkipText}>跳过配置，先看看界面</Text>
+    </Pressable>
     <Text style={styles.welcomeNote}>需要一个兼容 OpenAI 或 Claude 的 API 服务</Text>
   </ScrollView>;
 }
@@ -707,11 +759,14 @@ const useStyles = themed((c, d) => StyleSheet.create({
   highlight: { backgroundColor: c.blueSurface, borderRadius: 16 },
   olderRow: { alignItems: 'center', paddingVertical: 12 },
   screen: { flex: 1, backgroundColor: colors.canvas },
+  screenWide: { flexDirection: 'row' },
   switchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 6, paddingHorizontal: 12 },
   switchLine: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
   switchText: { color: colors.subtle, fontSize: 11.5, letterSpacing: 0.2, maxWidth: '70%' },
-  loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.canvas },
-  header: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, gap: 4 },
+  startupBody: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, paddingHorizontal: 26 },
+  startupCards: { width: '100%', maxWidth: 600, flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 10, marginTop: 10 },
+  startupComposer: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 16, paddingBottom: 12 },
+  header: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 6, gap: 4 },
   headerCenter: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
   modelRow: { alignItems: 'center', marginTop: -6, paddingBottom: 2 },
   titleButton: { flexDirection: 'row', alignItems: 'center', gap: 5, maxWidth: 280, height: 30, paddingHorizontal: 12, borderRadius: 15 },
@@ -721,9 +776,6 @@ const useStyles = themed((c, d) => StyleSheet.create({
   messages: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 28, gap: 26, width: '100%', maxWidth: 780, alignSelf: 'center' },
   jumpWrap: { position: 'absolute', bottom: 12, alignSelf: 'center' },
   jump: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.soft },
-  home: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 20, paddingTop: 24, paddingBottom: 20, gap: 10 },
-  homeSubtitle: { color: c.textMuted, fontSize: 26, lineHeight: 35, fontWeight: '500', letterSpacing: -0.5 },
-  suggestions: { paddingHorizontal: 12, gap: 8, paddingBottom: 4 },
   agentHome: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 28, paddingVertical: 24, gap: 8 },
   agentHomeName: { color: colors.text, fontSize: 26, fontWeight: '700', letterSpacing: -0.5, marginTop: 10 },
   agentHomeDetail: { color: colors.textMuted, fontSize: 15, lineHeight: 22, textAlign: 'center' },
@@ -752,4 +804,6 @@ const useStyles = themed((c, d) => StyleSheet.create({
   featureIcon: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center' },
   featureText: { flex: 1, color: colors.textSecondary, fontSize: 15.5 },
   welcomeNote: { color: colors.subtle, fontSize: 12, textAlign: 'center', marginTop: 14 },
+  welcomeSkip: { minHeight: 42, alignItems: 'center', justifyContent: 'center', marginTop: 4 },
+  welcomeSkipText: { color: colors.primary, fontSize: 14, fontWeight: '500' },
 }));

@@ -1,12 +1,13 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { extensionOf, readGeneratedFile, shareGeneratedFile } from '../agent/files';
 import type { GeneratedFile } from '../agent/types';
 import { colors, radius, themed } from '../theme';
 import { MessageContent } from './MessageContent';
 import { PrimaryButton, Sheet, showToast } from './ui';
+import { Skeleton, SkeletonGroup } from './Skeleton';
 
 /** Parses simple CSV (quoted fields, commas, newlines in quotes). */
 export function parseCsv(text: string, delimiter = ','): string[][] {
@@ -57,7 +58,7 @@ export function FilePreviewSheet({ file, onClose }: { file: GeneratedFile | null
     </View>}>
     <View style={styles.body}>
       {error ? <Text style={styles.error}>{error}</Text>
-        : content === null ? <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
+        : content === null ? <SkeletonGroup label="正在读取文件" style={{ gap: 10, paddingTop: 8 }}>{['92%', '86%', '74%', '90%', '62%', '80%', '48%'].map((w, i) => <Skeleton key={i} width={w as `${number}%`} height={12} />)}</SkeletonGroup>
           : rows ? <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             <View style={styles.table}>
               {rows.map((row, r) => <View key={r} style={[styles.row, r === 0 && styles.head]}>

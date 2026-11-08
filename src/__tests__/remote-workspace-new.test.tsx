@@ -5,13 +5,19 @@ import type { AgentProfile, SessionInfo } from '../remote/client';
 import type { RemoteState } from '../remote/store';
 
 let mockRemote: RemoteState;
+let mockPairingScope = 'station|credential:original';
 const mockLoadSessions = jest.fn<Promise<void>, [string, string?, { preservePages?: boolean }?]>(async () => undefined);
 const mockLoadMore = jest.fn<Promise<void>, [string, string]>(async () => undefined);
 const mockLoadNative = jest.fn<Promise<void>, [string, boolean?, { preservePages?: boolean }?]>(async () => undefined);
 const mockLoadHistory = jest.fn<Promise<void>, [string, string, boolean?, { preservePages?: boolean }?]>(async () => undefined);
 const mockDemandSync = jest.fn();
-jest.mock('../remote/store', () => ({ useRemote: () => mockRemote, loadClaudeDesktopHistory: (id: string, scope: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadHistory(id, scope, more, options) : mockLoadHistory(id, scope, more), loadSessions: (id: string, agentId?: string, options?: { preservePages?: boolean }) => options ? mockLoadSessions(id, agentId, options) : mockLoadSessions(id, agentId), loadMoreSessions: (id: string, agentId: string) => mockLoadMore(id, agentId), loadNativeSessions: (id: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadNative(id, more, options) : more ? mockLoadNative(id, more) : mockLoadNative(id), selectSessionDirectory: (id: string, surface: 'desktop' | 'all') => { mockRemote.sessions[id].directorySurface = surface; } }));
+jest.mock('../remote/store', () => ({ useRemote: () => mockRemote, timelineKey: (deviceId: string, sessionKey: string) => `${deviceId}|${sessionKey}`, remoteDeliveryScope: () => mockPairingScope, loadClaudeDesktopHistory: (id: string, scope: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadHistory(id, scope, more, options) : mockLoadHistory(id, scope, more), loadSessions: (id: string, agentId?: string, options?: { preservePages?: boolean }) => options ? mockLoadSessions(id, agentId, options) : mockLoadSessions(id, agentId), loadMoreSessions: (id: string, agentId: string) => mockLoadMore(id, agentId), loadNativeSessions: (id: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadNative(id, more, options) : more ? mockLoadNative(id, more) : mockLoadNative(id), selectSessionDirectory: (id: string, surface: 'desktop' | 'all') => { mockRemote.sessions[id].directorySurface = surface; } }));
 jest.mock('../remote/useDemandSync', () => ({ useDemandSync: (...args: unknown[]) => mockDemandSync(...args) }));
+jest.mock('../remote/SessionQuickActionsSheet', () => {
+  const React = require('react'), { View, Text } = require('react-native');
+  return { SessionQuickActionsSheet: (props: Record<string, unknown>) => props.visible
+    ? React.createElement(View, { testID: 'session-quick-actions', ...props }, React.createElement(Text, null, '會話操作')) : null };
+});
 jest.mock('../components/Icon', () => ({ Icon: () => null }));
 jest.mock('../remote/parts', () => {
   const actual = jest.requireActual('../remote/parts'); const React = require('react'); const { View } = require('react-native');
@@ -45,7 +51,7 @@ function profile(id: AgentProfile['id'] = 'codex'): AgentProfile {
     api: { name: '电脑主力', model: '', source: 'computer', configured: true, pending: false, protocol: 'responses' } };
 }
 function session(key: string, extra: Partial<SessionInfo> = {}): SessionInfo {
-  return { sessionKey: key, tool: 'codex', client: 'Codex App', title: key, cwd: 'C:\\code\\shop', updatedAt: 1, status: 'idle', controllable: true, controlSurface: 'cli', ...extra };
+  return { sessionKey: key, tool: 'codex', client: 'Codex App', title: key, cwd: 'C:\\code\\shop', workspaceMode: 'code', updatedAt: 1, status: 'idle', controllable: true, controlSurface: 'cli', ...extra };
 }
 function ready(list: SessionInfo[] = []): RemoteState {
   return { phase: 'ready', connectionId: 'paired', selectedHubUrl: 'https://station.example/salcara-hub/v1', connection: 'open', serviceId: null, connections: [], probes: {}, signingIn: null, devicesLoaded: true,
@@ -58,7 +64,24 @@ async function mount(extra: Partial<Props> = {}) {
   const view = await render(<RemoteWorkspace {...props} />);
   return { view, props };
 }
-beforeEach(() => { jest.clearAllMocks(); mockLoadSessions.mockImplementation(async () => undefined); mockLoadNative.mockImplementation(async () => undefined); mockLoadHistory.mockImplementation(async () => undefined); mockRemote = ready(); });
+beforeEach(() => { jest.clearAllMocks(); mockPairingScope = 'station|credential:original'; mockLoadSessions.mockImplementation(async () => undefined); mockLoadNative.mockImplementation(async () => undefined); mockLoadHistory.mockImplementation(async () => undefined); mockRemote = ready(); });
+
+test.each(['code','work'] as const)('%s directory contains project folders and opens only the selected conversation',async workspaceMode=>{
+ mockRemote=ready([
+  session('codex:one',{cwd:'C:/projects/mobile',title:'手机项目对话一',workspaceMode}),
+  session('codex:two',{cwd:'C:\\projects\\mobile',title:'手机项目对话二',workspaceMode,status:'running'}),
+  session('codex:three',{cwd:'C:/projects/site',title:'网站项目对话',workspaceMode}),
+  session('codex:other-mode',{cwd:'C:/projects/mobile',title:'另一个空间的对话',workspaceMode:workspaceMode==='code'?'work':'code'}),
+  session('claude:foreign',{tool:'claude',client:'Claude Code',cwd:'C:/projects/mobile',title:'另一个Agent的对话',workspaceMode}),
+ ]);
+ const {view,props}=await mount({workspaceMode});
+ expect(view.getByTestId('remote-workspace-list').props.sections.map((group:any)=>[group.name,group.data.length])).toEqual([['mobile',2],['site',1]]);
+ expect(view.queryByText('另一个空间的对话')).toBeNull();expect(view.queryByText('另一个Agent的对话')).toBeNull();
+ await fireEvent.press(view.getByLabelText('折叠 mobile 对话'));expect(props.onOpen).not.toHaveBeenCalled();expect(view.queryByText('手机项目对话一')).toBeNull();expect(view.getByText('网站项目对话')).toBeTruthy();
+ await fireEvent.press(view.getByLabelText('展开 mobile 对话'));
+ await fireEvent.press(view.getByLabelText('手机项目对话二'));expect(props.onOpen).toHaveBeenCalledWith('codex:two');
+ await view.unmount();
+});
 
 test('authorized native directory preserves pinned order and keeps all history explicitly selectable', async () => {
   const keys = ['codex:0199aaa1-1234-4678-9abc-000000000001', 'codex:0199aaa1-1234-4678-9abc-000000000002'];
@@ -67,8 +90,9 @@ test('authorized native directory preserves pinned order and keeps all history e
   const agent = { ...profile(), desktopLive: { expiresAt: Date.now() + 60000, sessionKeys: keys, capabilities: { list: true, read: true, send: true, interrupt: false, approval: false, attachments: false, modelOverride: false } } };
   const { view } = await mount({ agent });
   expect(mockLoadNative).toHaveBeenCalledWith('pc-1'); expect(mockLoadSessions).not.toHaveBeenCalled();
-  expect(view.getByTestId('remote-workspace-list').props.sections.map((item: { name: string }) => item.name)).toEqual(['置顶', '最近']);
-  expect(view.queryByText('全部历史')).toBeNull(); expect(view.queryByLabelText('新对话')).toBeNull();
+  expect(view.getByTestId('remote-workspace-list').props.sections.map((item: { name: string }) => item.name)).toEqual(['shop']);
+  expect(view.getByTestId('remote-workspace-list').props.sections[0].data.map((item: SessionInfo) => item.title)).toEqual(['旧置顶', '新最近']);
+  expect(view.queryByText('全部历史')).toBeNull(); expect(view.queryByLabelText('新建 Code 对话')).toBeNull();
   await fireEvent.press(view.getByLabelText('全部对话'));
   expect(view.getByText('全部历史')).toBeTruthy(); expect(mockLoadSessions).toHaveBeenCalledWith('pc-1', 'codex');
   await fireEvent.press(view.getByLabelText('桌面对话'));
@@ -98,14 +122,60 @@ test('returning from a thread after lease expiry retains the prior native direct
   expect(mockLoadSessions).not.toHaveBeenCalled();
 });
 
-test('groups the original sessions by project with the most recent project first', async () => {
-  mockRemote = ready([session('codex:old', { cwd: 'C:\\code\\shop', updatedAt: 1 }), session('codex:new', { cwd: 'C:\\code\\api', updatedAt: 3 })]);
+test('groups multiple conversations under one project and keeps the newest project first', async () => {
+  mockRemote = ready([session('codex:old', { cwd: 'C:\\code\\shop', updatedAt: 1 }), session('codex:new', { cwd: 'C:\\code\\api', updatedAt: 3 }),
+    session('codex:shop-two', { title: '店铺续聊', cwd: 'C:\\code\\shop', updatedAt: 2 })]);
   const { view } = await mount();
   expect(view.getByText('Codex')).toBeTruthy(); expect(view.getByText('工作电脑')).toBeTruthy();
   const sections = view.getByTestId('remote-workspace-list').props.sections;
   expect(sections.map((item: { name: string }) => item.name)).toEqual(['api', 'shop']);
-  expect(sections.flatMap((item: { data: SessionInfo[] }) => item.data.map(row => row.sessionKey))).toEqual(['codex:new', 'codex:old']);
+  expect(sections.flatMap((item: { data: SessionInfo[] }) => item.data.map(row => row.sessionKey))).toEqual(['codex:new', 'codex:shop-two', 'codex:old']);
+  expect(sections.find((item: { name: string }) => item.name === 'shop').data).toHaveLength(2);
   expect(mockLoadSessions).toHaveBeenCalledWith('pc-1', 'codex');
+});
+
+test('sessions without a working folder are shown in a separate temporary-task group', async () => {
+  mockRemote = ready([session('codex:project', { title: '项目会话', cwd: 'C:\\code\\shop', workspaceMode: 'work' }),
+    session('codex:temp-new', { title: '临时任务·新', cwd: '', workspaceMode: 'work' }), session('codex:temp-old', { title: '临时任务·旧', cwd: undefined, workspaceMode: 'work', updatedAt: 0 })]);
+  const { view } = await mount({ workspaceMode: 'work' });
+  const sections = view.getByTestId('remote-workspace-list').props.sections;
+  expect(sections.map((item: { name: string; path: string }) => [item.name, item.path])).toEqual([['shop', 'C:\\code\\shop'], ['临时任务', '']]);
+  expect(sections[1].data.map((item: SessionInfo) => item.sessionKey)).toEqual(['codex:temp-new', 'codex:temp-old']);
+});
+
+test('home-selected Code and Work directories stay fixed and new tasks retain the entry mode', async () => {
+  mockRemote = ready([session('codex:code', { title: '代码项目', workspaceMode: 'code' }),
+    session('codex:work', { title: '工作任务', workspaceMode: 'work' })]);
+  const onWorkspaceModeChange = jest.fn();
+  const onNew = jest.fn();
+  const { view, props } = await mount({ workspaceMode: 'code', onWorkspaceModeChange, onNew });
+
+  expect(view.getByText('代码项目')).toBeTruthy(); expect(view.queryByText('工作任务')).toBeNull();
+  expect(view.queryByLabelText('Work')).toBeNull();
+  expect(view.queryByLabelText('Code')).toBeNull();
+  expect(onWorkspaceModeChange).not.toHaveBeenCalled();
+  await view.rerender(<RemoteWorkspace {...props} workspaceMode="work" />);
+  expect(view.getByText('工作任务')).toBeTruthy(); expect(view.queryByText('代码项目')).toBeNull();
+  await fireEvent.press(view.getByLabelText('新建 Work 对话'));
+  expect(onNew).toHaveBeenCalledWith('work');
+});
+
+test('switching computers renders only that computer directory even when session handles collide', async () => {
+  mockRemote = ready([session('codex:same-handle', { title: '工作机对话', cwd: 'C:\\work\\repo' })]);
+  mockRemote.devices.push({ deviceId: 'pc-2', name: '另一台电脑', online: true, os: 'windows', lastSeen: 1, tools: [], projects: [] });
+  mockRemote.sessions['pc-2'] = { list: [session('codex:same-handle', { title: '家用机对话', cwd: 'D:\\home\\repo' })], loading: false, loaded: true };
+  const open = jest.fn();
+  const { view, props } = await mount({ onOpen: key => open('pc-1', key) });
+  const staleWorkComputerRow = view.getByLabelText('工作机对话').props.onPress;
+  await view.rerender(<RemoteWorkspace {...props} deviceId="pc-2" onOpen={key => open('pc-2', key)} />);
+  await act(async () => { staleWorkComputerRow(); });
+  expect(open).not.toHaveBeenCalled();
+  expect(view.getByText('另一台电脑')).toBeTruthy();
+  expect(view.getByText('家用机对话')).toBeTruthy();
+  expect(view.queryByText('工作机对话')).toBeNull();
+  expect(view.getByTestId('remote-workspace-list').props.sections[0].path).toBe('D:\\home\\repo');
+  await fireEvent.press(view.getByLabelText('家用机对话'));
+  expect(open).toHaveBeenCalledWith('pc-2', 'codex:same-handle');
 });
 
 test('Claude native Chat/Cowork stay separate from Code and readonly directories do not offer a new task', async () => {
@@ -116,13 +186,15 @@ test('Claude native Chat/Cowork stay separate from Code and readonly directories
     'desktop-cowork': { identity, loaded: true, loading: false, list: [] },
   };
   const agent = { ...profile('claude-desktop'), desktopHistory: { available: true as const, readOnly: true as const, identity, scopes: ['desktop-chat', 'desktop-cowork'] as const } };
-  const { view, props } = await mount({ agent: { ...agent, desktopHistory: { ...agent.desktopHistory, scopes: [...agent.desktopHistory.scopes] } } });
+  const { view, props } = await mount({ workspaceMode: 'work', agent: { ...agent, desktopHistory: { ...agent.desktopHistory, scopes: [...agent.desktopHistory.scopes] } } });
   expect(view.getByText('Native Chat')).toBeTruthy(); expect(view.queryByText('Code task')).toBeNull();
-  expect(view.queryByLabelText('新对话')).toBeNull(); expect(view.queryByLabelText('更换 Agent / API')).toBeNull();
+  expect(view.queryByLabelText('新建 Work 对话')).toBeNull(); expect(view.queryByLabelText('API 管理')).toBeNull();
   expect(mockLoadHistory).toHaveBeenCalledWith('pc-1', 'desktop-chat', false); expect(mockLoadSessions).not.toHaveBeenCalled();
   await fireEvent.press(view.getByLabelText('Native Chat')); expect(props.onOpen).toHaveBeenCalledWith(localKey);
   await fireEvent.press(view.getByLabelText('Cowork对话')); expect(mockLoadHistory).toHaveBeenCalledWith('pc-1', 'desktop-cowork', false);
-  await fireEvent.press(view.getByLabelText('Code对话')); expect(view.getByText('Code task')).toBeTruthy(); expect(view.getByLabelText('新对话')).toBeTruthy();
+  expect(view.queryByLabelText('Code对话')).toBeNull();
+  await view.rerender(<RemoteWorkspace {...props} workspaceMode="code" />);
+  await fireEvent.press(view.getByLabelText('Code对话')); expect(view.getByText('Code task')).toBeTruthy(); expect(view.getByLabelText('新建 Code 对话')).toBeTruthy();
   expect(mockLoadSessions).toHaveBeenCalledWith('pc-1', 'claude-desktop');
 });
 
@@ -159,23 +231,40 @@ test('project expansion reveals older sessions and collapses back to six', async
   expect(view.queryByText('codex:7')).toBeNull();
 });
 
+test('project headers collapse the whole group independently from showing more sessions', async () => {
+  mockRemote = ready(Array.from({ length: 8 }, (_, index) => session(`codex:${index}`, { updatedAt: 8 - index })));
+  const { view } = await mount();
+  await fireEvent.press(view.getByLabelText('折叠 shop 对话'));
+  expect(view.queryByText('codex:0')).toBeNull();
+  await fireEvent.press(view.getByLabelText('展开 shop 对话'));
+  expect(view.getByText('codex:0')).toBeTruthy();
+});
+
+test('long pressing a workspace row opens its scoped quick actions', async () => {
+  const row = session('codex:long-press', { title: '按住操作' });
+  mockRemote = ready([row]);
+  const { view } = await mount();
+  await fireEvent(view.getByLabelText('按住操作'), 'longPress');
+  expect(view.getByTestId('session-quick-actions').props).toMatchObject({ deviceId: 'pc-1', session: row });
+});
+
 test('opening an existing row preserves its exact key and stays separate from new and settings actions', async () => {
   const key = 'codex:11111111-2222-3333-4444-555555555555';
   mockRemote = ready([session(key, { title: '旧会话' })]);
   const { view, props } = await mount();
   await fireEvent.press(view.getByLabelText('旧会话'));
   expect(props.onOpen).toHaveBeenCalledWith(key); expect(props.onNew).not.toHaveBeenCalled(); expect(props.onSettings).not.toHaveBeenCalled();
-  await fireEvent.press(view.getByLabelText('新对话')); expect(props.onNew).toHaveBeenCalledTimes(1);
-  await fireEvent.press(view.getByLabelText('更换 Agent / API')); expect(props.onSettings).toHaveBeenCalledTimes(1);
+  await fireEvent.press(view.getByLabelText('新建 Code 对话')); expect(props.onNew).toHaveBeenCalledWith('code');
+  await fireEvent.press(view.getByLabelText('API 管理')); expect(props.onSettings).toHaveBeenCalledTimes(1);
   expect(view.getByText('电脑主力')).toBeTruthy();
 });
 
-test('pending, running and failed tasks have compact statuses and official badge props', async () => {
+test('pending, running and failed tasks have compact statuses without repeating Agent badges on every conversation', async () => {
   mockRemote = ready([session('codex:pending'), session('codex:run', { status: 'running' }), session('codex:failed', { status: 'failed' })]);
   mockRemote.approvals = { pending: { approvalId: 'pending', deviceId: 'pc-1', sessionKey: 'codex:pending', tool: 'codex', title: '确认操作', ts: 1 } };
   const { view } = await mount();
-  expect(view.getByText('待回复')).toBeTruthy(); expect(view.getByText('运行中')).toBeTruthy(); expect(view.getByText('失败')).toBeTruthy();
-  expect(view.getAllByTestId('workspace-agent-brand').every(item => item.props.size === 34 && item.props.tool === 'codex')).toBe(true);
+  expect(view.getByText('待回复')).toBeTruthy(); expect(view.getByRole('progressbar', {name:'codex:run运行中'})).toBeTruthy(); expect(view.getByText('失败')).toBeTruthy();
+  expect(view.queryByTestId('workspace-agent-brand')).toBeNull();
 });
 
 test('a valid desktop lease is labeled only on its exact session, never as a global execution guarantee', async () => {
@@ -214,7 +303,7 @@ test('offline workspace retains cached sessions without reads or new-task submis
   const { view, props } = await mount();
   expect(view.getByText('电脑离线')).toBeTruthy(); expect(view.getByText('已保存的任务')).toBeTruthy();
   await act(async () => view.getByTestId('remote-workspace-list').props.onRefresh());
-  await fireEvent.press(view.getByLabelText('新对话'));
+  await fireEvent.press(view.getByLabelText('新建 Code 对话'));
   expect(mockLoadSessions).not.toHaveBeenCalled(); expect(props.onNew).not.toHaveBeenCalled();
   await fireEvent.press(view.getByLabelText('已保存的任务')); expect(props.onOpen).toHaveBeenCalledWith('codex:cached');
 });
@@ -254,7 +343,7 @@ test.each(['native', 'readonly'] as const)('a foreground more-page click is not 
     : { ...profile('claude-desktop'), desktopHistory: { available: true, readOnly: true, identity, scopes: ['desktop-chat'] } };
   if (surface === 'native') mockRemote.sessions['pc-1'].native = { list: [row], loaded: true, loading: false, nextCursor: 'older' };
   else mockRemote.sessions['pc-1'].readOnly = { 'desktop-chat': { list: [row], loaded: true, loading: false, nextCursor: 'older', identity } };
-  const { view } = await mount({ agent });
+  const { view } = await mount({ agent, workspaceMode: surface === 'readonly' ? 'work' : 'code' });
   let release!: () => void, background!: Promise<void>;
   if (surface === 'native') mockLoadNative.mockImplementation((_id, _more, options) => options?.preservePages ? new Promise(resolve => { release = resolve; }) : Promise.resolve());
   else mockLoadHistory.mockImplementation((_id, _scope, _more, options) => options?.preservePages ? new Promise(resolve => { release = resolve; }) : Promise.resolve());
@@ -272,11 +361,37 @@ test.each(['native', 'readonly'] as const)('a foreground more-page click is not 
   await view.unmount();
 });
 
-test('active child tasks retain foreground demand updates without appearing as separate main tasks', async () => {
-  mockRemote = ready([session('codex:parent'), session('codex:child', { parentSessionKey: 'codex:parent', status: 'running' })]);
-  const { view } = await mount();
+test.each(['code', 'work'] as const)('%s keeps child tasks inside their parent conversation while retaining foreground demand updates', async workspaceMode => {
+  mockRemote = ready([session('codex:parent', { workspaceMode }), session('codex:child', { parentSessionKey: 'codex:parent', status: 'running', workspaceMode })]);
+  const { view, props } = await mount({ workspaceMode });
   expect(view.queryByText('codex:child')).toBeNull();
+  expect(view.queryByLabelText('子智能体')).toBeNull();
+  expect(view.queryByRole('tablist')).toBeNull();
+  expect(view.getByTestId('remote-workspace-list').props.sections[0].sessions).toHaveLength(1);
   expect(mockDemandSync).toHaveBeenLastCalledWith(true, true, expect.any(Function));
+  expect(view.getByRole('progressbar', { name: 'codex:parent及其子任务运行中' })).toBeTruthy();
+  await fireEvent.press(view.getByLabelText('codex:parent')); expect(props.onOpen).toHaveBeenCalledWith('codex:parent');
+});
+
+test('header keeps Agent, computer and static mode compact with an icon-only new action', async () => {
+  const { view, props } = await mount({ workspaceMode: 'work' });
+  expect(view.getByRole('header', { name: 'Codex' })).toBeTruthy();
+  expect(view.getByText('工作电脑')).toBeTruthy(); expect(view.getByText('Work 会话')).toBeTruthy();
+  expect(view.getByTestId('agent-directory-new')).toBeTruthy(); expect(view.queryByText('新建')).toBeNull();
+  expect(view.queryByLabelText('新建 Code 对话')).toBeNull();
+  await fireEvent.press(view.getByLabelText('新建 Work 对话')); expect(props.onNew).toHaveBeenCalledWith('work');
+});
+
+test('pending child approvals belong only to the selected computer and do not expose the child', async () => {
+  mockRemote = ready([session('codex:parent'), session('codex:child', { parentSessionKey: 'codex:parent' })]);
+  const question = { approvalId: 'question', deviceId: 'pc-other', sessionKey: 'codex:child', tool: 'codex', title: '确认', ts: 1 };
+  mockRemote.approvals = { question };
+  const { view, props } = await mount(); expect(view.queryByText('待回复')).toBeNull();
+  mockRemote = { ...mockRemote, approvals: { question: { ...question, deviceId: 'pc-1' } } };
+  await view.rerender(<RemoteWorkspace {...props}/>);
+  expect(view.getByLabelText('codex:parent及其子任务待回复')).toBeTruthy(); expect(view.queryByText('codex:child')).toBeNull();
+  mockRemote = { ...mockRemote, approvals: {} }; await view.rerender(<RemoteWorkspace {...props}/>);
+  expect(view.queryByText('待回复')).toBeNull();
 });
 
 test('station scope changes refresh the directory and clear old search without mutating sessions', async () => {
@@ -290,6 +405,36 @@ test('station scope changes refresh the directory and clear old search without m
   expect(view.getByText('codex:two')).toBeTruthy();
   expect(mockLoadSessions).toHaveBeenCalledTimes(1);
   expect(mockRemote.sessions['pc-1'].list).toHaveLength(2);
+});
+
+test('renewing the pairing clears search and expansion and fences old directory owners', async () => {
+  const releases: (() => void)[] = [];
+  mockLoadSessions.mockImplementation(() => new Promise<void>(resolve => { releases.push(resolve); }));
+  mockRemote = ready(Array.from({ length: 7 }, (_, index) => session(`codex:task-${index}`)));
+  const { view, props } = await mount();
+  await fireEvent.press(view.getByLabelText('显示全部 shop 的对话'));
+  expect(view.getByTestId('remote-workspace-list').props.sections[0].data).toHaveLength(7);
+  const oldExpand = view.getByLabelText('收起 shop 的对话').props.onPress;
+  const oldOpen = view.getByLabelText('codex:task-0').props.onPress;
+  const oldNew = view.getByLabelText('新建 Code 对话').props.onPress;
+  const oldSettings = view.getByLabelText('API 管理').props.onPress;
+  const oldRefresh = view.getByTestId('remote-workspace-list').props.onRefresh;
+  const oldDemand = mockDemandSync.mock.calls.at(-1)?.[2] as () => Promise<void>;
+  await fireEvent.changeText(view.getByLabelText('搜索对话'), 'task-0');
+  mockPairingScope = 'station|credential:renewed';
+  await view.rerender(<RemoteWorkspace {...props} />);
+  expect(view.getByLabelText('搜索对话').props.value).toBe('');
+  expect(view.getByTestId('remote-workspace-list').props.sections[0].data).toHaveLength(6);
+  expect(mockLoadSessions).toHaveBeenCalledTimes(2);
+  await act(async () => { view.getByTestId('remote-workspace-list').props.onRefresh(); });
+  expect(view.getByTestId('remote-workspace-list').props.refreshing).toBe(true);
+  await act(async () => { oldOpen(); oldNew(); oldSettings(); oldExpand(); oldRefresh(); await oldDemand(); releases[0](); });
+  expect(props.onOpen).not.toHaveBeenCalled(); expect(props.onNew).not.toHaveBeenCalled(); expect(props.onSettings).not.toHaveBeenCalled();
+  expect(mockLoadSessions).toHaveBeenCalledTimes(2);
+  expect(view.getByTestId('remote-workspace-list').props.sections[0].data).toHaveLength(6);
+  expect(view.getByTestId('remote-workspace-list').props.refreshing).toBe(true);
+  await act(async () => { releases[1](); });
+  expect(view.getByTestId('remote-workspace-list').props.refreshing).toBe(false);
 });
 
 test('a shared directory read already marked loading is not duplicated on entry or refresh', async () => {
@@ -310,7 +455,7 @@ test('station connection errors prevent reads even if the cached device still re
   const { view, props } = await mount();
   await act(async () => view.getByTestId('remote-workspace-list').props.onRefresh());
   expect(mockLoadSessions).not.toHaveBeenCalled();
-  await fireEvent.press(view.getByLabelText('新对话')); expect(props.onNew).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByLabelText('新建 Code 对话')); expect(props.onNew).not.toHaveBeenCalled();
 });
 
 test('demand sync receives failed reads for its existing retry backoff', async () => {
@@ -348,8 +493,8 @@ test.each(['hidden', 'reopened', 'station', 'agent', 'unmounted'] as const)('que
   mockRemote = ready([session('codex:old', { title: '旧任务' })]);
   const { view, props } = await mount();
   const open = view.getByLabelText('旧任务').props.onPress;
-  const create = view.getByLabelText('新对话').props.onPress;
-  const settings = view.getByLabelText('更换 Agent / API').props.onPress;
+  const create = view.getByLabelText('新建 Code 对话').props.onPress;
+  const settings = view.getByLabelText('API 管理').props.onPress;
   const refresh = view.getByTestId('remote-workspace-list').props.onRefresh;
   if (condition === 'hidden' || condition === 'reopened') {
     await view.rerender(<RemoteWorkspace {...props} visible={false} />);

@@ -18,6 +18,8 @@ describe('official Agent icons', () => {
   test.each([
     ['codex-app-official.png', '8e82b26c98a10e45798ce48124515720657f7735fb8d0853b3f087eaa8a6b74e'],
     ['claude-app-official.png', '28f6dfd7bc66bffe9ac40dac94dc90b7bae9b4a60b123f687c90ab2b86a63eb0'],
+    ['deepseek-harness-app-official.png', '12064ff340e65872715cb18e56cfa9d3afe294fed98c81807d39e230a030d972'],
+    ['hermes-app-official.png', '2e69dd9a8a1d3f9e3f627efc37102aed416f703e22f599e31c5d86b212a4d6de'],
   ])('preserves the original official bytes of %s', (filename, digest) => {
     const bytes = readFileSync(resolve(__dirname, '../../assets/agent-brand', filename));
     expect(bytes.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
@@ -50,6 +52,18 @@ describe('official Agent icons', () => {
   test('ToolBadge retains the existing props and default size', async () => {
     const view = await render(<ToolBadge tool="claude" client="Claude Desktop" />);
     expect(view.getByLabelText('Claude Desktop')).toHaveStyle({ width: 36, height: 36 });
+  });
+
+  test.each([
+    ['deepseek-harness', 'DeepSeek Harness', require('../../assets/agent-brand/deepseek-harness-app-official.png')],
+    ['hermes', 'Hermes Agent', require('../../assets/agent-brand/hermes-app-official.png')],
+  ])('%s uses its own official mark', async (tool, label, source) => {
+    const view = await render(<ToolBadge tool={tool} />);
+    const icon = view.getByLabelText(label);
+    expect(icon.props.source).toEqual(source);
+    expect(icon.props.resizeMode).toBe('contain');
+    expect(view.queryByTestId('agent-brand-neutral')).toBeNull();
+    expect(view.queryByTestId('agent-brand-claude')).toBeNull();
   });
 
   test('an unknown tool gets a neutral tool icon, not Claude branding', async () => {

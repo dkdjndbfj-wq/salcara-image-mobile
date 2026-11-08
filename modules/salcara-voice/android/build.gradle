@@ -24,6 +24,9 @@ if (!sherpaJar.exists()) {
     logger.lifecycle("Downloading sherpa-onnx ${sherpaVersion} AAR…")
     def partial = new File(sherpaDir, aar.name + '.part')
     def connection = url.openConnection()
+    // GitHub rejects the default Java URLConnection user agent with 406.
+    connection.setRequestProperty('User-Agent', 'SalcaraAndroidBuild/1.0')
+    connection.setRequestProperty('Accept', 'application/octet-stream')
     connection.connectTimeout = 30_000
     connection.readTimeout = 120_000
     connection.inputStream.withStream { input -> partial.withOutputStream { output -> output << input } }

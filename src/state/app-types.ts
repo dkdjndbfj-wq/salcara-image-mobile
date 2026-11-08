@@ -61,7 +61,7 @@ export interface AppContextValue {
   removeProvider: (providerId: string) => Promise<void>;
   /** Starts a blank draft, optionally talking to a custom agent. */
   newChat: (agentId?: string | null) => void;
-  openConversation: (conversationId: string) => Promise<void>;
+  openConversation: (conversationId: string, paged?: boolean) => Promise<void>;
   /** Restores a backup file the person picks (merged in); null when nothing was picked. */
   restoreBackup: (onProgress?: (progress: BackupProgress) => void) => Promise<RestoreResult | null>;
   /** Opens a conversation at one message (a search hit); the chat screen scrolls to it and marks it briefly. */
@@ -72,6 +72,8 @@ export interface AppContextValue {
   send: (input: SendInput) => Promise<void>;
   stop: () => void;
   retry: (message: ChatMessage) => Promise<void>;
+  /** Downloads one failed result again without another image-generation request. */
+  retryImage: (message: ChatMessage, imageId: string, failedUri?: string) => Promise<void>;
   /** Replaces a sent message with an edited one: it and everything after it are removed, then the new one is sent. */
   editAndResend: (messageId: string, input: SendInput) => Promise<void>;
   /** Deletes one message (a question also takes its answer with it). */

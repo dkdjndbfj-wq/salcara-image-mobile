@@ -2,11 +2,13 @@ import React, { memo, useEffect, useRef, useState } from 'react';
 import * as Clipboard from 'expo-clipboard';
 import { Animated, Easing, Image, Pressable, StyleSheet, Text, View, type AccessibilityActionEvent, type AccessibilityActionInfo, type GestureResponderEvent } from 'react-native';
 
-import type { ChatMessage } from '../domain';
+import type { ChatMessage, GeneratedImage } from '../domain';
 import { AgentActivity } from '../components/AgentTrace';
 import { Icon } from '../components/Icon';
 import { showToast } from '../components/ui';
-import { DrawingCanvas, ImageResult } from '../components/MessageBubble';
+import { DrawingCanvas } from '../components/MessageBubble';
+import { GeneratedImageGallery } from '../components/GeneratedImageGallery';
+import { messageGeneratedImages } from '../generated-images';
 import { MessageContent } from '../components/MessageContent';
 import { useReducedMotion } from '../components/MotionPressable';
 import type { RequestPhase } from '../state/AppContext';
@@ -21,7 +23,6 @@ type Props = {
   message: ChatMessage;
   character: Character;
   phase: RequestPhase;
-  elapsedSeconds: number;
   isLast: boolean;
   /** Arrived just now: gets a springy entrance instead of appearing in place. */
   fresh: boolean;
@@ -30,7 +31,11 @@ type Props = {
   reaction: string | undefined;
   onStop: () => void;
   onRetry: (message: ChatMessage) => void;
-  onPreview: (uri: string) => void;
+  onPreview: (uri: string, images?: readonly GeneratedImage[]) => void;
+  onSave?: (uri: string) => void;
+  onShare?: (uri: string) => void;
+  onEditImage?: (uri: string) => void;
+  onRetryImage?: (message: ChatMessage, imageId: string, failedUri?: string) => void;
   onLongPress: (message: ChatMessage, pageY: number) => void;
   onReact: (message: ChatMessage, emoji: string | null) => void;
   onPoke: () => void;
@@ -190,7 +195,6 @@ function UserRow(props: Props) {
     </View>}
     {message.prompt && !(message.references.length && /^请看看这张图片。$/.test(message.prompt)) ? <View>
       <Pressable {...handlers} style={({ pressed }) => [styles.userBubble, pressed && { transform: [{ scale: 0.98 }] }]}>
-        <View pointerEvents="none" style={styles.userSheen} />
         <Text selectable style={styles.userText}>{message.prompt}</Text>
       </Pressable>
       {reaction ? <ReactionBadge emoji={reaction} align="right" onPress={() => onReact(message, null)} /> : null}
@@ -229,10 +233,11 @@ function TalkingAvatar({ character, typing, onPoke }: { character: Character; ty
 
 function CharacterRow(props: Props) {
   const styles = useStyles();
-  const { message, character, phase, elapsedSeconds, isLast, reaction, onStop, onRetry, onPreview, onReact, onPoke, onOpenTrail } = props;
+  const { message, character, phase, isLast, reaction, onStop, onRetry, onPreview, onSave, onShare, onEditImage, onRetryImage, onReact, onPoke, onOpenTrail } = props;
   const pending = message.status === 'pending';
   const imageJob = Boolean(message.preparedPrompt) && (message.mode === 'generate' || message.mode === 'edit');
-  const drawing = imageJob && pending && !message.imageUri;
+  const hasImages = messageGeneratedImages(message).length > 0;
+  const drawing = imageJob && pending && !hasImages;
   const text = useLiveText(message.id, message.text)?.trim() ?? '';
   const { burst, clearBurst, handlers } = useBubbleGestures(props, text);
   const failed = message.status === 'error' || message.status === 'interrupted';
@@ -240,33 +245,52 @@ function CharacterRow(props: Props) {
   const trace = message.agent;
   const recalled = trace?.recalled ?? [];
   const running = trace?.steps.some((step) => step.status === 'running');
-  return <View style={styles.row}>
+  const hasMedia = drawing || hasImages;
+  const details = <>
+    {failed && !hasImages ? <View style={styles.error}>
+      <Icon name="alert" size={15} color={warm.accentDeep} />
+      <Text style={styles.errorText} numberOfLines={3}>{message.error || '没有发出去'}</Text>
+      <Pressable accessibilityRole="button" onPress={() => onRetry(message)} hitSlop={8}><Text style={styles.retry}>{imageJob ? '重新画' : '重试'}</Text></Pressable>
+    </View> : null}
+    {stopped ? <Pressable accessibilityRole="button" onPress={() => onRetry(message)} hitSlop={8}><Text style={styles.stopped}>已停止 · 重新回复</Text></Pressable> : null}
+    {recalled.length > 0 && !pending ? <Pressable accessibilityRole="button" accessibilityLabel={`这次想起了 ${recalled.length} 件事，查看记忆线路`} onPress={() => onOpenTrail(message)}
+      style={({ pressed }) => [styles.recall, pressed && { backgroundColor: warm.surfaceStrong }]}>
+      <Icon name="memory" size={13} color={warm.accentDeep} />
+      <Text style={styles.recallText}>想起了 {recalled.length} 件事</Text>
+      <Icon name="chevronRight" size={12} color={warm.muted} strokeWidth={2} />
+    </Pressable> : null}
+  </>;
+  return <View style={styles.answer}>
+    <View style={[styles.row, hasMedia && styles.mediaHeader]}>
     <TalkingAvatar character={character} typing={pending} onPoke={onPoke} />
     <View style={styles.column}>
       {trace?.steps.length ? <View style={styles.activity}><AgentActivity trace={trace} pending={pending} /></View> : null}
-      {pending && !text && !drawing && !running ? <View style={styles.bubble}><TypingDots color={character.color} /></View> : null}
+      {pending && !text && !drawing && !hasImages && !running ? <View style={styles.bubble}><TypingDots color={character.color} /></View> : null}
+      {hasMedia && !text && !trace?.steps.length ? <Text style={styles.mediaName}>{character.name}</Text> : null}
       {text ? <View>
-        <Pressable {...handlers} style={({ pressed }) => [styles.bubble, pressed && { transform: [{ scale: 0.985 }] }]}>
+        <Pressable {...handlers} style={({ pressed }) => [hasMedia ? styles.mediaCaption : styles.bubble, pressed && { transform: [{ scale: 0.985 }] }]}>
           <MessageContent text={text} streaming={pending && !drawing} sources={trace?.sources} />
         </Pressable>
         {reaction ? <ReactionBadge emoji={reaction} align="left" onPress={() => onReact(message, null)} /> : null}
         {burst ? <HeartBurst key={burst} onDone={clearBurst} /> : null}
       </View> : null}
-      {drawing ? <DrawingCanvas message={message} seconds={elapsedSeconds} onStop={onStop} downloading={phase === 'downloading'} /> : null}
-      {message.imageUri ? <ImageResult message={message} fresh={isLast} onPreview={onPreview} /> : null}
-      {failed ? <View style={styles.error}>
-        <Icon name="alert" size={15} color={warm.accentDeep} />
-        <Text style={styles.errorText} numberOfLines={3}>{message.error || '没有发出去'}</Text>
-        <Pressable accessibilityRole="button" onPress={() => onRetry(message)} hitSlop={8}><Text style={styles.retry}>{imageJob ? '重新画' : '重试'}</Text></Pressable>
-      </View> : null}
-      {stopped ? <Pressable accessibilityRole="button" onPress={() => onRetry(message)} hitSlop={8}><Text style={styles.stopped}>已停止 · 重新回复</Text></Pressable> : null}
-      {recalled.length > 0 && !pending ? <Pressable accessibilityRole="button" accessibilityLabel={`这次想起了 ${recalled.length} 件事，查看记忆线路`} onPress={() => onOpenTrail(message)}
-        style={({ pressed }) => [styles.recall, pressed && { backgroundColor: warm.surfaceStrong }]}>
-        <Icon name="memory" size={13} color={warm.accentDeep} />
-        <Text style={styles.recallText}>想起了 {recalled.length} 件事</Text>
-        <Icon name="chevronRight" size={12} color={warm.muted} strokeWidth={2} />
-      </Pressable> : null}
+      {!hasMedia ? details : null}
     </View>
+    </View>
+    {hasMedia ? <View testID="companion-image-result" style={styles.mediaResult}>
+      {drawing ? <DrawingCanvas message={message} onStop={onStop} downloading={phase === 'downloading'} /> : null}
+      {hasImages ? <GeneratedImageGallery message={message} fresh={isLast} onPreview={onPreview} onEdit={onEditImage} onShare={onShare}
+        onStop={onStop} downloading={phase === 'downloading'} onRetryImage={onRetryImage ? (imageId, failedUri) => onRetryImage(message, imageId, failedUri) : undefined}
+        renderActions={(uri) => <View style={styles.imageActions}>
+          {uri && onSave ? <Pressable accessibilityRole="button" accessibilityLabel="保存到相册" style={styles.imageAction} onPress={() => onSave(uri)}>
+            <Icon name="download" size={18} color={warm.muted} />
+          </Pressable> : null}
+          {!pending && !stopped ? <Pressable accessibilityRole="button" accessibilityLabel="重新生成" style={styles.imageAction} onPress={() => onRetry(message)}>
+            <Icon name="regenerate" size={18} color={warm.muted} />
+          </Pressable> : null}
+        </View>} /> : null}
+      {details}
+    </View> : null}
   </View>;
 }
 
@@ -302,10 +326,14 @@ const useStyles = themed((c, d) => StyleSheet.create({
     maxWidth: '100%', overflow: 'hidden', backgroundColor: warm.userBubble, paddingHorizontal: 15, paddingVertical: 10, borderRadius: 21, borderBottomRightRadius: 7,
     shadowColor: warm.userBubble, shadowOpacity: 0.28, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 3,
   },
-  userSheen: { position: 'absolute', left: 0, right: 0, top: 0, height: '55%', backgroundColor: 'rgba(255,255,255,0.12)' },
   userText: { color: '#FFFFFF', fontSize: 16, lineHeight: 23 },
+  answer: { width: '100%', gap: 8 },
   row: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, paddingRight: 40 },
   column: { flex: 1, alignItems: 'flex-start', gap: 8 },
+  mediaHeader: { paddingRight: 0 },
+  mediaCaption: { maxWidth: '100%', paddingVertical: 5 },
+  mediaName: { color: warm.textSecondary, fontSize: 14, lineHeight: 24, paddingTop: 5 },
+  mediaResult: { width: '100%', minWidth: 0, gap: 8 },
   activity: { alignSelf: 'stretch', paddingTop: 4 },
   bubble: {
     maxWidth: '100%', backgroundColor: warm.card, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 21, borderTopLeftRadius: 7,
@@ -322,6 +350,8 @@ const useStyles = themed((c, d) => StyleSheet.create({
   pokeText: { color: warm.muted, fontSize: 12.5 },
   error: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, backgroundColor: warm.accentSoft, flexWrap: 'wrap' },
   errorText: { flexShrink: 1, color: warm.textSecondary, fontSize: 13 },
+  imageAction: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  imageActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   retry: { color: warm.accentDeep, fontSize: 13.5, fontWeight: '600' },
   stopped: { color: warm.muted, fontSize: 13 },
   recall: { flexDirection: 'row', alignItems: 'center', gap: 5, height: 26, paddingHorizontal: 10, borderRadius: 13, backgroundColor: warm.surface, marginTop: 4 },

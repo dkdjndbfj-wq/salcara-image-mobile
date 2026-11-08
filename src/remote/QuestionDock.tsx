@@ -3,16 +3,19 @@ import { Animated, Easing, StyleSheet, View, type LayoutChangeEvent } from 'reac
 import { useReducedMotion } from '../components/ui';
 import { colors, shadow, themed } from '../theme';
 import type { QuestionAnswers, RemoteQuestion } from './client';
-import { QuestionCard } from './QuestionCard';
+import { QuestionCard, type QuestionDraft } from './QuestionCard';
 import { captureDissolveTexture, ComposerDissolve, COMPOSER_DISSOLVE_MS, type SurfaceTexture } from './ComposerDissolve';
 
 interface QuestionRequest { id: string; title: string; questions?: RemoteQuestion[]; expiresAt?: number }
 
 /** Separate floating input surface; the conversation list never contains the form. */
-export function QuestionDock({ question, busy, blocked, availableHeight, initialAnswers, onAnswer, onCancel, children }: {
+export function QuestionDock({ question, busy, blocked, canCancel, cancelBlocked, cancelLabel, queueControl, availableHeight, initialAnswers, initialDraft, draftIdentity, onDraftChange, onAnswer, onCancel, children }: {
   question: QuestionRequest | null; busy: boolean; blocked?: string; availableHeight?: number; children: ReactNode;
   onAnswer: (answers: QuestionAnswers) => void; onCancel: () => void;
   initialAnswers?: QuestionAnswers;
+  initialDraft?: QuestionDraft; draftIdentity?:string; onDraftChange?: (id: string, draft: QuestionDraft) => void;
+  canCancel?: boolean; cancelBlocked?: boolean; cancelLabel?: '取消回答' | '取消本轮';
+  queueControl?: ReactNode;
 }) {
   const styles = useStyles();
   const reduced = useReducedMotion();
@@ -118,9 +121,10 @@ export function QuestionDock({ question, busy, blocked, availableHeight, initial
     {request ? <Animated.View onLayout={onPopupLayout} testID="remote-question-dialog" role="dialog" accessibilityLabel="回答 Agent 的问题" accessibilityViewIsModal pointerEvents={question ? 'auto' : 'none'}
       style={[styles.popup, { opacity: Animated.multiply(popup, popupTexture ? popupGrain.interpolate({ inputRange: [0, 0.075, 1], outputRange: [0, 1, 1], extrapolate: 'clamp' }) : popupGrain), transform: [{ translateY: popup.interpolate({ inputRange: [0, 1], outputRange: [14, 0] }) }] }]}>
       <View ref={popupContent} collapsable={false} style={[styles.popupBody, { opacity: popupTexture && popupDissolving ? 0 : 1 }]}>
-      <QuestionCard key={request.id} id={request.id} title={request.title} questions={request.questions ?? []} expiresAt={request.expiresAt}
-        initialAnswers={initialAnswers}
-        busy={busy || question?.id !== request.id} blocked={blocked} maxBodyHeight={availableHeight ? Math.max(48, availableHeight * 0.6 - 112) : undefined} onAnswer={onAnswer} onCancel={onCancel} />
+      {queueControl}
+      <QuestionCard key={draftIdentity??request.id} id={request.id} title={request.title} questions={request.questions ?? []} expiresAt={request.expiresAt}
+        initialAnswers={initialAnswers} initialDraft={initialDraft} onDraftChange={(draft) => onDraftChange?.(request.id, draft)}
+        busy={busy || question?.id !== request.id} blocked={blocked} canCancel={canCancel} cancelBlocked={cancelBlocked} cancelLabel={cancelLabel} maxBodyHeight={availableHeight ? Math.max(48, availableHeight * 0.6 - 112) : undefined} onAnswer={onAnswer} onCancel={onCancel} />
       </View>
       {popupDissolving ? <ComposerDissolve progress={popupGrain} texture={popupTexture} testId="remote-question" /> : null}
     </Animated.View> : null}

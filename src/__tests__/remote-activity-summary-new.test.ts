@@ -1,4 +1,4 @@
-import { buildBlocks, conversationBlocks, subagentStatus, type Block } from '../remote/blocks';
+import { buildBlocks, conversationBlocks, subagentStatus, visibleReasoningId, visibleWorkItems, type Block } from '../remote/blocks';
 import type { TimelineItem } from '../remote/store';
 
 type Subtask = Extract<Block, { type: 'subagent' }>;
@@ -26,6 +26,90 @@ test('tools, plans and multiple subagents fold into one activity between the rea
   expect(activity.files).toEqual([expect.objectContaining({ path: 'main.ts', add: 1, del: 1 })]);
   expect(activity.live).toBe(true);
   expect(folded.filter((block) => block.type === 'assistant')).toEqual([expect.objectContaining({ item: expect.objectContaining({ text: '主回复' }) })]);
+});
+
+test('live plans, task lists and subagent tools each expose the current action in the collapsed summary', () => {
+  const plan = { type: 'plan' as const, id: 'plan', item: { kind: 'tool' as const, id: 'plan', tool: 'plan' as const,
+    title: '计划', output: '✓ 检查\n▸ 修改手机界面\n○ 运行测试', status: 'running' as const, ts: 1 }, steps: [
+      { text: '检查', status: 'done' as const }, { text: '修改手机界面', status: 'active' as const }, { text: '运行测试', status: 'pending' as const },
+    ] };
+  expect(conversationBlocks([plan])[0]).toMatchObject({ type: 'activity', live: true, current: '正在执行计划 · 修改手机界面', currentItemId: 'plan' });
+
+  const tasks = { ...plan, item: { ...plan.item, planKind: 'tasks' as const, title: '任务列表' } };
+  expect(conversationBlocks([tasks])[0]).toMatchObject({ type: 'activity', live: false, current: undefined });
+
+  const spawn = task('spawn', ['codex:a']);
+  spawn.children = [{ kind: 'tool', id: 'child-command', tool: 'command', title: '运行 npm test', parentId: 'spawn', status: 'running', ts: 2 }];
+  expect(conversationBlocks([spawn], 'codex')[0]).toMatchObject({ type: 'activity', live: true, current: '正在运行 · npm test', currentItemId: 'child-command' });
+});
+
+test('one command and thinking-only activity have no outer disclosure; multiple commands do', () => {
+  const one = { kind: 'tool', id: 'one', tool: 'command', title: '运行 npm test', detail: 'npm test', status: 'done', ts: 1 } as const;
+  const [single] = conversationBlocks(buildBlocks([one], false), 'codex');
+  expect(single).toMatchObject({ type: 'activity', collapsible: false });
+
+  const [multiple] = conversationBlocks(buildBlocks([one, { ...one, id: 'two', title: '运行 npm build', ts: 2 }], false), 'codex');
+  expect(multiple).toMatchObject({ type: 'activity', collapsible: true, summary: '运行了 2 条命令' });
+
+  const [thinking] = conversationBlocks(buildBlocks([{ kind: 'reasoning', id: 'r', text: 'Checking the failing assertion', final: false, ts: 3 }], true), 'claude');
+  expect(thinking).toMatchObject({ type: 'activity', collapsible: false, live: true, current: '正在思考 · Checking the failing assertion' });
+});
+
+test.each(['codex', 'claude'] as const)('%s keeps only the newest live thought and replaces it with a later command', tool => {
+  const thoughts: TimelineItem[] = [
+    { kind: 'reasoning', id: `${tool}:thought-1`, text: '先检查失败位置', final: false, ts: 1 },
+    { kind: 'reasoning', id: `${tool}:thought-2`, text: '现在定位到第二处', final: false, ts: 2 },
+  ];
+  const [thinking] = conversationBlocks(buildBlocks(thoughts, true), tool);
+  expect(thinking).toMatchObject({ type: 'activity', live: true, current: '正在思考 · 现在定位到第二处' });
+  if (thinking.type !== 'activity' || thinking.parts[0].type !== 'work') throw new Error('missing thought activity');
+  expect(visibleWorkItems(thinking.parts[0].items, true).map(item => item.id)).toEqual([`${tool}:thought-2`]);
+  expect(visibleWorkItems(thinking.parts[0].items, true, '失败位置').map(item => item.id)).toEqual([`${tool}:thought-1`]);
+
+  const withCommand: TimelineItem[] = [...thoughts, { kind: 'tool', id: `${tool}:test`, tool: 'command', title: '运行 pnpm test', detail: 'pnpm test', status: 'running', ts: 3 }];
+  const [running] = conversationBlocks(buildBlocks(withCommand, true), tool);
+  expect(running).toMatchObject({ type: 'activity', live: true, current: '正在运行 · pnpm test' });
+  if (running.type !== 'activity' || running.parts[0].type !== 'work') throw new Error('missing command activity');
+  expect(visibleWorkItems(running.parts[0].items, running.parts[0].live).map(item => item.id)).toEqual([`${tool}:test`]);
+});
+
+test('a completed reasoning-only group retains only its latest final summary', () => {
+  const source: TimelineItem[] = [
+    { kind: 'reasoning', id: 'old', text: '旧的思考更新', final: true, ts: 1 },
+    { kind: 'reasoning', id: 'latest', text: '最终过程摘要', final: true, ts: 2 },
+  ];
+  const [activity] = conversationBlocks(buildBlocks(source, false), 'claude');
+  if (activity.type !== 'activity' || activity.parts[0].type !== 'work') throw new Error('missing completed thought activity');
+  expect(visibleWorkItems(activity.parts[0].items, false).map(item => item.id)).toEqual(['latest']);
+});
+
+test('a final child reply supersedes an earlier reasoning preview', () => {
+  const child: TimelineItem[] = [
+    { kind: 'reasoning', id: 'child-thought', text: '检查子任务的测试', final: true, parentId: 'task', ts: 1 },
+    { kind: 'message', id: 'child-reply', role: 'assistant', text: '子任务完成', final: true, parentId: 'task', ts: 2 },
+  ];
+  expect(visibleReasoningId(child, false)).toBeUndefined();
+});
+
+test('the newest still-running command stays current when a later parallel command has finished', () => {
+  const source: TimelineItem[] = [
+    { kind: 'tool', id: 'still-running', tool: 'command', title: '运行 pnpm test', status: 'running', ts: 1 },
+    { kind: 'tool', id: 'finished-later', tool: 'command', title: '运行 pnpm lint', status: 'done', ts: 2 },
+  ];
+  expect(conversationBlocks(buildBlocks(source, true), 'codex')[0]).toMatchObject({
+    type: 'activity', live: true, current: '正在运行 · pnpm test', currentItemId: 'still-running',
+  });
+});
+
+test('completion is tied to the final reply across an intervening plan, not just the next row', () => {
+  const source: TimelineItem[] = [
+    { kind: 'tool', id: 'command', tool: 'command', title: '运行 pnpm test', status: 'done', ts: 1 },
+    { kind: 'tool', id: 'proposal', tool: 'plan', planKind: 'proposal', title: '建议', output: '下一步计划', status: 'done', ts: 2 },
+    { kind: 'message', id: 'reply', role: 'assistant', text: '已完成。', final: true, ts: 3 },
+  ];
+  const blocks = conversationBlocks(buildBlocks(source, false), 'codex');
+  expect(blocks.map(block => block.type)).toEqual(['activity', 'plan', 'assistant']);
+  expect(blocks[0]).toMatchObject({ finalized: true });
 });
 
 test('subagent counts use unique real handles across spawn/wait and support one call with many children', () => {
@@ -69,6 +153,17 @@ test('Claude uses the actual Task terminal state even with empty output or stale
   expect(subagentStatus(parent, 'claude')).toBe('done');
   parent.item.status = 'running'; expect(subagentStatus(parent, 'claude')).toBe('running');
   parent.item.status = 'failed'; expect(subagentStatus(parent, 'claude')).toBe('failed');
+});
+
+test('Codex and Claude interruption states remain distinct from failure and completion', () => {
+  for (const tool of ['codex', 'claude'] as const) {
+    const interrupted = task(`${tool}-interrupt`, [`${tool}:child`]);
+    interrupted.item.status = 'interrupted';
+    expect(subagentStatus(interrupted, tool)).toBe('interrupted');
+  }
+  const spawn = task('spawn', ['codex:a']);
+  spawn.children = [{ kind: 'tool', id: 'state', tool: 'subagent', title: '子任务', parentId: 'spawn', childSessionKeys: ['codex:a'], status: 'interrupted', output: '被中断', ts: 2 }];
+  expect(subagentStatus(spawn, 'codex')).toBe('interrupted');
 });
 
 test('orphan progress remains uncertain rather than fabricating a completed child', () => {

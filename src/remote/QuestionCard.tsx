@@ -16,22 +16,29 @@ function restoredAnswers(questions: RemoteQuestion[], saved?: QuestionAnswers) {
   }
   return { answers, custom, present };
 }
-export function QuestionCard({ id, title, questions, expiresAt, busy, blocked, maxBodyHeight, initialAnswers, onAnswer, onCancel }: {
+export interface QuestionDraft {
+  answers: QuestionAnswers; custom: Record<string, string>; customPresent: Record<string, boolean>;
+  page: number; customOpen: Record<string, boolean>;
+}
+
+export function QuestionCard({ id, title, questions, expiresAt, busy, blocked, canCancel = true, cancelBlocked, cancelLabel = '取消回答', maxBodyHeight, initialAnswers, initialDraft, onDraftChange, onAnswer, onCancel }: {
   id: string; title: string; questions: RemoteQuestion[]; expiresAt?: number; busy: boolean; blocked?: string; maxBodyHeight?: number; initialAnswers?: QuestionAnswers;
+  initialDraft?: QuestionDraft; onDraftChange?: (draft: QuestionDraft) => void;
+  canCancel?: boolean; cancelBlocked?: boolean; cancelLabel?: '取消回答' | '取消本轮';
   onAnswer: (answers: QuestionAnswers) => void; onCancel: () => void;
 }) {
   const dk = useDesk();
   const styles = useStyles();
-  const [answers, setAnswers] = useState<QuestionAnswers>(() => restoredAnswers(questions, initialAnswers).answers);
-  const [custom, setCustom] = useState<Record<string, string>>(() => restoredAnswers(questions, initialAnswers).custom);
-  const [customPresent, setCustomPresent] = useState<Record<string, boolean>>(() => restoredAnswers(questions, initialAnswers).present);
-  const [page, setPage] = useState(0);
-  const [customOpen, setCustomOpen] = useState<Record<string, boolean>>({});
+  const [answers, setAnswers] = useState<QuestionAnswers>(() => initialDraft?.answers ?? restoredAnswers(questions, initialAnswers).answers);
+  const [custom, setCustom] = useState<Record<string, string>>(() => initialDraft?.custom ?? restoredAnswers(questions, initialAnswers).custom);
+  const [customPresent, setCustomPresent] = useState<Record<string, boolean>>(() => initialDraft?.customPresent ?? restoredAnswers(questions, initialAnswers).present);
+  const [page, setPage] = useState(initialDraft?.page ?? 0);
+  const [customOpen, setCustomOpen] = useState<Record<string, boolean>>(initialDraft?.customOpen ?? {});
   const { height } = useWindowDimensions();
   const [expired, setExpired] = useState(Boolean(expiresAt && expiresAt <= Date.now()));
   const [error, setError] = useState('');
   const restoredId = useRef(id);
-  const edited = useRef(false);
+  const edited = useRef(Boolean(initialDraft));
   useEffect(() => {
     const changed = restoredId.current !== id;
     if (!changed && edited.current) return;
@@ -64,6 +71,10 @@ export function QuestionCard({ id, title, questions, expiresAt, busy, blocked, m
     }
     return response;
   };
+  // Preserve the unfinished form, including whitespace and its current page.
+  // The owning conversation stores it and clears it when the request resolves.
+  const draftSink = useRef(onDraftChange); draftSink.current = onDraftChange;
+  useEffect(() => { draftSink.current?.({ answers, custom, customPresent, page, customOpen }); }, [answers, custom, customPresent, page, customOpen]);
   const activePage = Math.min(page, Math.max(0, questions.length - 1));
   const question = questions[activePage];
   const last = activePage === questions.length - 1;
@@ -91,8 +102,8 @@ export function QuestionCard({ id, title, questions, expiresAt, busy, blocked, m
         {questions.map((item, index) => <View key={item.id} style={[styles.step, index <= activePage && styles.stepOn]} />)}
       </View> : null}
       <View style={{ flex: 1 }} />
-      <Pressable accessibilityRole="button" accessibilityLabel="取消回答" hitSlop={10} disabled={busy || expired || Boolean(blocked)} onPress={onCancel} style={styles.close}>
-        <Icon name="close" size={14} color={dk.faint} />
+      <Pressable accessibilityRole="button" accessibilityLabel={cancelLabel} hitSlop={10} disabled={!canCancel || busy || expired || (cancelBlocked ?? Boolean(blocked))} onPress={onCancel} style={styles.close}>
+        {cancelLabel === '取消本轮' ? <Text style={styles.hint}>{cancelLabel}</Text> : <Icon name="close" size={14} color={dk.faint} />}
       </Pressable>
     </View>
     <ScrollView key={question?.id} testID="remote-question-body" style={{ maxHeight: Math.max(48, Math.min(Math.max(96, Math.min(220, height * 0.32)), maxBodyHeight ?? 220)) }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
@@ -150,9 +161,9 @@ const useStyles = themed((c, d) => StyleSheet.create({
   close: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: d.surface3 },
   question: { gap: 8 }, prompt: { fontSize: 15.5, lineHeight: 22, fontWeight: '600', color: d.text }, hint: { fontSize: 11.5, color: d.faint, marginTop: -4 },
   options: { gap: 6 },
-  option: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 10, minHeight: 44, borderRadius: 12, backgroundColor: d.surface2, borderWidth: 1, borderColor: 'transparent' },
+  option: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 10, minHeight: 46, borderRadius: 13, backgroundColor: d.surface, borderWidth: 1, borderColor: d.line },
   optionPressed: { backgroundColor: d.surface3 },
-  selected: { backgroundColor: d.surface, borderColor: d.ink },
+  selected: { backgroundColor: d.surface, borderColor: d.ink, borderWidth: 1.5 },
   optionBody: { flex: 1, minWidth: 0, gap: 2 },
   radio: { width: 18, height: 18, borderRadius: 9, borderWidth: 1.5, borderColor: d.faint, alignItems: 'center', justifyContent: 'center', backgroundColor: d.surface },
   box: { width: 18, height: 18, borderRadius: 5, borderWidth: 1.5, borderColor: d.faint, alignItems: 'center', justifyContent: 'center', backgroundColor: d.surface },
@@ -164,6 +175,6 @@ const useStyles = themed((c, d) => StyleSheet.create({
   errorRow: { flexDirection: 'row', alignItems: 'center', gap: 6 }, error: { color: d.bad, fontSize: 12, flex: 1 },
   actions: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 2 },
   back: { flexDirection: 'row', alignItems: 'center', gap: 2, height: 38, paddingHorizontal: 6 }, backText: { fontSize: 13, color: d.text2, fontWeight: '500' },
-  submit: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 38, paddingHorizontal: 18, borderRadius: 19, backgroundColor: d.ink },
+  submit: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 42, paddingHorizontal: 18, borderRadius: 13, backgroundColor: d.ink },
   submitOff: { backgroundColor: d.lineStrong }, submitText: { fontSize: 14, fontWeight: '600', color: d.onInk },
 }));

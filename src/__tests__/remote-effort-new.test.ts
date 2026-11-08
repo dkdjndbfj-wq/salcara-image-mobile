@@ -77,6 +77,18 @@ test('old Minimal preferences restore as Minimal while unsupported legacy streng
   expect(await loadThreadPrefs('invalid')).toEqual({ model: 'gpt-fixture' });
 });
 
+test.each(['claude-opus-4-6', 'grok-4', 'deepseek-chat', 'provider/deepseek-chat'])('aggregate model %s survives actual preference storage and Codex start/send serialization unchanged', async model => {
+  await pair();
+  await saveThreadPrefs(prefsKey(), { model, apiIdentity: 'computer:api_fixture' });
+  const restored = await loadThreadPrefs(prefsKey());
+  expect(restored.model).toBe(model);
+  await startSession('pc', { tool: 'codex', cwd: 'C:\\fixture', prompt: 'new aggregate task', approval: 'ask', ...restored });
+  await sendToSession('pc', sessionKey, 'continue aggregate task', restored);
+  expect(commands.map(item => item.command.model)).toEqual([model, model]);
+  for (const item of commands) expect(item.command).not.toHaveProperty('effort');
+  expect(commands[1].command.sessionKey).toBe(sessionKey);
+});
+
 test('clearing an override persists Default and omits effort from both real commands', async () => {
   await pair();
   await saveThreadPrefs(prefsKey(), { model: 'gpt-fixture', effort: 'xhigh' });
@@ -101,7 +113,7 @@ test.each(['minimal', 'xhigh'] as const)('a restored %s receipt keeps its reques
   desktopLive = true; await loadAgentProfiles('pc');
   expect(desktopLiveFor(getRemoteState().agents.pc.list[0], sessionKey)).toBe(true);
   // The hidden composer supplies no new effort; the durable receipt still owns the retry.
-  await sendToSession('pc', sessionKey, 'same task', { model: 'gpt-new' });
+  await sendToSession('pc', sessionKey, 'same task', { retryRequestId: original.requestId, model: 'gpt-new' });
   expect(commands).toHaveLength(2); expect(commands[1]).toEqual(commands[0]);
   expect(commands[1]).toMatchObject({ requestId: original.requestId, command: { model: 'gpt-frozen', effort } });
   expect(await pendingDelivery(remoteDeliveryScope(), 'pc', sessionKey)).toBeUndefined();
@@ -110,8 +122,9 @@ test.each(['minimal', 'xhigh'] as const)('a restored %s receipt keeps its reques
 test('a frozen Default receipt does not pick up a later XHigh selection on retry', async () => {
   await pair(); loseAcknowledgement = true;
   await expect(sendToSession('pc', sessionKey, 'same task')).rejects.toMatchObject({ retryable: true });
+  const original = await pendingDelivery(remoteDeliveryScope(), 'pc', sessionKey);
   resetDeliveryForTests();
-  await sendToSession('pc', sessionKey, 'same task', { effort: 'xhigh' });
+  await sendToSession('pc', sessionKey, 'same task', { retryRequestId: original!.requestId, effort: 'xhigh' });
   expect(commands).toHaveLength(2); expect(commands[1]).toEqual(commands[0]);
   expect(commands[1].command).not.toHaveProperty('effort');
 });

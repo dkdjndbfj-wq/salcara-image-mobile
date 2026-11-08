@@ -11,6 +11,7 @@ import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 import { brandGradient, colors, motion, radius, shadow, useDesk, desk, themed } from '../theme';
 import { Icon, type IconName } from './Icon';
 import { MotionPressable, useReducedMotion } from './MotionPressable';
+import { roundedSystemFontFamily } from '../typography';
 
 export { Appear, MotionPressable, useReducedMotion } from './MotionPressable';
 export type { IconName } from './Icon';
@@ -111,19 +112,25 @@ function useOverlay(visible: boolean) {
   return { mounted, progress };
 }
 
-/** Bottom sheet (drag to dismiss) or a pushed full page. */
-export function Sheet({ visible, title, subtitle, onClose, children, scroll = true, footer, presentation = 'sheet', headerRight, background, surfaceRef, dismissible = true }: {
+/** Compact floating dialog (outside tap / drag to dismiss) or a pushed full page. */
+export function Sheet({ visible, title, subtitle, onClose, onSystemBack, children, scroll = true, footer, presentation = 'sheet', headerRight, headerLeft, background, surfaceRef, dismissible = true, hideHeader = false }: {
   visible: boolean; title?: string; subtitle?: string; onClose: () => void; children: ReactNode; scroll?: boolean;
-  footer?: ReactNode; presentation?: 'sheet' | 'page'; headerRight?: ReactNode; background?: string;
-  surfaceRef?: RefObject<View | null>; dismissible?: boolean;
+  footer?: ReactNode; presentation?: 'sheet' | 'page'; headerRight?: ReactNode; headerLeft?: ReactNode; background?: string;
+  surfaceRef?: RefObject<View | null>; dismissible?: boolean; hideHeader?: boolean;
+  onSystemBack?: () => void;
 }) {
   const styles = useStyles();
   const insets = useSafeAreaInsets();
   const { mounted, progress } = useOverlay(visible);
   const drag = useRef(new Animated.Value(0)).current;
   const page = presentation === 'page';
+  const [keyboardCovered, setKeyboardCovered] = useState(false);
   const dismissibleRef = useRef(dismissible); dismissibleRef.current = dismissible;
-  const close = () => { if (dismissibleRef.current) { dismissKeyboardAndBlur(); onClose(); } };
+  const close = () => { if (dismissibleRef.current) {
+    // A nested tool page may consume close while keeping this sheet mounted.
+    Animated.spring(drag, { toValue: 0, useNativeDriver: true }).start();
+    dismissKeyboardAndBlur(); onClose();
+  } };
   const closeRef = useRef(close); closeRef.current = close;
   useEffect(() => { if (visible) drag.setValue(0); }, [visible, drag]);
   const pan = useRef(PanResponder.create({
@@ -145,31 +152,33 @@ export function Sheet({ visible, title, subtitle, onClose, children, scroll = tr
   })).current;
   const transform = page
     ? [{ translateX: Animated.add(drag, progress.interpolate({ inputRange: [0, 1], outputRange: [60, 0] })) }]
-    : [{ translateY: Animated.add(drag, progress.interpolate({ inputRange: [0, 1], outputRange: [480, 0] })) }];
+    : [{ translateY: Animated.add(drag, progress.interpolate({ inputRange: [0, 1], outputRange: [12, 0] })) },
+      { scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }];
   const bg = background ?? colors.card;
-  return <Modal visible={mounted} transparent animationType="none" statusBarTranslucent onRequestClose={close}>
-    <View style={styles.overlay} accessibilityViewIsModal>
+  return <Modal visible={mounted} transparent animationType="none" statusBarTranslucent onRequestClose={() => {
+    if (visible && dismissibleRef.current) (onSystemBack ?? close)();
+  }}>
+    <View style={styles.overlay} accessibilityViewIsModal onAccessibilityEscape={close}>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, page ? { backgroundColor: 'rgba(11,18,32,0.12)' } : styles.scrim, { opacity: progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolate: 'clamp' }) }]} />
-      {!page && <Pressable style={StyleSheet.absoluteFill} accessible={false} importantForAccessibility="no" onPress={close} />}
-      <KeyboardSafeView pointerEvents="box-none" style={styles.placement}>
+      {!page && <Pressable testID="sheet-backdrop" style={StyleSheet.absoluteFill} accessible={false} importantForAccessibility="no" onPress={close} />}
+      <KeyboardSafeView pointerEvents="box-none" onOcclusionChange={setKeyboardCovered} style={[styles.placement, !page && styles.placementFloat, !page && { paddingTop: Math.max(insets.top, 16) + 8, paddingBottom: Math.max(insets.bottom, 16) + 8 }]}>
         <Animated.View ref={surfaceRef} collapsable={surfaceRef ? false : undefined} {...(page ? pagePan.panHandlers : {})} style={[styles.sheet, page && styles.page, {
-          backgroundColor: bg, paddingTop: page ? insets.top : 0, marginTop: page ? 0 : Math.max(insets.top, 24),
-          paddingBottom: footer ? 0 : Math.max(insets.bottom, 12), opacity: page ? progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolate: 'clamp' }) : 1,
+          backgroundColor: bg, paddingTop: page ? insets.top : 0,
+          paddingBottom: footer ? 0 : page ? (!keyboardCovered ? Math.max(insets.bottom, 12) : 12) : 4, opacity: progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolate: 'clamp' }),
           transform,
         }]}>
-          {!page && <View {...pan.panHandlers} style={styles.handleZone}><View style={styles.handle} /></View>}
-          {(title !== undefined || page) && <View style={[styles.header, page && styles.pageHeader]} {...(!page ? pan.panHandlers : {})}>
-            {page ? <IconButton icon="chevronLeft" label="返回" onPress={close} /> : <View style={{ width: 32 }} />}
-            <View style={styles.headerCenter}>
-              {title ? <Text style={styles.title} numberOfLines={1}>{title}</Text> : null}
+          {!hideHeader && (title !== undefined || page) && <View style={[styles.header, page && styles.pageHeader]} {...(!page ? pan.panHandlers : {})}>
+            {page ? headerLeft ?? <IconButton icon="chevronLeft" label="返回" onPress={close} /> : headerLeft}
+            <View style={[styles.headerCenter, !page && styles.dialogHeaderText]}>
+              {title ? <Text accessibilityRole="header" style={[styles.title, !page && styles.floatingTitle]} numberOfLines={page ? 1 : 2}>{title}</Text> : null}
               {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
             </View>
-            {headerRight ?? (page ? <View style={{ width: 40 }} /> : <IconButton icon="close" label="关闭" variant="soft" size={32} iconSize={16} color={colors.textMuted} onPress={close} />)}
+            {headerRight ?? (page ? <View style={{ width: 40 }} /> : null)}
           </View>}
           {scroll
-            ? <ScrollView style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>{children}</ScrollView>
-            : <View style={[styles.body, page && { flex: 1 }]}>{children}</View>}
-          {footer && <View style={[styles.footer, { backgroundColor: bg, paddingBottom: Math.max(insets.bottom, 14) }]}>{footer}</View>}
+            ? <ScrollView style={styles.scroll} contentContainerStyle={page ? styles.content : styles.floatingContent} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>{children}</ScrollView>
+            : <View style={[styles.body, page ? { flex: 1 } : { paddingBottom: 0 }]}>{children}</View>}
+          {footer && <View style={[styles.footer, { backgroundColor: bg, paddingBottom: page && !keyboardCovered ? Math.max(insets.bottom, 14) : 14 }]}>{footer}</View>}
         </Animated.View>
       </KeyboardSafeView>
       <ToastHost />
@@ -181,6 +190,7 @@ export function AppDialog({ visible, title, message, icon, actions, children, di
   visible: boolean; title: string; message?: string; icon?: IconName | string; actions?: DialogAction[]; children?: ReactNode; dismissible?: boolean; onClose: () => void;
 }) {
   const styles = useStyles();
+  const d = useDesk();
   const { mounted, progress } = useOverlay(visible);
   const resolved = actions?.length ? actions : [{ label: '好的', tone: 'primary' as const, onPress: onClose }];
   const close = () => { if (dismissible) { dismissKeyboardAndBlur(); onClose(); } };
@@ -189,12 +199,12 @@ export function AppDialog({ visible, title, message, icon, actions, children, di
   return <Modal visible={mounted} transparent animationType="none" statusBarTranslucent onRequestClose={close}>
     <KeyboardSafeView style={styles.dialogBackdrop}>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.scrim, { opacity: progress }]} />
-      {dismissible && <Pressable accessible={false} importantForAccessibility="no" style={StyleSheet.absoluteFill} onPress={close} />}
-      <Animated.View accessibilityViewIsModal style={[styles.dialog, { opacity: progress, transform: [{ scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] }) }] }]}>
+      {dismissible && <Pressable testID="dialog-backdrop" accessible={false} importantForAccessibility="no" style={StyleSheet.absoluteFill} onPress={close} />}
+      <Animated.View accessibilityViewIsModal onAccessibilityEscape={close} style={[styles.dialog, { opacity: progress, transform: [{ scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.97, 1] }) }] }]}>
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.dialogContent}>
           <View style={styles.dialogHead}>
-            {glyph && <View style={[styles.dialogIcon, danger && styles.dialogIconDanger]}><Icon name={glyph} size={18} color={danger ? colors.danger : colors.primary} /></View>}
-            <Text style={styles.dialogTitle}>{title}</Text>
+            {glyph && <View style={[styles.dialogIcon, danger && styles.dialogIconDanger]}><Icon name={glyph} size={16} color={danger ? colors.danger : d.muted} /></View>}
+            <Text accessibilityRole="header" style={styles.dialogTitle}>{title}</Text>
           </View>
           {message ? <Text selectable style={styles.dialogMessage}>{message}</Text> : null}
           {children}
@@ -202,11 +212,12 @@ export function AppDialog({ visible, title, message, icon, actions, children, di
         <View style={[styles.dialogActions, resolved.length > 2 && styles.dialogActionsStacked]}>{resolved.map((action, index) => {
           const quiet = resolved.length > 2 && /^(关闭|取消)$/.test(action.label);
           const tone = quiet ? 'secondary' : action.tone ?? (index === resolved.length - 1 ? 'primary' : 'secondary');
-          return <Pressable key={`${action.label}-${index}`} accessibilityRole="button" disabled={action.disabled}
+          return <MotionPressable key={`${action.label}-${index}`} scaleTo={0.98} accessibilityRole="button" accessibilityState={{disabled:action.disabled}} disabled={action.disabled}
+            hitSlop={4} wrapperStyle={resolved.length > 2 ? {alignSelf:'stretch'} : {flexShrink:1}}
             onPress={() => { dismissKeyboardAndBlur(); action.onPress?.(); }}
-            style={({ pressed }) => [styles.dialogAction, resolved.length <= 2 && { flex: 1 }, tone === 'primary' && styles.dialogPrimary, tone === 'danger' && styles.dialogDanger, quiet && styles.dialogQuiet, pressed && { opacity: 0.8 }, action.disabled && styles.disabled]}>
-            <Text numberOfLines={1} style={[styles.dialogActionText, tone === 'primary' && { color: colors.onPrimary }, tone === 'danger' && { color: colors.danger }, quiet && { color: colors.textMuted, fontWeight: '500' }]}>{action.label}</Text>
-          </Pressable>;
+            style={({ pressed }) => [styles.dialogAction, tone === 'primary' && styles.dialogPrimary, tone === 'danger' && styles.dialogDanger, quiet && styles.dialogQuiet, pressed && { opacity: 0.8 }, action.disabled && styles.disabled]}>
+            <Text style={[styles.dialogActionText, tone === 'primary' && { color: d.onInk }, tone === 'danger' && { color: colors.danger }, quiet && { color: colors.textMuted, fontWeight: '500' }]}>{action.label}</Text>
+          </MotionPressable>;
         })}</View>
       </Animated.View>
     </KeyboardSafeView>
@@ -236,14 +247,14 @@ export function ListRow({ icon, title, detail, value, onPress, right, danger = f
   const styles = useStyles();
   return <Pressable accessibilityRole={onPress ? 'button' : undefined} disabled={!onPress} onPress={onPress}
     style={({ pressed }) => [styles.row, pressed && { backgroundColor: colors.surfaceStrong }]}>
-    {icon && <View style={[styles.rowIcon, danger && { backgroundColor: colors.dangerSurface }]}><Icon name={icon} size={18} color={danger ? colors.danger : colors.primary} /></View>}
+    {icon && <View style={styles.rowIcon}><Icon name={icon} size={20} color={danger ? colors.danger : colors.textSecondary} /></View>}
     <View style={[styles.rowBody, !first && styles.rowDivider]}>
       <View style={{ flex: 1, gap: 2 }}>
         <Text style={[styles.rowTitle, danger && { color: colors.danger }]} numberOfLines={1}>{title}</Text>
         {detail ? <Text style={styles.rowDetail} numberOfLines={2}>{detail}</Text> : null}
       </View>
       {value ? <Text style={styles.rowValue} numberOfLines={1}>{value}</Text> : null}
-      {right ?? (onPress ? <Icon name="chevronRight" size={18} color={colors.faint} /> : null)}
+      {right ?? (onPress ? <Icon name="chevronRight" size={15} color={colors.faint} strokeWidth={2} /> : null)}
     </View>
   </Pressable>;
 }
@@ -321,45 +332,49 @@ const useStyles = themed((c, d) => StyleSheet.create({
   overlay: { flex: 1 },
   scrim: { backgroundColor: colors.scrim },
   placement: { flex: 1, justifyContent: 'flex-end' },
-  sheet: { maxHeight: '92%', flexShrink: 1, minHeight: 180, borderTopLeftRadius: 30, borderTopRightRadius: 30, overflow: 'hidden', ...shadow.float },
-  page: { flex: 1, maxHeight: '100%', borderTopLeftRadius: 0, borderTopRightRadius: 0 },
-  handleZone: { height: 18, alignItems: 'center', justifyContent: 'flex-end' },
-  handle: { width: 40, height: 5, borderRadius: 3, backgroundColor: '#D9DDEC' },
-  header: { minHeight: 54, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 6 },
-  pageHeader: { paddingHorizontal: 6, minHeight: 52 },
+  /** Every non-page panel floats in the middle of the screen: nothing slides up from the bottom. */
+  placementFloat: { justifyContent: 'center', alignItems: 'center', paddingHorizontal: 14 },
+  sheet: { width: '100%', maxWidth: 460, maxHeight: '100%', flexShrink: 1, minHeight: 100, borderRadius: 20, overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.float, shadowColor: d.shadow, shadowOpacity: 0.12, shadowRadius: 24 },
+  page: { flex: 1, maxWidth: '100%', maxHeight: '100%', borderRadius: 0, borderWidth: 0 },
+  header: { minHeight: 50, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, paddingTop: 16, paddingBottom: 12, gap: 8 },
+  pageHeader: { paddingHorizontal: 6, paddingTop: 0, paddingBottom: 0, minHeight: 52, gap: 6 },
   headerCenter: { flex: 1, alignItems: 'center' },
-  title: { color: colors.text, fontSize: 17.5, fontWeight: '700', letterSpacing: -0.3 },
-  subtitle: { color: colors.subtle, fontSize: 12, marginTop: 2 },
+  dialogHeaderText: { minWidth: 0, alignItems: 'flex-start' },
+  title: { color: colors.text, fontSize: 16.5, fontWeight: '600', letterSpacing: -0.2 },
+  floatingTitle: { fontFamily: roundedSystemFontFamily, fontSize: 14, lineHeight: 21, letterSpacing: 0 },
+  subtitle: { fontFamily: roundedSystemFontFamily, color: colors.subtle, fontSize: 11, lineHeight: 16, marginTop: 3 },
   scroll: { flexShrink: 1 },
   content: { paddingBottom: 18 },
+  floatingContent: { paddingBottom: 4 },
   body: { flexShrink: 1, paddingBottom: 8 },
   footer: { paddingHorizontal: 20, paddingTop: 10 },
-  dialogBackdrop: { flex: 1, padding: 28, justifyContent: 'center', alignItems: 'center' },
-  dialog: { maxHeight: '80%', width: '100%', maxWidth: 320, padding: 20, borderRadius: 22, backgroundColor: colors.card, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.float },
+  dialogBackdrop: { flex: 1, padding: 18, justifyContent: 'center', alignItems: 'center' },
+  dialog: { maxHeight: '85%', width: '100%', maxWidth: 400, padding: 18, borderRadius: 20, backgroundColor: colors.card, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, ...shadow.float, shadowColor: d.shadow, shadowOpacity: 0.12, shadowRadius: 24 },
   dialogContent: { gap: 8 },
   dialogHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 2 },
-  dialogIcon: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
+  dialogIcon: { width: 28, height: 28, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
   dialogIconDanger: { backgroundColor: colors.dangerSurface },
-  dialogTitle: { flex: 1, color: colors.text, fontSize: 16, lineHeight: 22, fontWeight: '600', letterSpacing: -0.1 },
-  dialogMessage: { color: colors.textMuted, fontSize: 13.5, lineHeight: 20 },
-  dialogActions: { marginTop: 18, flexDirection: 'row', gap: 8 },
+  dialogTitle: { flex: 1, fontFamily: roundedSystemFontFamily, color: colors.text, fontSize: 14, lineHeight: 21, fontWeight: '600' },
+  dialogMessage: { fontFamily: roundedSystemFontFamily, color: colors.textMuted, fontSize: 12, lineHeight: 19 },
+  dialogActions: { marginTop: 16, flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 },
   dialogActionsStacked: { flexDirection: 'column' },
   dialogQuiet: { backgroundColor: 'transparent', minHeight: 36 },
-  dialogAction: { minHeight: 42, paddingHorizontal: 16, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
-  dialogPrimary: { backgroundColor: colors.primary }, dialogDanger: { backgroundColor: colors.dangerSurface },
-  dialogActionText: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  dialogAction: { minHeight: 36, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
+  dialogPrimary: { backgroundColor: d.ink }, dialogDanger: { backgroundColor: colors.dangerSurface },
+  dialogActionText: { fontFamily: roundedSystemFontFamily, color: colors.text, fontSize: 12, lineHeight: 18, fontWeight: '500', textAlign: 'center' },
   actionPrimary: { backgroundColor: colors.primary },
   actionDanger: { backgroundColor: colors.danger },
   actionText: { color: colors.text, fontSize: 14.5, fontWeight: '600' },
-  group: { backgroundColor: colors.surface, borderRadius: 22, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
-  row: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 12, paddingLeft: 14 },
-  rowIcon: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primarySoft },
-  rowBody: { flex: 1, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 10, paddingRight: 14, paddingVertical: 10 },
-  rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
-  rowTitle: { color: colors.text, fontSize: 15.5, fontWeight: '400' },
-  rowDetail: { color: colors.subtle, fontSize: 12.5, lineHeight: 17 },
-  rowValue: { color: colors.subtle, fontSize: 14, maxWidth: '50%' },
-  sectionLabel: { color: colors.subtle, fontSize: 12.5, fontWeight: '500', marginTop: 26, marginBottom: 8, marginLeft: 16 },
+  group: { backgroundColor: colors.card, borderRadius: 14, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  row: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 12, paddingLeft: 14 },
+  rowIcon: { width: 22, height: 22, alignItems: 'center', justifyContent: 'center' },
+  rowBody: { flex: 1, minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 8, paddingRight: 12, paddingVertical: 8 },
+  rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.divider },
+  rowTitle: { color: colors.text, fontSize: 15, fontWeight: '400' },
+  rowDetail: { color: colors.textMuted, fontSize: 12, lineHeight: 16 },
+  rowValue: { color: colors.textMuted, fontSize: 14, maxWidth: '50%' },
+  sectionLabel: { color: colors.textMuted, fontSize: 12.5, fontWeight: '500', marginTop: 20, marginBottom: 6, marginLeft: 16 },
   toast: { position: 'absolute', alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 9, paddingLeft: 8, paddingRight: 18, paddingVertical: 8, minHeight: 44, maxWidth: '90%', borderRadius: 22, backgroundColor: 'rgba(14,19,37,0.9)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.14)', ...shadow.float, zIndex: 100 },
   toastPress: { flexDirection: 'row', alignItems: 'center', gap: 9, flexShrink: 1 },
   toastIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(124,198,255,0.28)' },

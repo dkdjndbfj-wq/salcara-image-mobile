@@ -247,7 +247,33 @@ function jsonEnd(text: string, start: number): number {
   return -1;
 }
 
-interface Marker { start: number; end: number; kind: 'tool' | 'image' | 'suggest'; name: string; json: string }
+/** Protocol lines are executable only outside Markdown examples and quotations. */
+function protocolLineStart(text: string, start: number): boolean {
+  const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+  if (!/^ {0,3}$/.test(text.slice(lineStart, start))) return false;
+  let fence = '';
+  for (const line of text.slice(0, lineStart).split('\n')) {
+    const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (!match) continue;
+    if (!fence) fence = match[1];
+    else if (match[1][0] === fence[0] && match[1].length >= fence.length && !match[2].trim()) fence = '';
+  }
+  return !fence;
+}
+
+/** Remove only the old app-inserted image receipt, never a quoted explanation or code example. */
+export function stripImageResultClaims(text: string): { text: string; claimed: boolean } {
+  const receipt = /\[我调用了\s+generate_image\s*[，,]\s*已生成\s*图\s*\d+(?:。作图描述：[^\]]*)?\]/g;
+  let claimed = false;
+  const visible = text.replace(receipt, (match, offset: number) => {
+    if (!protocolLineStart(text, offset) || !/^[ \t]*(?:\r?\n|$)/.test(text.slice(offset + match.length))) return match;
+    claimed = true;
+    return '';
+  });
+  return { text: claimed ? visible.replace(/\n{3,}/g, '\n\n').trim() : text, claimed };
+}
+
+interface Marker { start: number; end: number; kind: 'tool' | 'image' | 'suggest'; name: string; json: string; complete: boolean }
 
 function findMarkers(text: string): Marker[] {
   const markers: Marker[] = [];
@@ -255,6 +281,7 @@ function findMarkers(text: string): Marker[] {
   while (cursor < text.length) {
     const start = text.indexOf('<<<', cursor);
     if (start < 0) break;
+    if (!protocolLineStart(text, start)) { cursor = start + 3; continue; }
     const open = MARKERS.find((marker) => text.startsWith(marker, start));
     if (!open) { cursor = start + 3; continue; }
     const kind = open === TEXT_TOOL_OPEN ? 'tool' : open === LEGACY_IMAGE_OPEN ? 'image' : 'suggest';
@@ -264,20 +291,30 @@ function findMarkers(text: string): Marker[] {
       const match = text.slice(index).match(/^\s*([A-Za-z_][A-Za-z0-9_]*)/);
       if (match) { name = match[1]; index += match[0].length; }
     }
-    const jsonStart = text.slice(index).search(/[{[]/);
+    // The JSON must follow the marker/name directly, apart from whitespace.
+    // Searching farther ahead could splice an unfinished marker to a later
+    // prose example or fenced JSON and turn that example into a paid command.
+    const jsonPrefix = text.slice(index).match(/^\s*([{[])/);
+    if (!jsonPrefix && /\S/.test(text.slice(index))) { cursor = index; continue; }
     let end = text.length;
     let json = '';
-    if (jsonStart >= 0) {
-      const absolute = index + jsonStart;
+    let complete = false;
+    if (jsonPrefix) {
+      const absolute = index + jsonPrefix[0].length - 1;
       const close = jsonEnd(text, absolute);
       if (close > 0) {
         json = text.slice(absolute, close);
         end = close;
         const tail = text.slice(end).match(/^\s*>>>/);
-        if (tail) end += tail[0].length;
+        if (tail) {
+          end += tail[0].length;
+          complete = /^[ \t]*(?:\r?\n|$)/.test(text.slice(end));
+          // Inline code/prose using protocol-looking syntax is not a command.
+          if (!complete) { cursor = end; continue; }
+        }
       }
     }
-    markers.push({ start, end, kind, name, json });
+    markers.push({ start, end, kind, name, json, complete });
     cursor = end;
   }
   return markers;
@@ -303,7 +340,7 @@ export function extractMarkers(text: string, idPrefix = 'text'): { text: string;
         if (Array.isArray(parsed)) suggestions = normalizeSuggestions(parsed);
       } catch { /* ignore malformed suggestions */ }
     } else if (marker.name) {
-      calls.push({ id: `${idPrefix}-${calls.length + 1}`, name: marker.name, input: parseToolInput(marker.json), raw: marker.json || '{}' });
+      calls.push({ id: `${idPrefix}-${calls.length + 1}`, name: marker.name, input: marker.complete ? parseToolInput(marker.json) : null, raw: marker.json || '{}' });
     }
   }
   visible += text.slice(cursor);

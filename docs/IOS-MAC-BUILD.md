@@ -25,6 +25,12 @@ npx expo run:ios
 
 本地原生模块在 modules 中，与手机主代码统一维护。使用 CocoaPods 时不要用 .xcodeproj 替代 .xcworkspace。prebuild 会生成或更新原生项目，先保存已有原生改动；不要在有未提交修改的工程随意使用 clean。
 
+## 后台任务提醒（可选）
+
+iOS 在应用进入后台或系统休眠时会暂停应用代码，不能用常驻轮询保证收信。任务提醒使用 Firebase Messaging 经 APNs 投递；需要为 `top.salcara.image`（测试包为 `top.salcara.image.remotetest`）创建 Firebase iOS App，把相应文件放在仓库根目录的 `GoogleService-Info.plist` 或 `GoogleService-Info.remotetest.plist`。这些本地配置文件已被 Git 忽略。
+
+同时在 Apple Developer 为对应 Bundle ID 启用 Push Notifications，并在 Firebase 项目配置 APNs authentication key；EAS 的 development profile 使用开发推送 entitlement，preview / production 等签名发布构建使用生产 entitlement。需要特殊 profile 时可用 `SALCARA_APS_ENVIRONMENT` 显式覆盖。Hub 仍须配置 Firebase 服务账号，手机配对并开启“任务通知”。缺少任一环节时，应用会显示推送未配置或中转站未开启，不会依赖后台轮询伪装成已送达。
+
 ## 真机与用户分发
 
 真机运行需要适当的 Apple 开发签名与描述文件；在 Xcode 选择自己的开发团队和设备。公开长期分发还需要正确的 Apple 分发配置，不能把关闭代码签名的构建当作可安装正式包。

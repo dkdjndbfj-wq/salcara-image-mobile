@@ -1,5 +1,6 @@
 import { setHubFetch, type FetchLike, type SessionInfo } from '../remote/client';
-import { bootRemote, connectStation, getRemoteState, hydrateCachedThread, loadAgentProfiles, loadNativeSessions, loadSessions, loadEarlierHistory, openSession, pairRemoteQr, parseRemoteQr, resetRemoteForTests, syncSessionEvents, timelineKey } from '../remote/store';
+import { bootRemote, connectStation, getRemoteState, hydrateCachedThread, loadAgentProfiles, loadNativeSessions, loadSessions, loadEarlierHistory, openSession, pairRemoteQr, parseRemoteQr, remoteDeliveryScope, resetRemoteForTests, sendToSession, syncSessionEvents, timelineKey } from '../remote/store';
+import { pendingDelivery } from '../remote/delivery';
 import { deliveryCredentialId } from '../remote/connections';
 import { groupSessionsByProject } from '../remote/projection';
 
@@ -38,7 +39,7 @@ async function pair() {
 beforeEach(() => {
   resetRemoteForTests(); mockSettings.clear(); mockSecrets.clear(); keys.length = 2; mockUuid = 0; lease = Date.now() + 60000; reads = 0; commands = []; eventReads = 0; handler = defaultHandler;
   setHubFetch((async (endpoint, init) => {
-    if (endpoint.endsWith('/ping')) return response({ service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, authModes: ['device-pairing'], capabilities: ['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1'] });
+    if (endpoint.endsWith('/ping')) return response({ service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, authModes: ['device-pairing'], capabilities: ['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1', 'commands.idempotency.v1'] });
     if (endpoint.endsWith('/app/pair/qr')) return response({ pair_token: 'a'.repeat(64), device });
     if (endpoint.endsWith('/app/devices')) return response({ devices: [device] });
     if (!endpoint.endsWith('/app/commands')) { eventReads += 1; return response({ events: [], nextSeq: 0, lastSeq: 0 }); }
@@ -68,6 +69,38 @@ test('native directory uses only the authorized native transport and retains rea
   expect(getRemoteState().sessions.pc.list.map(item => item.sessionKey)).toEqual(['codex:history-only']);
 });
 
+test('a selected native link cannot downgrade when its lease and directory disappear before opening', async () => {
+  await pair();
+  const key = keys[0];
+  handler = command => command.type === 'agents.status' ? { ok: true, result: { agents: [{ id: 'codex', available: true, api: { source: 'tool' } }] } } : defaultHandler(command);
+  await loadAgentProfiles('pc'); commands.length = 0; eventReads = 0;
+  await expect(openSession('pc', key, { controlSurface: 'desktop' })).rejects.toThrow('桌面连接已断开');
+  expect(commands).toEqual([]); expect(eventReads).toBe(0);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].error).toMatch(/桌面连接已断开/);
+});
+
+test('a selected native link cannot expose a cached CLI snapshot even when the native lease is gone', async () => {
+  await pair(); const key = keys[0];
+  handler = command => command.type === 'session.open' ? { ok: true, result: { session: { ...row(0), controlSurface: 'cli' }, events: [{ type: 'message', id: 'cli-content', role: 'assistant', text: 'old CLI buffer', final: true, seq: 1, ts: 1, deviceId: 'pc', sessionKey: key, tool: 'codex' }] } }
+    : command.type === 'agents.status' ? { ok: true, result: { agents: [{ id: 'codex', available: true, api: { source: 'tool' } }] } } : defaultHandler(command);
+  await loadAgentProfiles('pc'); await openSession('pc', key);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items).not.toHaveLength(0);
+  commands.length = 0; await expect(openSession('pc', key, { controlSurface: 'desktop' })).rejects.toThrow('桌面连接已断开');
+  expect(commands).toEqual([]); expect(getRemoteState().timelines[timelineKey('pc', key)].items).toHaveLength(0);
+});
+
+test('a background native selection does not coalesce with an older CLI read in flight', async () => {
+  await pair(); const key = keys[0]; let finish!: (value: unknown) => void, entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  handler = command => command.type === 'agents.status' ? { ok: true, result: { agents: [{ id: 'codex', available: true, api: { source: 'tool' } }] } }
+    : command.type === 'session.open' ? new Promise(resolve => { finish = resolve; entered(); }) : defaultHandler(command);
+  await loadAgentProfiles('pc');
+  const cli = openSession('pc', key, { background: true }); await started;
+  await expect(openSession('pc', key, { background: true, controlSurface: 'desktop' })).rejects.toThrow('桌面连接已断开');
+  finish({ ok: true, result: { session: { ...row(0), controlSurface: 'cli' }, events: [{ type: 'message', id: 'late-cli', role: 'assistant', text: 'late CLI buffer', ts: 1, seq: 1, final: true, tool: 'codex', deviceId: 'pc', sessionKey: key }] } });
+  await cli; expect(getRemoteState().timelines[timelineKey('pc', key)].items).toHaveLength(0);
+});
+
 test('native head refresh preserves the older frontier without a spinner or stale-index reordering', async () => {
   keys.push('codex:0199aaa1-1234-4678-9abc-000000000003', 'codex:0199aaa1-1234-4678-9abc-000000000004');
   await pair(); let head = 0, release!: (value: unknown) => void, entered!: () => void;
@@ -84,8 +117,9 @@ test('native head refresh preserves the older frontier without a spinner or stal
   const entry = getRemoteState().sessions.pc.native!;
   expect(entry.nextCursor).toBe('third-page');
   expect(entry.list.map(item => item.sessionKey)).toEqual([keys[3], keys[0], keys[1], keys[2]]);
-  const groups = groupSessionsByProject(entry.list, { nativeOrder: true, nativeSessionOrder: entry.list.map(item => item.sessionKey) });
-  expect(groups.find(group => group.key === '__native_recent')?.sessions.map(item => item.sessionKey)).toEqual([keys[3], keys[1], keys[2]]);
+  const groups = groupSessionsByProject(entry.list, { nativeOrder: true, nativeSessionOrder: entry.list.map(item => item.sessionKey), caseSensitivePaths: false });
+  expect(groups.map(group => group.name)).toEqual(['fixture']);
+  expect(groups[0].sessions.map(item => item.sessionKey)).toEqual([keys[3], keys[0], keys[1], keys[2]]);
   expect(commands).toHaveLength(before);
 });
 
@@ -111,6 +145,77 @@ test('native open and demand sync read real desktop snapshots instead of CLI eve
   const timeline = getRemoteState().timelines[timelineKey('pc', keys[0])];
   expect(timeline.items).toHaveLength(1); expect(timeline.items[0]).toMatchObject({ kind: 'message', text: 'finished', final: true });
   expect(getRemoteState().sessions.pc.native?.list[0]).toMatchObject({ pinnedIndex: 3, sidebarIndex: 1 });
+});
+
+test('successful native receipt retires only its local prompt while same-text delegations remain distinct', async () => {
+  await pair(); await loadNativeSessions('pc'); await openSession('pc', keys[0]);
+  let release!: (value: unknown) => void, entered!: () => void, accepted = false;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const delegation = (id: string) => ({ type: 'message', deviceId: 'pc', sessionKey: keys[0], tool: 'codex', ts: 3,
+    id, role: 'user', text: 'same prompt', final: true, messageOrigin: { kind: 'delegation' } });
+  handler = command => command.type === 'session.send' ? (entered(), new Promise(resolve => { release = resolve; }))
+    : command.type === 'desktop.session.open' ? { ok: true, result: { session: row(0), events: [delegation('other-task'), ...(accepted ? [delegation('our-native-send')] : [])] } }
+      : defaultHandler(command);
+  const sending = sendToSession('pc', keys[0], 'same prompt', { surface: 'desktop' }); await started;
+  await syncSessionEvents('pc', keys[0]);
+  const timeline = () => getRemoteState().timelines[timelineKey('pc', keys[0])];
+  expect(timeline().items.filter(item => item.kind === 'message' && item.local)).toHaveLength(1);
+  expect(timeline().items.find(item => item.id === 'other-task')).toMatchObject({ messageOrigin: { kind: 'delegation' }, text: 'same prompt' });
+  accepted = true; release({ ok: true, result: {} }); await sending;
+  expect(timeline().items.some(item => item.kind === 'message' && item.local)).toBe(false);
+  await syncSessionEvents('pc', keys[0]);
+  expect(timeline().items.filter(item => item.kind === 'message' && item.role === 'user').map(item => item.id)).toEqual(['other-task', 'our-native-send']);
+  expect(await pendingDelivery(remoteDeliveryScope(), 'pc', keys[0])).toBeUndefined();
+});
+
+test('lost native acknowledgement retains its receipt and exact local row until the same operation succeeds', async () => {
+  await pair(); const sends: Record<string, unknown>[] = [];
+  handler = command => command.type === 'session.send' ? (sends.push(command), sends.length === 1
+    ? Promise.reject(new Error('lost native acknowledgement')) : { ok: true, result: {} }) : defaultHandler(command);
+  await expect(sendToSession('pc', keys[0], 'pending native prompt', { surface: 'desktop' })).rejects.toMatchObject({ retryable: true });
+  const timeline = () => getRemoteState().timelines[timelineKey('pc', keys[0])];
+  const pending = await pendingDelivery(remoteDeliveryScope(), 'pc', keys[0]);
+  expect(pending).toMatchObject({ attempted: true, surface: 'desktop', requestId: sends[0].operationId });
+  expect(timeline().items.filter(item => item.kind === 'message' && item.local)).toHaveLength(1);
+  await sendToSession('pc', keys[0], 'pending native prompt', { retryRequestId: pending!.requestId, surface: 'cli' });
+  expect(sends[1]).toEqual(sends[0]);
+  expect(timeline().items.some(item => item.kind === 'message' && item.local)).toBe(false);
+  expect(await pendingDelivery(remoteDeliveryScope(), 'pc', keys[0])).toBeUndefined();
+});
+
+test('explicitly uncertain native delivery retains its operation and blocks a fresh redispatch', async () => {
+  await pair(); const sends: Record<string, unknown>[] = [];
+  handler = command => command.type === 'session.send' ? (sends.push(command), { ok: false, code: 'command_delivery_uncertain', error: 'native delivery not confirmed' })
+    : defaultHandler(command);
+  await expect(sendToSession('pc', keys[0], 'uncertain native prompt', { surface: 'desktop' })).rejects.toMatchObject({ retryable: false });
+  expect(await pendingDelivery(remoteDeliveryScope(), 'pc', keys[0])).toMatchObject({ uncertain: true, attempted: true,
+    surface: 'desktop', requestId: sends[0].operationId });
+  await expect(sendToSession('pc', keys[0], 'uncertain native prompt', { retryRequestId: String(sends[0].operationId), surface: 'desktop' })).rejects.toMatchObject({ retryable: false });
+  expect(sends).toHaveLength(1);
+});
+
+test('old native acknowledgement cannot retire a new owner prompt even when its local identifier overlaps', async () => {
+  const now = jest.spyOn(Date, 'now').mockReturnValue(1896912000000);
+  try {
+    lease = Date.now() + 60000; await pair();
+    let releaseOld!: (value: unknown) => void, releaseNew!: (value: unknown) => void, enteredOld!: () => void, enteredNew!: () => void;
+    const oldStarted = new Promise<void>(resolve => { enteredOld = resolve; });
+    const newStarted = new Promise<void>(resolve => { enteredNew = resolve; });
+    handler = command => command.type === 'session.send' ? (enteredOld(), new Promise(resolve => { releaseOld = resolve; })) : defaultHandler(command);
+    const oldSend = sendToSession('pc', keys[0], 'old owner prompt', { surface: 'desktop' }); await oldStarted;
+    const oldLocalId = getRemoteState().timelines[timelineKey('pc', keys[0])].items.find(item => item.kind === 'message' && item.local)?.id;
+    resetRemoteForTests(); mockSettings.clear(); mockSecrets.clear(); await pair();
+    handler = command => command.type === 'session.send' ? (enteredNew(), new Promise(resolve => { releaseNew = resolve; })) : defaultHandler(command);
+    const newSend = sendToSession('pc', keys[0], 'new owner prompt', { surface: 'desktop' }); await newStarted;
+    expect(getRemoteState().timelines[timelineKey('pc', keys[0])].items.find(item => item.kind === 'message' && item.local)?.id).toBe(oldLocalId);
+    const oldFailure = expect(oldSend).rejects.toMatchObject({ name: 'DeliveryPendingError' });
+    releaseOld({ ok: true, result: {} }); await oldFailure;
+    expect(getRemoteState().timelines[timelineKey('pc', keys[0])].items.filter(item => item.kind === 'message' && item.local)).toEqual([
+      expect.objectContaining({ text: 'new owner prompt', local: true }),
+    ]);
+    releaseNew({ ok: true, result: {} }); await newSend;
+    expect(getRemoteState().timelines[timelineKey('pc', keys[0])].items.some(item => item.kind === 'message' && item.local)).toBe(false);
+  } finally { now.mockRestore(); }
 });
 
 test('expired lease rejects native list and sync before dispatch and does not use history fallback', async () => {

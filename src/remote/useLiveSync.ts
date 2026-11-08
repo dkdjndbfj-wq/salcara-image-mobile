@@ -11,7 +11,10 @@ import { AppState } from 'react-native';
  */
 export function liveDelay(attempt: number, failures: number, longPoll: boolean): number {
   if (failures) return Math.min(300_000, 1000 * 2 ** Math.min(failures, 9));
-  if (longPoll) return 0;
+  // A compliant Hub normally holds the request. Older Hubs or a reverse
+  // proxy can answer an empty long-poll immediately, so keep a small floor
+  // to avoid a tight request loop and needless battery/server load.
+  if (longPoll) return 250;
   return attempt < 3 ? 2000 : attempt < 8 ? 4000 : 8000;
 }
 

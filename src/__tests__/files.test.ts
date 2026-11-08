@@ -2,6 +2,8 @@ const mockRequestPermissionsAsync = jest.fn();
 const mockCreateAsset = jest.fn();
 const mockFetch = jest.fn();
 const mockNativeDownload = jest.fn();
+const mockSharingAvailable = jest.fn();
+const mockShare = jest.fn();
 const mockWriteStream = {};
 
 jest.mock('expo/fetch', () => ({ fetch: (...args: unknown[]) => mockFetch(...args) }));
@@ -30,9 +32,9 @@ jest.mock('expo-file-system', () => {
   return { Directory, File, Paths: { document: 'file:///documents' } };
 });
 
-jest.mock('expo-sharing', () => ({}));
+jest.mock('expo-sharing', () => ({ isAvailableAsync: (...args: unknown[]) => mockSharingAvailable(...args), shareAsync: (...args: unknown[]) => mockShare(...args) }));
 
-import { downloadPng, RemoteImageDownloadError, saveToGallery } from '../storage/files';
+import { downloadPng, RemoteImageDownloadError, saveToGallery, shareImage } from '../storage/files';
 
 describe('gallery saving', () => {
   beforeEach(() => {
@@ -55,6 +57,46 @@ describe('gallery saving', () => {
 
     await expect(saveToGallery('file:///documents/generated.png')).rejects.toThrow('系统设置');
     expect(mockCreateAsset).not.toHaveBeenCalled();
+  });
+
+  test('closing the viewer while photo permission is pending prevents a late gallery write', async () => {
+    let grant!: (permission: { granted: boolean }) => void;
+    mockRequestPermissionsAsync.mockReturnValue(new Promise(resolve => { grant = resolve; }));
+    const controller = new AbortController();
+    const saving = saveToGallery('file:///documents/generated.png', { signal: controller.signal });
+    controller.abort(); grant({ granted: true });
+    await expect(saving).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockCreateAsset).not.toHaveBeenCalled();
+  });
+
+  test('a stale save handler does not request photo permission', async () => {
+    const controller = new AbortController(); controller.abort();
+    await expect(saveToGallery('file:///documents/generated.png', { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockRequestPermissionsAsync).not.toHaveBeenCalled();
+  });
+});
+
+describe('image sharing', () => {
+  beforeEach(() => { mockSharingAvailable.mockReset(); mockShare.mockReset(); mockSharingAvailable.mockResolvedValue(true); mockShare.mockResolvedValue(undefined); });
+
+  test('keeps ordinary chat and Companion default sharing compatible', async () => {
+    await shareImage('file:///documents/generated.png');
+    expect(mockShare).toHaveBeenCalledWith('file:///documents/generated.png', { mimeType: 'image/png', dialogTitle: '分享生成图片' });
+  });
+
+  test.each(['image/jpeg', 'image/webp'] as const)('passes the actual %s type to the system share sheet', async mimeType => {
+    await shareImage('file:///cache/attachment', { mimeType });
+    expect(mockShare).toHaveBeenCalledWith('file:///cache/attachment', { mimeType, dialogTitle: '分享生成图片' });
+  });
+
+  test('a late availability result cannot open sharing for a closed image', async () => {
+    let available!: (value: boolean) => void;
+    mockSharingAvailable.mockReturnValue(new Promise(resolve => { available = resolve; }));
+    const controller = new AbortController();
+    const sharing = shareImage('file:///cache/attachment.png', { signal: controller.signal });
+    controller.abort(); available(true);
+    await expect(sharing).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockShare).not.toHaveBeenCalled();
   });
 });
 

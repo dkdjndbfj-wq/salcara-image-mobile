@@ -1,11 +1,14 @@
 import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
 import { RemoteScreen } from '../remote/RemoteScreen';
+import { sessionAgent } from '../remote/RemoteHome';
 import type { AgentId, AgentProfile, DeviceStatus, SessionInfo } from '../remote/client';
 import type { RemoteState } from '../remote/store';
 
 const mockLoadAgents = jest.fn<Promise<void>, unknown[]>(async () => undefined);
 const mockLoadSessions = jest.fn<Promise<void>, unknown[]>(async () => undefined);
+const mockLoadNative = jest.fn<Promise<void>, unknown[]>(async () => undefined);
+const mockLoadHistory = jest.fn<Promise<void>, unknown[]>(async () => undefined);
 const mockLastAgent = jest.fn<Promise<AgentId>, []>(async () => 'codex');
 const mockRememberAgent = jest.fn();
 const mockSetApi = jest.fn();
@@ -14,13 +17,24 @@ const mockSwitchSpace = jest.fn();
 const mockConnectStation = jest.fn();
 const mockPairQr = jest.fn();
 const mockUseConnection = jest.fn();
+let mockSavedComputer:import('../remote/computer-connections').ComputerSelection|null=null;
+let mockDirectState:import('../remote/direct-pairing').DirectConnectionState={status:'idle'};
+let mockDirectPeers:import('../remote/direct-pairing').DirectPairingInfo[]=[];
+const mockSaveComputer=jest.fn(),mockReconnectDirect=jest.fn();
+jest.mock('../remote/computer-selection',()=>({readComputerSelection:async()=>mockSavedComputer,saveComputerSelection:(...args:unknown[])=>mockSaveComputer(...args)}));
+jest.mock('../remote/direct-pairing',()=>({...jest.requireActual('../remote/direct-pairing'),
+  getDirectConnectionState:()=>mockDirectState,subscribeDirectConnection:()=>()=>{},restoreDirectPairing:async()=>mockDirectState,
+  listDirectPairings:async()=>mockDirectPeers,reconnectDirect:(id:string)=>mockReconnectDirect(id)}));
+jest.mock('../remote/DirectExperience',()=>({DirectExperience:()=>{const {Text}=require('react-native');return <Text>直连工作区 {mockDirectState.deviceId}</Text>;}}));
+const mockProbeConnections = jest.fn<Promise<Record<string, 'online' | 'offline' | 'unreachable' | 'reauth'>>, []>(async () => ({ paired: 'online' }));
 const mockSignOut = jest.fn();
 const mockRevoke = jest.fn();
+const mockRenameRemote = jest.fn<Promise<void>, [string, string]>(async () => undefined);
+const mockRevokeById = jest.fn<Promise<void>, [string]>(async () => undefined);
 const mockOpenDesktopGithub = jest.fn();
 const mockScreenOpen = jest.fn();
 let mockRemote: RemoteState;
 let mockMenuActions: Array<{ label: string; onPress: () => void }> = [];
-let mockConnectPress: (() => void) | undefined;
 let mockThreadProps: {
   visible: boolean; sessionKey: string | null; deviceId: string | null; agent: AgentProfile | null; verifying?: boolean;
   onClose: () => void;
@@ -60,15 +74,16 @@ jest.mock('../remote/ProgrammingUi', () => {
   const panel = ({ visible, title, children, footer, headerRight }: Record<string, any>) => visible
     ? React.createElement(View, null, title ? React.createElement(Text, null, title) : null, headerRight, children, footer) : null;
   return { ...jest.requireActual('../remote/ProgrammingUi'), ProgrammingPanel: panel, ProgrammingSheet: panel, ProgrammingAction: ({ label, onPress, disabled, loading, ...props }: Record<string, any>) => {
-    if (label === '连接' || label === '正在连接…') mockConnectPress = onPress;
     return React.createElement(Pressable, { ...props, accessibilityRole: 'button', accessibilityLabel: label, accessibilityState: { disabled: Boolean(disabled || loading), busy: Boolean(loading) }, disabled: Boolean(disabled || loading), onPress }, React.createElement(Text, null, label));
   } };
 });
 jest.mock('../remote/RemoteApiLibrary', () => ({
-  RemoteApiLibrary: ({ visible, onClose }: { visible: boolean; onClose: () => void }) => {
+  RemoteApiLibrary: ({ visible, deviceId, onClose }: { visible: boolean; deviceId: string | null; onClose: () => void }) => {
     if (!visible) return null;
     const React = require('react'); const { View, Text, Pressable } = require('react-native');
     return React.createElement(View, null, React.createElement(Text, null, '电脑 API 资源库'),
+      React.createElement(Text, null, `当前电脑 API：${deviceId ?? '未选择'}`),
+      ...(mockRemote.agents[deviceId ?? '']?.apis ?? []).map(api => React.createElement(Text, { key: api.id }, api.name)),
       React.createElement(Pressable, { accessibilityLabel: '返回 API 资源库', onPress: onClose }, React.createElement(Text, null, '返回 API 资源库')));
   },
 }));
@@ -79,8 +94,11 @@ jest.mock('../remote/store', () => ({
   useRemote: () => mockRemote,
   hydrateCachedThread: async () => undefined, hydrateCachedSessions: async () => undefined,
   getRemoteState: () => mockRemote,
+  timelineKey: (deviceId:string, sessionKey:string) => `${deviceId}:${sessionKey}`,
   loadAgentProfiles: (...args: unknown[]) => mockLoadAgents(...args),
   loadSessions: (...args: unknown[]) => mockLoadSessions(...args),
+  loadNativeSessions: (...args: unknown[]) => mockLoadNative(...args),
+  loadClaudeDesktopHistory: (...args: unknown[]) => mockLoadHistory(...args),
   loadMoreSessions: jest.fn(async () => undefined),
   setAgentApi: (...args: unknown[]) => mockSetApi(...args),
   lastAgent: () => mockLastAgent(), rememberAgent: (...args: unknown[]) => mockRememberAgent(...args),
@@ -89,6 +107,9 @@ jest.mock('../remote/store', () => ({
   connectStation: (...args: unknown[]) => mockConnectStation(...args),
   pairRemote: jest.fn(), pairScannedRemoteQr: (...args: unknown[]) => mockPairQr(...args), parseScannedRemoteQr: () => mockQr,
   revokeRemoteConnection: (...args: unknown[]) => mockRevoke(...args),
+  probeSavedConnections: () => mockProbeConnections(),
+  renameRemoteConnection: (...args: [string, string]) => mockRenameRemote(...args),
+  revokeRemoteConnectionById: (...args: [string]) => mockRevokeById(...args),
   signOutRemote: (...args: unknown[]) => mockSignOut(...args),
   useSavedConnection: (...args: unknown[]) => mockUseConnection(...args),
 }));
@@ -142,19 +163,118 @@ function unpairedState(phase: RemoteState['phase'] = 'setup'): RemoteState {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockLastAgent.mockReset(); mockLoadAgents.mockReset(); mockLoadSessions.mockReset();
+  mockSavedComputer=null;mockDirectState={status:'idle'};mockDirectPeers=[];mockSaveComputer.mockResolvedValue(undefined);
+  mockReconnectDirect.mockImplementation(async(id:string)=>{mockDirectState={status:'connected',deviceId:id,deviceName:mockDirectPeers.find(item=>item.deviceId===id)?.deviceName};return mockDirectState;});
+  mockProbeConnections.mockImplementation(async () => ({ paired: 'online' }));
+  mockLastAgent.mockReset(); mockLoadAgents.mockReset(); mockLoadSessions.mockReset(); mockLoadNative.mockReset(); mockLoadHistory.mockReset();
   mockRemote = readyState();
   mockMenuActions = [];
-  mockConnectPress = undefined;
   mockThreadProps = { visible: false, sessionKey: null, deviceId: null, agent: null, onClose: () => undefined };
   mockLastAgent.mockImplementation(async () => 'codex');
   mockLoadAgents.mockImplementation(async () => undefined);
   mockLoadSessions.mockImplementation(async () => undefined);
+  mockLoadNative.mockImplementation(async () => undefined);
+  mockLoadHistory.mockImplementation(async () => undefined);
   mockConnectStation.mockImplementation(async () => {
     mockRemote = { ...unpairedState('pairing'), connections: mockRemote.connections };
   });
   mockPairQr.mockImplementation(async () => { mockRemote = readyState(); });
   mockUseConnection.mockImplementation(async () => undefined);
+});
+
+test('restores the chosen direct computer instead of the previous Hub or another native connection', async()=>{
+  mockSavedComputer={kind:'direct',deviceId:'direct-B'};
+  mockDirectPeers=[{deviceId:'direct-B',deviceName:'书房电脑 B',endpoint:'wss://192.168.1.8/direct',pairedAt:1}];
+  mockDirectState={status:'connected',deviceId:'direct-C',deviceName:'电脑 C'};
+  const view=await render(<RemoteScreen visible/>);
+  expect(view.getByLabelText('连接电脑').props.accessibilityHint).toContain('书房电脑 B');
+  expect(view.getByText('直连 · 未连接')).toBeTruthy();
+  expect(view.queryByText('修复购物车')).toBeNull();
+  expect(view.queryByLabelText('API 管理')).toBeNull();
+  expect(mockLoadSessions).not.toHaveBeenCalled();expect(mockLoadAgents).not.toHaveBeenCalled();
+  expect(mockReconnectDirect).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByLabelText('打开电脑直连'));
+  expect(mockReconnectDirect).toHaveBeenCalledWith('direct-B');
+  expect(view.getByText('直连工作区 direct-B')).toBeTruthy();
+  expect(mockSaveComputer).toHaveBeenLastCalledWith({kind:'direct',deviceId:'direct-B'});
+});
+
+test.each(['removed-direct','mismatched-bot'] as const)('a %s saved choice opens device selection without silently falling back',async kind=>{
+  mockSavedComputer=kind==='removed-direct'?{kind:'direct',deviceId:'deleted'}:{kind:'bot',connectionId:'old-bot',deviceId:'pc-2'};
+  const view=await render(<RemoteScreen visible/>);
+  expect(view.getByText('设备管理')).toBeTruthy();
+  expect(view.queryByText('修复购物车')).toBeNull();
+  expect(mockSaveComputer).toHaveBeenLastCalledWith(null);
+  expect(mockUseConnection).not.toHaveBeenCalled();
+});
+
+test('phone switches relay A to Bot B to direct C and back to relay A with isolated destinations',async()=>{
+  const first=readyState(), bot={id:'bot-B',deviceId:'B',deviceName:'Bot 电脑 B',hubUrl:'https://bot.example/v1',botGroupId:'group-B',pairedAt:2};
+  const connections=[...first.connections,bot];
+  mockRemote={...first,connections};
+  mockDirectPeers=[{deviceId:'direct-C',deviceName:'直连电脑 C',endpoint:'wss://192.168.1.8/direct',pairedAt:1}];
+  mockUseConnection.mockImplementation(async(id:string)=>{
+    if(id==='paired'){mockRemote={...first,connections};return;}
+    mockRemote={...first,connections,connectionId:bot.id,selectedHubUrl:bot.hubUrl,
+      devices:[{...first.devices[0],deviceId:'B',name:bot.deviceName}],
+      agents:{B:first.agents['pc-1']},sessions:{B:{loaded:true,loading:false,list:[]}}};
+  });
+  const view=await render(<RemoteScreen visible/>);
+  await fireEvent.press(view.getByLabelText('连接电脑'));
+  await fireEvent.press(view.getByLabelText('切换到Bot Bot 电脑 B'));
+  expect(view.getByLabelText('连接电脑').props.accessibilityHint).toContain('Bot 电脑 B');
+  expect(mockSaveComputer).toHaveBeenLastCalledWith({kind:'bot',connectionId:'bot-B',deviceId:'B'});
+  await fireEvent.press(view.getByLabelText('API 管理'));
+  expect(view.getByText('当前电脑 API：B')).toBeTruthy();
+  await fireEvent.press(view.getByLabelText('返回 API 资源库'));
+  await fireEvent.press(view.getByLabelText('连接电脑'));
+  await fireEvent.press(view.getByLabelText('切换到直连 直连电脑 C'));
+  expect(view.getByText('直连工作区 direct-C')).toBeTruthy();
+  expect(mockSaveComputer).toHaveBeenLastCalledWith({kind:'direct',deviceId:'direct-C'});
+  await fireEvent.press(view.getByLabelText('返回'));
+  expect(view.queryByLabelText('API 管理')).toBeNull();
+  expect(view.queryByText('修复购物车')).toBeNull();
+  await fireEvent.press(view.getByLabelText('连接电脑'));
+  await fireEvent.press(view.getByLabelText('切换到中转站 工作电脑'));
+  expect(view.getByLabelText('连接电脑').props.accessibilityHint).toContain('工作电脑');
+  expect(mockSaveComputer).toHaveBeenLastCalledWith({kind:'relay',connectionId:'paired',deviceId:'pc-1'});
+  expect(view.getByText('修复购物车')).toBeTruthy();
+  expect(mockReconnectDirect).toHaveBeenCalledTimes(1);
+});
+
+test('a late notification switch cannot take over after opening device management',async()=>{
+  let finish!:()=>void;
+  mockRemote.focus={connectionId:'bot-B',deviceId:'B',sessionKey:'codex:B'};
+  mockUseConnection.mockImplementation(()=>new Promise<void>(resolve=>{finish=resolve;}));
+  const view=await render(<RemoteScreen visible/>);
+  const guard=mockUseConnection.mock.calls[0][2].stillWanted;
+  expect(guard()).toBe(true);
+  await fireEvent.press(view.getByLabelText('连接电脑'));
+  expect(guard()).toBe(false);
+  await act(async()=>{finish();});
+  expect(view.getByText('设备管理')).toBeTruthy();
+  expect(mockRemote.focus).toBeNull();
+  expect(mockSaveComputer).not.toHaveBeenCalled();
+});
+
+test('a notification can switch from an open workspace to the exact Bot conversation',async()=>{
+  const first=readyState(),bot={id:'bot-B',deviceId:'B',deviceName:'电脑 B',hubUrl:'https://bot.example/v1',botGroupId:'group-B',pairedAt:2};
+  const session={...first.sessions['pc-1'].list[0],sessionKey:'codex:bot-task',title:'B 的任务'};
+  const view=await render(<RemoteScreen visible/>);
+  await fireEvent.press(view.getByLabelText('打开 Codex'));
+  let finish!:()=>void;
+  mockUseConnection.mockImplementation(()=>new Promise<void>(resolve=>{finish=resolve;}));
+  mockRemote={...first,connections:[...first.connections,bot],focus:{connectionId:bot.id,deviceId:'B',sessionKey:session.sessionKey}};
+  await view.rerender(<RemoteScreen visible/>);
+  const guard=mockUseConnection.mock.calls[0][2].stillWanted;
+  mockRemote={...mockRemote,focus:null,connectionId:bot.id,selectedHubUrl:bot.hubUrl,
+    devices:[{...first.devices[0],deviceId:'B',name:bot.deviceName}],agents:{B:first.agents['pc-1']},sessions:{B:{loaded:true,loading:false,list:[session]}}};
+  await view.rerender(<RemoteScreen visible/>);
+  expect(guard()).toBe(true);
+  await act(async()=>{finish();});
+  await view.rerender(<RemoteScreen visible/>);
+  expect(mockThreadProps).toMatchObject({visible:true,deviceId:'B',sessionKey:'codex:bot-task'});
+  expect(mockSaveComputer).toHaveBeenLastCalledWith({kind:'bot',connectionId:bot.id,deviceId:'B'});
 });
 
 test.each(['setup', 'pairing', 'ready'] as const)('first entry remains on the home page when connection phase is %s', async (phase) => {
@@ -170,7 +290,7 @@ test.each(['setup', 'pairing', 'ready'] as const)('first entry remains on the ho
   expect(mockLoadAgents).not.toHaveBeenCalled();
   expect(mockSetApi).not.toHaveBeenCalled();
   expect(mockThreadProps.visible).toBe(false);
-});
+}, 15_000);
 
 test('recent tasks expose waiting and failed states before the approval cache arrives', async () => {
   mockRemote.sessions['pc-1'].list[0].status = 'waiting_approval';
@@ -181,13 +301,26 @@ test('recent tasks expose waiting and failed states before the approval cache ar
 
 test.each(['api', 'menu'] as const)('an approval focus closes the %s overlay before opening its original conversation', async overlay => {
   const view = await render(<RemoteScreen visible />);
+  if (overlay === 'menu') await fireEvent.press(view.getByLabelText('打开 Codex'));
   await fireEvent.press(view.getByLabelText(overlay === 'api' ? 'API 管理' : '更多'));
   if (overlay === 'api') expect(view.getByText('电脑 API 资源库')).toBeTruthy();
-  else expect(view.getByText('解除这台手机的配对')).toBeTruthy();
+  else expect(view.getByText('当前版本不支持系统任务通知。')).toBeTruthy();
   mockRemote.focus = { deviceId: 'pc-1', sessionKey: 'codex:app' };
   await view.rerender(<RemoteScreen visible />);
   expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'codex:app' });
-  expect(view.queryByText('电脑 API 资源库')).toBeNull(); expect(view.queryByText('解除这台手机的配对')).toBeNull();
+  expect(view.queryByText('电脑 API 资源库')).toBeNull(); expect(view.queryByText('当前版本不支持系统任务通知。')).toBeNull();
+});
+
+test('a notification with an unverified source returns to the remote home without opening another task', async () => {
+  const view = await render(<RemoteScreen visible />);
+  mockRemote.focus = { deviceId: 'pc-1', sessionKey: 'codex:app' };
+  await view.rerender(<RemoteScreen visible />);
+  expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'codex:app' });
+  mockLoadSessions.mockClear(); mockLoadAgents.mockClear();
+  mockRemote.focus = { home: true };
+  await view.rerender(<RemoteScreen visible />);
+  expect(mockThreadProps).toMatchObject({ visible: false, sessionKey: null });
+  expect(mockLoadSessions).not.toHaveBeenCalled();
 });
 
 test('changing station clears an open API overlay rather than reopening it over the new station', async () => {
@@ -198,51 +331,48 @@ test('changing station clears an open API overlay rather than reopening it over 
   expect(view.queryByText('电脑 API 资源库')).toBeNull();
 });
 
-test('hiding programming also hides an open connection API picker', async () => {
+test('hiding programming also hides API management opened from the Agent directory', async () => {
   const view = await render(<RemoteScreen visible />);
-  await fireEvent.press(view.getByLabelText('打开 Codex')); await fireEvent.press(view.getByLabelText('更换 API'));
-  expect(view.getByText('更换 API')).toBeTruthy();
+  await fireEvent.press(view.getByLabelText('打开 Codex'));
+  await fireEvent.press(view.getByLabelText('API 管理'));
+  expect(view.getByText('电脑 API 资源库')).toBeTruthy();
   await view.rerender(<RemoteScreen visible={false} />);
-  expect(view.queryByText('更换 API')).toBeNull();
+  expect(view.queryByText('电脑 API 资源库')).toBeNull();
 });
 
-test.each(['hidden', 'scope', 'closed', 'reopened', 'unmounted'] as const)('queued menu unpair cannot revoke the current pairing after it was %s', async condition => {
+test.each(['hidden', 'scope', 'menu', 'closed', 'reopened', 'unmounted'] as const)('queued directory settings cannot reopen API management after %s', async condition => {
   const view = await render(<RemoteScreen visible />);
-  await fireEvent.press(view.getByLabelText('更多'));
-  const revoke = view.getByLabelText('解除这台手机的配对').props.onPress as () => void;
-  if (condition === 'hidden') await view.rerender(<RemoteScreen visible={false} />);
-  else if (condition === 'scope') { mockRemote = { ...mockRemote, serviceId: 'new-station' }; await view.rerender(<RemoteScreen visible />); }
-  else if (condition === 'unmounted') await view.unmount();
-  else {
-    const apiEntries = view.getAllByLabelText('API 管理');
-    await fireEvent.press(apiEntries[apiEntries.length - 1]); // the menu row closes the menu
-    if (condition === 'reopened') await fireEvent.press(view.getByLabelText('更多'));
-  }
-  await act(async () => revoke());
-  expect(mockRevoke).not.toHaveBeenCalled();
-});
-
-test.each(['hidden', 'scope', 'menu', 'offline', 'unmounted'] as const)('queued connection presses do not read or enter an Agent after %s', async condition => {
-  const view = await render(<RemoteScreen visible />);
-  await fireEvent.press(view.getByLabelText('打开 Codex')); const connect = mockConnectPress!;
+  await fireEvent.press(view.getByLabelText('打开 Codex'));
+  const settings = view.getByLabelText('API 管理').props.onPress as () => void;
   if (condition === 'hidden') await view.rerender(<RemoteScreen visible={false} />);
   else if (condition === 'scope') { mockRemote = { ...mockRemote, serviceId: 'another-relay' }; await view.rerender(<RemoteScreen visible />); }
   else if (condition === 'menu') await fireEvent.press(view.getByLabelText('更多'));
-  else if (condition === 'offline') { mockRemote.devices[0].online = false; await view.rerender(<RemoteScreen visible />); }
-  else await view.unmount();
-  mockLoadAgents.mockClear();
-  await act(async () => connect());
-  expect(mockLoadAgents).not.toHaveBeenCalled(); expect(mockThreadProps.visible).toBe(false);
+  else if (condition === 'unmounted') await view.unmount();
+  else {
+    await fireEvent.press(view.getByLabelText('返回'));
+    if (condition === 'reopened') await fireEvent.press(view.getByLabelText('打开 Codex'));
+  }
+  mockLoadAgents.mockClear(); mockLoadSessions.mockClear();
+  await act(async () => settings());
+  if (condition !== 'unmounted') expect(view.queryByText('电脑 API 资源库')).toBeNull();
+  expect(mockLoadAgents).not.toHaveBeenCalled(); expect(mockLoadSessions).not.toHaveBeenCalled();
+  expect(mockSetApi).not.toHaveBeenCalled(); expect(mockThreadProps.visible).toBe(false);
 });
 
-test('same-tick repeated connection presses share one request', async () => {
-  let finish!: () => void;
-  mockLoadAgents.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+test('repeated directory API management presses open one library without reconnecting or applying a key', async () => {
   const view = await render(<RemoteScreen visible />);
-  await fireEvent.press(view.getByLabelText('打开 Codex')); const connect = mockConnectPress!;
-  await act(async () => { connect(); connect(); });
-  expect(mockLoadAgents).toHaveBeenCalledTimes(1);
-  await act(async () => finish()); expect(view.getByText('新对话')).toBeTruthy();
+  await fireEvent.press(view.getByLabelText('打开 Codex'));
+  const settings = view.getByLabelText('API 管理').props.onPress as () => void;
+  mockLoadAgents.mockClear(); mockLoadSessions.mockClear();
+  await act(async () => { settings(); settings(); });
+  expect(view.getAllByText('电脑 API 资源库')).toHaveLength(1);
+  expect(view.getByText('当前电脑 API：pc-1')).toBeTruthy();
+  expect(mockLoadAgents).not.toHaveBeenCalled(); expect(mockLoadSessions).not.toHaveBeenCalled();
+  expect(mockConnectStation).not.toHaveBeenCalled(); expect(mockSetApi).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByLabelText('返回 API 资源库'));
+  expect(view.getByText('修复购物车')).toBeTruthy();
+  expect(view.getByLabelText('新建 Code 对话')).toBeTruthy();
+  expect(mockThreadProps).toMatchObject({ visible: false, agent: { id: 'codex' } });
 });
 
 test('homepage API count comes only from the active computer catalog', async () => {
@@ -267,28 +397,26 @@ test('desktop download opens the external helper from home without another setup
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
 });
 
-test('desktop download menu uses the same helper and closes without creating a download page', async () => {
+test('the Agent menu has no duplicate navigation or device management actions', async () => {
   const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('打开 Codex'));
   await fireEvent.press(view.getByLabelText('更多'));
-  const entries = view.getAllByText('下载电脑端');
-  expect(entries).toHaveLength(2); // homepage entry plus the menu action
-  await fireEvent.press(entries[1]);
-  expect(mockOpenDesktopGithub).toHaveBeenCalledTimes(1);
-  expect(view.queryByText('选择安装包')).toBeNull();
-  expect(view.queryByText('关闭')).toBeNull();
-  expect(view.getByLabelText('打开 Codex')).toBeTruthy();
+  for (const label of ['编程首页', '切换 Agent', '连接电脑', '连接诊断', '下载电脑端', '解除当前电脑配对']) {
+    expect(view.queryByLabelText(label)).toBeNull();
+  }
+  // The single API entry belongs to the underlying Agent directory, not the menu.
+  expect(view.getAllByLabelText('API 管理')).toHaveLength(1);
+  expect(view.getByText('当前版本不支持系统任务通知。')).toBeTruthy();
+  expect(mockOpenDesktopGithub).not.toHaveBeenCalled();
 });
-
-test('computer entry is separate from binding, and pairing completion returns to home', async () => {
+test('first computer entry opens scanning directly and keeps Bot connection at the bottom of the pairing page', async () => {
   mockRemote = unpairedState();
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('连接电脑'));
-  expect(view.getByText('绑定新电脑')).toBeTruthy();
-  expect(view.queryByLabelText('中转站地址')).toBeNull();
-  await fireEvent.press(view.getByText('绑定新电脑'));
-  expect(view.queryByLabelText('中转站地址')).toBeNull();
-  expect(mockConnectStation).not.toHaveBeenCalled();
+  expect(view.getByText('扫码连接')).toBeTruthy();
+  expect(view.queryByText('绑定新电脑')).toBeNull();
   expect(view.getByTestId('remote-qr-camera')).toBeTruthy();
+  expect(view.queryByLabelText('中转站地址')).toBeNull();
   await act(async () => view.getByTestId('remote-qr-camera').props.onBarcodeScanned({ data: 'fixture', type: 'qr' }));
   await fireEvent.press(view.getByText('连接'));
   await view.rerender(<RemoteScreen visible />);
@@ -303,6 +431,8 @@ test('computer management preserves saved paired records even without an active 
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('连接电脑'));
   expect(view.getByText('工作电脑')).toBeTruthy();
+  expect(view.getByText('设备管理')).toBeTruthy();
+  expect(view.getByText('管理')).toBeTruthy();
   expect(view.getByText('绑定新电脑')).toBeTruthy();
   await fireEvent.press(view.getByLabelText('返回'));
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
@@ -334,11 +464,120 @@ test('selecting a saved computer restores it and returns to home, without automa
   await fireEvent.press(view.getByLabelText('连接电脑'));
   await fireEvent.press(view.getByLabelText('选择电脑 工作电脑'));
   await view.rerender(<RemoteScreen visible />);
-  expect(mockUseConnection).toHaveBeenCalledWith('paired');
+  expect(mockUseConnection).toHaveBeenCalledWith('paired', false, expect.objectContaining({stillWanted:expect.any(Function)}));
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
   expect(view.queryByText('准备连接')).toBeNull();
   expect(mockLoadAgents).not.toHaveBeenCalled();
   expect(mockSetApi).not.toHaveBeenCalled();
+});
+
+test('a computer with backup stations asks for an explicit connection before switching', async () => {
+  const primary = { ...readyState().connections[0], computerId: 'physical-work' };
+  const backup = { ...primary, id: 'offline-backup', deviceId: 'pc-backup', hubUrl: 'https://backup.example/salcara-hub/v1' };
+  mockRemote = { ...unpairedState(), connections: [backup, primary] };
+  mockProbeConnections.mockResolvedValue({ paired: 'online', 'offline-backup': 'unreachable' });
+  mockUseConnection.mockImplementation(async () => { mockRemote = { ...readyState(), connections: [backup, primary] }; });
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('连接电脑'));
+  await fireEvent.press(view.getByLabelText('选择电脑 工作电脑'));
+  expect(mockUseConnection).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByLabelText('切换到中转站 station.example pc-1'));
+  expect(mockUseConnection).toHaveBeenCalledWith('paired', false, expect.objectContaining({stillWanted:expect.any(Function)}));
+  expect(mockUseConnection).not.toHaveBeenCalledWith('offline-backup');
+});
+
+test('opening a Work Agent uses the computer selected on the homepage and shows its Work directory', async () => {
+  const first = readyState();
+  const second = readyState();
+  const secondHub = 'https://station-two.example/salcara-hub/v1';
+  second.connectionId = 'paired-secondary'; second.selectedHubUrl = secondHub;
+  second.connections = [{ id: 'paired-secondary', deviceId: 'pc-2', deviceName: '另一台电脑', hubUrl: secondHub, pairedAt: 2, computerId: 'physical-pc-2' }];
+  second.devices = [{ ...first.devices[0], deviceId: 'pc-2', name: '另一台电脑' }];
+  second.agents = { 'pc-2': { ...first.agents['pc-1'], list: [agent('codex', 'Codex', 'codex')], apis: [
+    { id: 'api_secondary', name: '第二台主力', models: ['fixture-model'] },
+    { id: 'api_spare', name: '第二台备用', models: ['fixture-model'] },
+  ] } };
+  second.agents['pc-2'].list[0].api = { ...second.agents['pc-2'].list[0].api, name: '第二台主力', accountId: 'api_secondary' };
+  second.sessions = { 'pc-2': { list: [{ sessionKey: 'codex:work-secondary', tool: 'codex', client: 'Codex CLI', title: '另一台电脑的工作任务', cwd: '', updatedAt: 4,
+    status: 'idle', controllable: true, controlSurface: 'cli', workspaceMode: 'work' }], loading: false, loaded: true } };
+  mockRemote = { ...first, connections: [...first.connections, { id: 'paired-secondary', deviceId: 'pc-2', deviceName: '另一台电脑', hubUrl: secondHub, pairedAt: 2, computerId: 'physical-pc-2' }], devices: [...first.devices, ...second.devices] };
+  mockUseConnection.mockImplementation(async () => { mockRemote = second; });
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('Work'));
+  await fireEvent.press(view.getByLabelText('连接电脑'));
+  await fireEvent.press(view.getByLabelText('选择电脑 另一台电脑'));
+  await view.rerender(<RemoteScreen visible />);
+  expect(view.getByLabelText('连接电脑').props.accessibilityHint).toContain('另一台电脑');
+  expect(view.getByText('2 个 API · 电脑密钥库')).toBeTruthy();
+  expect(view.queryByText('Codex 主力 API')).toBeNull();
+  expect(view.queryByText('修复购物车')).toBeNull();
+  await fireEvent.press(view.getByLabelText('API 管理'));
+  expect(view.getByText('当前电脑 API：pc-2')).toBeTruthy();
+  expect(view.getAllByText('第二台主力').length).toBeGreaterThan(0);
+  expect(view.getByText('第二台备用')).toBeTruthy();
+  expect(view.queryByText('主力')).toBeNull();
+  await fireEvent.press(view.getByLabelText('返回 API 资源库'));
+
+  await fireEvent.press(view.getByLabelText('打开 Codex'));
+  expect(view.getByText('第二台主力')).toBeTruthy();
+  expect(view.getByText('另一台电脑的工作任务')).toBeTruthy();
+  expect(view.queryByText('切换电脑')).toBeNull();
+  expect(view.queryByText('准备连接')).toBeNull();
+  expect(mockUseConnection).toHaveBeenCalledWith('paired-secondary', false, expect.objectContaining({stillWanted:expect.any(Function)}));
+  expect(view.queryByText('修复购物车')).toBeNull();
+  expect(mockThreadProps.visible).toBe(false);
+}, 15_000);
+
+test('switching computers disables missing Agents and opens only the new computer directory', async () => {
+  const first = readyState();
+  const secondHub = 'https://station-two.example/salcara-hub/v1';
+  const secondConnection = { id: 'paired-secondary', deviceId: 'pc-2', deviceName: '另一台电脑', hubUrl: secondHub, pairedAt: 2 };
+  const second: RemoteState = { ...first, connectionId: secondConnection.id, selectedHubUrl: secondHub,
+    connections: [...first.connections, secondConnection],
+    devices: [{ ...first.devices[0], deviceId: 'pc-2', name: '另一台电脑' }],
+    agents: { 'pc-2': { list: [{ ...agent('claude', 'Claude Code', 'claude'),
+      api: { ...agent('claude', 'Claude Code', 'claude').api, name: '第二台 Claude API', accountId: 'api_pc2' } }],
+      apis: [{ id: 'api_pc2', name: '第二台 Claude API', models: ['fixture-model'] }], loading: false, loaded: true } },
+    sessions: { 'pc-2': { list: [{ sessionKey: 'claude:work-pc2', tool: 'claude', client: 'Claude Code', title: '第二台的 Work 会话',
+      cwd: '', updatedAt: 5, status: 'idle', controllable: true, controlSurface: 'cli', workspaceMode: 'work' }], loading: false, loaded: true } } };
+  mockRemote = { ...first, connections: second.connections, devices: [...first.devices, ...second.devices] };
+  mockUseConnection.mockImplementation(async () => { mockRemote = second; });
+
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('Work'));
+  await fireEvent.press(view.getByLabelText('连接电脑'));
+  await fireEvent.press(view.getByLabelText('选择电脑 另一台电脑'));
+  await view.rerender(<RemoteScreen visible />);
+  expect(view.getByLabelText('打开 Codex').props.accessibilityState.disabled).toBe(true);
+  expect(view.getByLabelText('打开 Claude Code').props.accessibilityState.disabled).toBe(false);
+  expect(view.getByText('第二台 Claude API')).toBeTruthy();
+  expect(view.queryByText('修复购物车')).toBeNull();
+
+  await fireEvent.press(view.getByLabelText('项目与会话'));
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  expect(view.getByText('第二台 Claude API')).toBeTruthy();
+  expect(view.getByText('第二台的 Work 会话')).toBeTruthy();
+  expect(view.queryByText('修复购物车')).toBeNull();
+  expect(mockThreadProps.visible).toBe(false);
+}, 15_000);
+
+test('computer manager renames a phone-only label and confirms one-computer revocation', async () => {
+  mockRemote = readyState();
+  mockRenameRemote.mockClear(); mockRevokeById.mockClear();
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('连接电脑'));
+  await fireEvent.press(view.getByLabelText('管理设备 工作电脑'));
+  await fireEvent.press(view.getByText('编辑设备名称'));
+  await fireEvent.changeText(view.getByLabelText('电脑备注名'), '客厅主机');
+  await fireEvent.press(view.getByText('保存'));
+  expect(mockRenameRemote).toHaveBeenCalledWith('paired', '客厅主机');
+
+  await fireEvent.press(view.getByLabelText('管理设备 工作电脑'));
+  await fireEvent.press(view.getByText('删除中转站连接'));
+  const revokeAction = mockMenuActions.find(action => action.label === '删除连接');
+  expect(revokeAction).toBeTruthy();
+  await act(async () => { revokeAction!.onPress(); });
+  expect(mockRevokeById).toHaveBeenCalledWith('paired');
 });
 
 test.each(['missing-device', 'offline-device'] as const)('selecting the current paired computer retries restoration when it has a %s', async (condition) => {
@@ -354,10 +593,11 @@ test.each(['missing-device', 'offline-device'] as const)('selecting the current 
   await fireEvent.press(view.getByLabelText('选择电脑 工作电脑'));
   await view.rerender(<RemoteScreen visible />);
   expect(mockUseConnection).toHaveBeenCalledTimes(1);
-  expect(mockUseConnection).toHaveBeenCalledWith('paired');
+  expect(mockUseConnection).toHaveBeenCalledWith('paired', false, expect.objectContaining({stillWanted:expect.any(Function)}));
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  expect(view.getByText('准备连接')).toBeTruthy();
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  expect(view.queryByText('准备连接')).toBeNull();
   expect(view.getByText('Codex 主力 API')).toBeTruthy();
   expect(mockSetApi).not.toHaveBeenCalled();
 });
@@ -386,47 +626,68 @@ test('direct binding scanner does not repeat the saved computer list from manage
   expect(mockUseConnection).not.toHaveBeenCalled();
 });
 
-test('Agent confirmation shows the chosen tool once and only offers alternatives on request', async () => {
+test('Agent entry opens its directory directly and switching returns home to choose the next Agent', async () => {
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  expect(view.getAllByRole('radio')).toHaveLength(1);
-  expect(view.getByRole('radio', { name: 'Codex' })).toBeTruthy();
-  expect(view.queryByRole('radio', { name: 'Claude Code' })).toBeNull();
-  await fireEvent.press(view.getByLabelText('更换 Agent'));
-  await fireEvent.press(view.getByRole('radio', { name: 'Claude Code' }));
-  expect(view.getAllByRole('radio')).toHaveLength(1);
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  expect(view.getByText('修复购物车')).toBeTruthy();
+  expect(view.queryByRole('radio')).toBeNull();
+  await fireEvent.press(view.getByLabelText('返回'));
+  expect(view.getByLabelText('打开 Codex')).toBeTruthy();
+  expect(view.getByLabelText('打开 Claude Code')).toBeTruthy();
+  expect(view.queryByTestId('remote-workspace')).toBeNull();
+  await fireEvent.press(view.getByLabelText('打开 Claude Code'));
+  expect(view.getByText('终端 Claude 项目')).toBeTruthy();
+  expect(view.queryByText('修复购物车')).toBeNull();
+  expect(view.queryByRole('radio')).toBeNull();
+  expect(view.queryByText('准备连接')).toBeNull();
   expect(view.getByText('Claude Code 主力 API')).toBeTruthy();
   expect(mockSetApi).not.toHaveBeenCalled();
 });
 
-test('connecting locks Agent, computer and API choices so one request cannot enter a different tool', async () => {
-  let finish!: () => void;
-  mockLoadAgents.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+test.each(['existing', 'new'] as const)('switching Agent clears the %s conversation and rejects former directory settings', async kind => {
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  await fireEvent.press(view.getByText('连接'));
-  expect(view.getByRole('radio', { name: 'Codex' }).props.accessibilityState.disabled).toBe(true);
-  expect(view.getByLabelText('更换 Agent').props.accessibilityState.disabled).toBe(true);
-  expect(view.getByLabelText('更换 API').props.accessibilityState.disabled).toBe(true);
-  await fireEvent.press(view.getByLabelText('更换 Agent'));
-  expect(view.queryByRole('radio', { name: 'Claude Code' })).toBeNull();
-  await act(async () => finish());
-  expect(mockThreadProps.agent?.id).toBe('codex');
-  expect(view.getByText('新对话')).toBeTruthy();
+  const oldSettings = view.getByLabelText('API 管理').props.onPress as () => void;
+  await fireEvent.press(view.getByLabelText(kind === 'existing' ? '修复购物车' : '新建 Code 对话'));
+  expect(mockThreadProps.visible).toBe(true);
+  await act(async () => mockThreadProps.onClose());
+  await fireEvent.press(view.getByLabelText('返回'));
+  expect(view.getByLabelText('打开 Claude Code')).toBeTruthy();
+  expect(mockThreadProps).toMatchObject({ visible: false, sessionKey: null });
+  await fireEvent.press(view.getByLabelText('打开 Claude Code'));
+  mockLoadAgents.mockClear(); mockLoadSessions.mockClear();
+  await act(async () => oldSettings());
+  expect(view.queryByText('电脑 API 资源库')).toBeNull();
+  expect(view.getByText('终端 Claude 项目')).toBeTruthy();
+  expect(mockThreadProps).toMatchObject({ visible: false, sessionKey: null, agent: { id: 'claude' } });
+  expect(mockLoadAgents).not.toHaveBeenCalled(); expect(mockLoadSessions).not.toHaveBeenCalled();
+  expect(mockSetApi).not.toHaveBeenCalled();
 });
 
 test.each([
   ['Codex', 'codex'], ['Claude Code', 'claude'], ['Claude Desktop', 'claude-desktop'],
-] as const)('home %s card opens that Agent and API confirmation without applying a key', async (name, id) => {
+] as const)('home %s card opens the matching Agent directory without applying a key', async (name, id) => {
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText(`打开 ${name}`));
-  expect(view.getByRole('radio', { name }).props.accessibilityState.checked).toBe(true);
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
   expect(view.getByText(`${name} 主力 API`)).toBeTruthy();
   expect(mockThreadProps.agent?.id).toBe(id);
   expect(mockThreadProps.visible).toBe(false);
   expect(mockSetApi).not.toHaveBeenCalled();
+  expect(view.queryByRole('radio')).toBeNull();
   await fireEvent.press(view.getByLabelText('返回'));
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
+});
+
+test('an Agent removed from the live computer catalog shows a clear recoverable state', async () => {
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('打开 Codex'));
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  mockRemote = { ...mockRemote, agents: { ...mockRemote.agents, 'pc-1': { ...mockRemote.agents['pc-1'], list: [] } } };
+  await view.rerender(<RemoteScreen visible />);
+  expect(view.getByText('Agent 暂不可用')).toBeTruthy();
+  expect(view.getByLabelText('返回')).toBeTruthy();
 });
 
 test('project and session entry sends an unpaired user to computers, not straight to scanner', async () => {
@@ -437,25 +698,31 @@ test('project and session entry sends an unpaired user to computers, not straigh
   expect(view.queryByText('扫描二维码')).toBeNull();
 });
 
-test('project and session entry keeps the existing Agent/API confirmation before the workspace', async () => {
+test('project and session entry opens the selected Agent directory directly', async () => {
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('项目与会话'));
-  expect(view.getByText('准备连接')).toBeTruthy();
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  expect(view.getByText('修复购物车')).toBeTruthy();
+  expect(view.queryByText('准备连接')).toBeNull();
   expect(view.queryByText('新对话')).toBeNull();
-  await fireEvent.press(view.getByText('连接'));
-  expect(view.getByText('新对话')).toBeTruthy();
 });
 
-test('return follows thread, workspace, API confirmation, then home without unpairing', async () => {
+test('API management closes to the original Agent directory before returning home without unpairing', async () => {
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  await fireEvent.press(view.getByText('连接'));
   await fireEvent.press(view.getByText('修复购物车'));
   expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'codex:app' });
   await act(async () => mockThreadProps.onClose());
   expect(mockThreadProps.visible).toBe(false);
-  expect(view.getByText('新对话')).toBeTruthy();
-  // The conversation list returns straight to the homepage.
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  await fireEvent.press(view.getByLabelText('API 管理'));
+  expect(view.getByText('电脑 API 资源库')).toBeTruthy();
+  expect(view.getByText('当前电脑 API：pc-1')).toBeTruthy();
+  await fireEvent.press(view.getByLabelText('返回 API 资源库'));
+  expect(view.queryByText('电脑 API 资源库')).toBeNull();
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  expect(view.getByText('修复购物车')).toBeTruthy();
+  expect(mockThreadProps).toMatchObject({ visible: false, sessionKey: null, agent: { id: 'codex' } });
   await fireEvent.press(view.getByLabelText('返回'));
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
   expect(mockSignOut).not.toHaveBeenCalled();
@@ -468,7 +735,7 @@ test('late saved Agent restoration cannot overwrite a user-selected home card', 
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Claude Code'));
   await act(async () => resolveAgent('codex'));
-  expect(view.getByRole('radio', { name: 'Claude Code' }).props.accessibilityState.checked).toBe(true);
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
   expect(mockThreadProps.agent?.id).toBe('claude');
 });
 
@@ -494,12 +761,13 @@ test('home recent session uses its actual Desktop client rather than the last se
 test('a cold recent session opens at once and stays unsendable until fresh Agent/API metadata arrives', async () => {
   let complete!: () => void;
   mockRemote.agents = {};
-  mockLoadAgents.mockImplementation(() => new Promise((resolve) => { complete = () => {
+  const pending = new Promise<void>((resolve) => { complete = () => {
     mockRemote.agents = readyState().agents;
     resolve();
-  }; }));
+  }; });
+  mockLoadAgents.mockImplementation(() => pending);
   const view = await render(<RemoteScreen visible />);
-  expect(mockLoadAgents).not.toHaveBeenCalled();
+  expect(mockLoadAgents).toHaveBeenCalledWith('pc-1');
   await fireEvent.press(view.getByLabelText('桌面 Claude 项目'));
   expect(mockLoadAgents).toHaveBeenCalledWith('pc-1');
   expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'claude:desktop', deviceId: 'pc-1', verifying: true });
@@ -514,7 +782,7 @@ test('a cold recent session opens at once and stays unsendable until fresh Agent
 
 test('failed recent-session Agent metadata keeps the thread readable but never sendable with a fallback login', async () => {
   mockRemote.agents = {};
-  mockLoadAgents.mockRejectedValueOnce(new Error('没有读到 Agent 信息'));
+  mockLoadAgents.mockRejectedValue(new Error('没有读到 Agent 信息'));
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('桌面 Claude 项目'));
   expect(mockLoadAgents).toHaveBeenCalledWith('pc-1');
@@ -569,10 +837,11 @@ test('a station handover with a new credential-scoped device id follows the new 
   await view.rerender(<RemoteScreen visible />);
 
   // If the old local device ID survived the scope change, opening an Agent
-  // would incorrectly fall back to the empty “等待电脑上线” state.
+  // would show the previous computer's project directory.
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  expect(view.getByText('准备连接')).toBeTruthy();
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
   expect(view.queryByText('等待电脑上线')).toBeNull();
+  expect(view.getByText('修复购物车')).toBeTruthy();
 });
 
 test('cold focused Desktop session loads metadata before entering and ignores a late saved Agent', async () => {
@@ -618,40 +887,139 @@ test('a cold focused session resolves its actual Desktop client from a fresh ses
   expect(mockSetApi).not.toHaveBeenCalled();
 });
 
-test('returning to home while connection is pending prevents its late completion opening workspace', async () => {
+test('a shared link reads the exact Codex desktop directory and does not probe the CLI list', async () => {
+  mockRemote.sessions['pc-1'].native = { loaded: false, loading: false, list: [] };
+  mockRemote.focus = { deviceId: 'pc-1', connectionId: 'paired', agentId: 'codex', surface: 'desktop', sessionKey: 'codex:native-link' };
+  mockLoadNative.mockImplementation(async () => {
+    mockRemote.sessions['pc-1'].native = { loaded: true, loading: false,
+      list: [{ sessionKey: 'codex:native-link', tool: 'codex', client: 'Codex App', title: 'Native link', cwd: 'C:\\fixture', updatedAt: 1, status: 'idle', controllable: true, controlSurface: 'desktop' }] };
+  });
+  await render(<RemoteScreen visible />);
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(mockLoadNative).toHaveBeenCalledWith('pc-1');
+  expect(mockLoadSessions).not.toHaveBeenCalled();
+  expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'codex:native-link', agent: { id: 'codex' } });
+});
+
+test('returning home while the session directory is loading prevents a late result reopening it', async () => {
   let complete!: () => void;
-  mockLoadAgents.mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+  mockLoadSessions.mockImplementation(() => new Promise((resolve) => { complete = () => {
+    mockRemote.sessions['pc-1'].list = readyState().sessions['pc-1'].list;
+    resolve();
+  }; }));
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  await fireEvent.press(view.getByText('连接'));
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
   await fireEvent.press(view.getByLabelText('返回'));
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
   await act(async () => complete());
   expect(view.getByLabelText('打开 Codex')).toBeTruthy();
-  expect(view.queryByText('新对话')).toBeNull();
+  expect(view.queryByTestId('remote-workspace')).toBeNull();
   expect(mockThreadProps.visible).toBe(false);
 });
 
-test('a late previous-station connection cannot reopen workspace at a new station with the same device id', async () => {
+test('a late previous-station directory result cannot open its session at a new station', async () => {
   let complete!: () => void;
-  mockLoadAgents.mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+  mockLoadSessions.mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  await fireEvent.press(view.getByText('连接'));
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
   mockRemote = { ...readyState(), connectionId: 'different-pair', selectedHubUrl: 'https://other.example/salcara-hub/v1',
     connections: [{ ...readyState().connections[0], id: 'different-pair', hubUrl: 'https://other.example/salcara-hub/v1' }],
     sessions: {}, agents: {} };
   await view.rerender(<RemoteScreen visible />);
   await act(async () => complete());
-  expect(view.queryByText('新对话')).toBeNull();
-  expect(view.queryByText('修复购物车')).toBeNull();
+  expect(view.queryByTestId('remote-workspace')).toBeNull();
+  expect(view.getByLabelText('打开 Codex')).toBeTruthy();
   expect(mockThreadProps.visible).toBe(false);
 });
 
-test('offline computer remains manageable but cannot start a remote workspace', async () => {
+test('offline computer still shows cached sessions but cannot start a remote conversation', async () => {
   mockRemote.devices[0].online = false;
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  expect(view.getByRole('button', { name: '等待电脑上线' }).props.accessibilityState.disabled).toBe(true);
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  expect(view.getByText('修复购物车')).toBeTruthy();
+  expect(view.getByLabelText('新建 Code 对话').props.accessibilityState.disabled).toBe(true);
+});
+
+test('session routing preserves an exact registered extension and rejects mismatched or unregistered namespaces', () => {
+  const hermes = agent('hermes', 'Hermes', 'hermes');
+  expect(sessionAgent({ sessionKey: 'hermes:task', tool: 'hermes', client: 'Claude Desktop' }, [hermes])).toBe('hermes');
+  expect(sessionAgent({ sessionKey: 'hermes:task', tool: 'hermes', client: 'Hermes' })).toBeNull();
+  expect(sessionAgent({ sessionKey: 'hermes:task', tool: 'claude', client: 'Claude Code' }, [hermes])).toBeNull();
+  expect(sessionAgent({ sessionKey: 'codex:task', tool: 'claude', client: 'Claude Desktop' })).toBeNull();
+  expect(sessionAgent({ sessionKey: 'claude-desktop:local-fixture', tool: 'claude', client: 'Claude Desktop' })).toBe('claude-desktop');
+  expect(sessionAgent({ sessionKey: 'hermes:', tool: 'hermes', client: 'Hermes' }, [hermes])).toBeNull();
+  expect(sessionAgent({ sessionKey: 'hermes:task|other', tool: 'hermes', client: 'Hermes' }, [hermes])).toBeNull();
+  expect(sessionAgent({ sessionKey: 'hermes:task\n', tool: 'hermes', client: 'Hermes' }, [hermes])).toBeNull();
+});
+
+test('a registered extension recent conversation never mounts a Claude or Codex composer', async () => {
+  mockRemote.agents['pc-1'].list.push(agent('hermes', 'Hermes', 'hermes'));
+  mockRemote.sessions['pc-1'].list.unshift({ ...readyState().sessions['pc-1'].list[0], sessionKey: 'hermes:task', tool: 'hermes', client: 'Hermes', title: 'Hermes fixture', updatedAt: 4 });
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('Hermes fixture'));
+  expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'hermes:task', agent: { id: 'hermes', tool: 'hermes' } });
+  expect(mockSetApi).not.toHaveBeenCalled();
+});
+
+test.each(['unregistered', 'wrong-tool'] as const)('a %s recent conversation cannot inherit a built-in composer', async variant => {
+  mockRemote.sessions['pc-1'].list.unshift({ ...readyState().sessions['pc-1'].list[0], sessionKey: 'hermes:task', tool: variant === 'wrong-tool' ? 'codex' : 'hermes', client: 'Hermes', title: 'Unsafe fixture', updatedAt: 4 });
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('Unsafe fixture'));
+  expect(mockThreadProps.visible).toBe(false);
   expect(mockLoadAgents).not.toHaveBeenCalled();
+  expect(mockLoadSessions).not.toHaveBeenCalled();
+});
+
+test('a cold extension focus waits for its exact profile before mounting and keeps the requested namespace', async () => {
+  let complete!: () => void;
+  mockRemote.agents = {};
+  mockRemote.focus = { deviceId: 'pc-1', sessionKey: 'hermes:task' };
+  const pending = new Promise<void>(resolve => { complete = () => {
+    mockRemote.agents = { 'pc-1': { ...readyState().agents['pc-1'], list: [...readyState().agents['pc-1'].list, agent('hermes', 'Hermes', 'hermes')] } };
+    resolve();
+  }; });
+  mockLoadAgents.mockImplementation(() => pending);
+  const view = await render(<RemoteScreen visible />);
+  expect(mockLoadAgents).toHaveBeenCalledWith('pc-1');
+  expect(mockThreadProps.visible).toBe(false);
+  await act(async () => complete());
+  await view.rerender(<RemoteScreen visible />);
+  expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'hermes:task', agent: { id: 'hermes' } });
+});
+
+test('a late cold extension profile cannot select a composer after a station change', async () => {
+  let complete!: () => void;
+  mockRemote.agents = {};
+  mockRemote.focus = { deviceId: 'pc-1', sessionKey: 'hermes:task' };
+  mockLoadAgents.mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+  const view = await render(<RemoteScreen visible />);
+  mockRemote = { ...readyState(), connectionId: 'different-pair', selectedHubUrl: 'https://other.example/salcara-hub/v1', agents: {}, sessions: {} };
+  await view.rerender(<RemoteScreen visible />);
+  await act(async () => complete());
+  expect(mockThreadProps.visible).toBe(false);
+});
+
+test('Agent directory keeps an exact extension profile instead of substituting a built-in Agent', async () => {
+  mockLastAgent.mockImplementation(async () => 'hermes');
+  mockRemote.agents['pc-1'].list.push(agent('hermes', 'Hermes', 'hermes'));
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('项目与会话'));
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  expect(view.getByText('Hermes 主力 API')).toBeTruthy();
+  expect(view.queryByText('Codex 主力 API')).toBeNull();
+});
+
+test('a saved Agent absent from this computer falls back to an available Agent in its own catalog', async () => {
+  mockLastAgent.mockImplementation(async () => 'hermes');
+  const view = await render(<RemoteScreen visible />);
+  await fireEvent.press(view.getByLabelText('项目与会话'));
+  expect(view.queryByText('准备连接')).toBeNull();
+  expect(view.getByTestId('remote-workspace')).toBeTruthy();
+  expect(view.getByText('Codex 主力 API')).toBeTruthy();
+  expect(view.queryByText('Hermes 主力 API')).toBeNull();
+  expect(mockLoadAgents).not.toHaveBeenCalled();
+  expect(mockSetApi).not.toHaveBeenCalled();
 });

@@ -16,6 +16,7 @@ expo-env.d.ts
 *.jks
 *.keystore
 google-services*.json
+GoogleService-Info*.plist
 firebase-service-account*.json
 /.claude/
 .release/

@@ -17,9 +17,10 @@ export interface DictationControls {
   onCancel: () => void;
 }
 
-export function Composer({ editing, value, onChangeText, images, documents, hasMask, busy, onSend, onStop, onOpenAttach, onRemoveImage, onRemoveDocument, onEditMask, inputRef, placeholder, dictation, onOpenLive, research = false, onClearResearch, tone = 'cool' }: {
+export function Composer({ editing, value, onChangeText, images, documents, hasMask, busy, onSend, onStop, onOpenAttach, onRemoveImage, onRemoveDocument, onEditMask, inputRef, placeholder, dictation, onOpenLive, research = false, onClearResearch, modelLabel, onOpenModel, tone = 'cool' }: {
   value: string; onChangeText: (value: string) => void;
   dictation?: DictationControls; onOpenLive?: () => void;
+  modelLabel?: string; onOpenModel?: () => void;
   /** Deep research is on for the next message. */
   research?: boolean; onClearResearch?: () => void;
   /** The chat space uses warm colours. */
@@ -71,10 +72,7 @@ export function Composer({ editing, value, onChangeText, images, documents, hasM
         </Pressable>
       </View> : null}
       {dictating && dictation ? <DictationBar dictation={dictation} gradient={gradient} /> : null}
-      <View style={[styles.row, dictating && { display: 'none' }]}>
-        <MotionPressable accessibilityRole="button" accessibilityLabel="添加图片或文件" scaleTo={0.88} hitSlop={5} onPress={onOpenAttach} style={[styles.plus, warmTone && { backgroundColor: colors.blueSurface }]}>
-          <Icon name="plus" size={21} color={colors.text} strokeWidth={1.8} />
-        </MotionPressable>
+      <View style={[styles.inputRow, dictating && { display: 'none' }]}>
         <TextInput
           ref={inputRef}
           accessibilityLabel="消息"
@@ -89,6 +87,16 @@ export function Composer({ editing, value, onChangeText, images, documents, hasM
           textAlignVertical="center"
           style={styles.input}
         />
+      </View>
+      <View style={[styles.row, dictating && { display: 'none' }]}>
+        <MotionPressable accessibilityRole="button" accessibilityLabel="添加图片或文件" scaleTo={0.88} hitSlop={5} onPress={onOpenAttach} style={[styles.plus, warmTone && { backgroundColor: colors.blueSurface }]}>
+          <Icon name="plus" size={21} color={colors.text} strokeWidth={1.8} />
+        </MotionPressable>
+        {modelLabel && onOpenModel ? <Pressable accessibilityRole="button" accessibilityLabel={`切换模型，当前为 ${modelLabel}`} onPress={onOpenModel} style={styles.modelButton}>
+          <Text numberOfLines={1} style={styles.modelText}>{modelLabel}</Text>
+          <Icon name="chevronDown" size={13} color={colors.subtle} strokeWidth={2} />
+        </Pressable> : null}
+        <View style={{ flex: 1 }} />
         {dictation ? <MotionPressable accessibilityRole="button" accessibilityLabel="语音输入" scaleTo={0.86} hitSlop={5} onPress={dictation.onStart} style={styles.mic}>
           <Icon name="mic" size={21} color={colors.textSecondary} strokeWidth={1.8} />
         </MotionPressable> : null}
@@ -202,8 +210,8 @@ const useStyles = themed((c, d) => StyleSheet.create({
   editText: { flex: 1, fontSize: 12.5, lineHeight: 17, color: c.primaryDeep },
   editCancel: { fontSize: 13, fontWeight: '600', color: c.textSecondary },
   limit: { fontSize: 11.5, lineHeight: 16, color: c.warningText, paddingHorizontal: 16, paddingBottom: 8 },
-  wrap: { paddingHorizontal: 12, paddingTop: 6, paddingBottom: 8 },
-  card: { backgroundColor: colors.card, borderRadius: 28, borderWidth: 1, ...shadow.soft },
+  wrap: { paddingHorizontal: 12, paddingTop: 6, paddingBottom: 8, width: '100%', maxWidth: 760, alignSelf: 'center' },
+  card: { backgroundColor: colors.card, borderRadius: 22, borderWidth: 1, ...shadow.soft, shadowOpacity: 0.045 },
   tray: { paddingHorizontal: 12, paddingTop: 12, gap: 8, alignItems: 'center' },
   thumbWrap: { width: 64, height: 64, borderRadius: 16, overflow: 'hidden', backgroundColor: colors.surface },
   thumb: { width: 64, height: 64 },
@@ -211,12 +219,15 @@ const useStyles = themed((c, d) => StyleSheet.create({
   maskButton: { position: 'absolute', left: 5, bottom: 5, flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, height: 20, borderRadius: 10, backgroundColor: c.card },
   maskActive: { backgroundColor: colors.primary },
   maskText: { fontSize: 10, fontWeight: '600', color: colors.text },
-  row: { flexDirection: 'row', alignItems: 'flex-end', gap: 6, paddingHorizontal: 8, paddingVertical: 8 },
+  inputRow: { paddingHorizontal: 12, paddingTop: 10 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingTop: 4, paddingBottom: 8 },
   modes: { flexDirection: 'row', paddingHorizontal: 12, paddingTop: 10 },
   mode: { flexDirection: 'row', alignItems: 'center', gap: 5, height: 28, paddingHorizontal: 11, borderRadius: 14, backgroundColor: colors.primarySoft },
   modeText: { color: colors.primaryDeep, fontSize: 13, fontWeight: '600' },
-  plus: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
-  input: { flex: 1, minHeight: 38, maxHeight: 160, color: colors.text, paddingHorizontal: 6, paddingTop: 8, paddingBottom: 8, fontSize: 16, lineHeight: 22 },
+  plus: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
+  modelButton: { minWidth: 0, maxWidth: 150, minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, borderRadius: 18 },
+  modelText: { flexShrink: 1, color: colors.textMuted, fontSize: 12.5, fontWeight: '500' },
+  input: { minHeight: 30, maxHeight: 160, color: colors.text, paddingHorizontal: 4, paddingTop: 4, paddingBottom: 4, fontSize: 16, lineHeight: 23 },
   send: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   sendIdle: { backgroundColor: colors.surfaceStrong, borderRadius: 19 },
   sendBusy: { flex: 1, backgroundColor: colors.text, borderRadius: 19 },

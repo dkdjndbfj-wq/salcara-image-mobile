@@ -12,28 +12,32 @@ import { RemoteScreen } from './src/remote/RemoteScreen';
 import { useRemoteLink } from './src/remote/useRemoteLink';
 import { AppProvider, useApp } from './src/state/AppContext';
 import { loadAppearance } from './src/appearance';
-import { useScheme } from './src/theme';
+import { setAppearancePreference, useScheme } from './src/theme';
 
 void SplashScreen.preventAutoHideAsync();
 // The intro's first frame matches the splash, so only a very short cross-fade is needed.
 SplashScreen.setOptions({ duration: 120, fade: true });
 
 function AppContent() {
-  const { ready, space, switchSpace } = useApp();
-  // Approval alerts from the computer jump straight into the 编程 space.
+  const { space, switchSpace } = useApp();
+  // Tapping a remote task alert opens the 编程 space and its matching thread.
   useRemoteLink(() => switchSpace('remote'));
   const [intro, setIntro] = useState(true);
   const hideSplash = useCallback(() => { void SplashScreen.hideAsync().catch(() => undefined); }, []);
   const finishIntro = useCallback(() => setIntro(false), []);
   const scheme = useScheme();
   // 设置 → 外观 (follow the system unless the person picked light or dark).
-  useEffect(() => { void loadAppearance(); }, []);
+  useEffect(() => {
+    // Keep the assistant workspace bright; other spaces follow the saved appearance choice.
+    if (space === 'assistant') setAppearancePreference('light');
+    else void loadAppearance();
+  }, [space]);
 
   return (
     <>
       <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
       <SpaceTransition space={space}>{(shown) => (shown === 'companion' ? <CompanionScreen /> : shown === 'remote' ? <RemoteScreen /> : <ChatScreen />)}</SpaceTransition>
-      {intro && <LaunchIntro ready={ready} onFirstFrame={hideSplash} onDone={finishIntro} />}
+      {intro && <LaunchIntro onFirstFrame={hideSplash} onDone={finishIntro} />}
     </>
   );
 }

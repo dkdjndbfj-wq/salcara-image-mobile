@@ -42,7 +42,7 @@ test('a locked real native panel hides close affordance and ignores Android back
   expect(close).not.toHaveBeenCalled();
   expect(mockDismiss).not.toHaveBeenCalled();
   await view.rerender(<ProgrammingPanel {...props}><Text>已可关闭</Text></ProgrammingPanel>);
-  await fireEvent.press(view.getByRole('button', { name: '关闭' }));
+  await fireEvent.press(view.getByTestId('programming-panel-backdrop', {includeHiddenElements:true}));
   expect(close).toHaveBeenCalledTimes(1);
   expect(mockDismiss).toHaveBeenCalledTimes(1);
 });

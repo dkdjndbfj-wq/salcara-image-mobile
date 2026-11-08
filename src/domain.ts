@@ -69,6 +69,15 @@ export interface DocumentAttachment {
   kind?: AttachmentKind;
 }
 
+/** One persisted result in a single image-generation request. */
+export interface GeneratedImage {
+  id: string;
+  uri: string | null;
+  remoteUrl?: string | null;
+  status: 'pending' | 'complete' | 'error';
+  error?: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   conversationId: string;
@@ -83,6 +92,9 @@ export interface ChatMessage {
   transparent: boolean;
   imageUri: string | null;
   remoteImageUrl: string | null;
+  /** Requested batch size; old messages without it are single-image requests. */
+  imageCount?: number;
+  generatedImages?: GeneratedImage[];
   references: ReferenceImage[];
   documents?: DocumentAttachment[];
   text?: string | null;

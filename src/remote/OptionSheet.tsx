@@ -5,7 +5,7 @@ import { Icon } from '../components/Icon';
 import { ProgrammingPanel } from './ProgrammingUi';
 import { colors, desk, themed, useDesk } from '../theme';
 
-export interface Option<T extends string> { value: T; label: string; detail?: string; danger?: boolean }
+export interface Option<T extends string> { value: T; label: string; detail?: string; danger?: boolean; disabled?: boolean }
 
 /** A floating panel with one checked choice, used by the remote composer. */
 export function OptionSheet<T extends string>({ visible, title, subtitle, value, options, onSelect, onClose, empty }: {
@@ -17,8 +17,8 @@ export function OptionSheet<T extends string>({ visible, title, subtitle, value,
     <View style={styles.list}>
       {options.length ? options.map((option, index) => {
         const selected = option.value === value;
-        return <Pressable key={`${option.value}:${index}`} accessibilityRole="radio" accessibilityState={{ checked: selected }} onPress={() => onSelect(option.value)}
-          style={({ pressed }: { pressed: boolean }) => [styles.row, selected && (option.danger ? styles.selectedDanger : styles.selected), pressed && !selected && styles.pressed]}>
+        return <Pressable key={`${option.value}:${index}`} accessibilityRole="radio" accessibilityState={{ checked: selected, disabled: option.disabled }} disabled={option.disabled} onPress={() => { if (!option.disabled) onSelect(option.value); }}
+          style={({ pressed }: { pressed: boolean }) => [styles.row, selected && (option.danger ? styles.selectedDanger : styles.selected), option.disabled && { opacity: 0.5 }, pressed && !selected && styles.pressed]}>
           <View style={[styles.radio, selected && { borderColor: option.danger ? dk.bad : dk.ink, backgroundColor: option.danger ? dk.bad : dk.ink }]}>
             {selected ? <Icon name="check" size={11} color={dk.onInk} strokeWidth={2.6} /> : null}
           </View>

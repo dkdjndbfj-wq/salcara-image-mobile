@@ -1,31 +1,26 @@
 import React from 'react';
-import { act, fireEvent, render } from '@testing-library/react-native';
-import { ApiPicker, InlineApiPicker } from '../remote/ApiPicker';
+import { act, fireEvent, render, within } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
+import { ApiChoiceMenu, ApiPicker, InlineApiPicker } from '../remote/ApiPicker';
 import type { AgentProfile, RemoteApiOption } from '../remote/client';
+
+const mockRowPress = new Map<string, () => void>();
+jest.mock('react-native', () => {
+  const React = require('react'); const native = jest.requireActual('react-native');
+  return Object.create(Object.getPrototypeOf(native), { ...Object.getOwnPropertyDescriptors(native), Pressable: { configurable: true, enumerable: true, value: React.forwardRef((props: any, ref: any) => {
+    if (props.accessibilityRole === 'radio' || props.accessibilityRole === 'button') mockRowPress.set(props.accessibilityLabel, props.onPress);
+    return React.createElement(native.Pressable, { ...props, ref });
+  }) } });
+});
 
 let mockConnectionId = 'station-a';
 const mockSetApi = jest.fn();
 const mockToast = jest.fn();
-let mockSubmit: () => void;
-// Keep the controllable callback host for lifecycle tests; the real gradient
-// action, loading gate and accessibility contract have their own UI suite.
-jest.mock('../remote/ProgrammingUi', () => {
-  const React = require('react'); const { Pressable, Text, View } = require('react-native');
-  return { ...jest.requireActual('../remote/ProgrammingUi'),
-    ProgrammingSheet: ({ visible, title, children, footer, onClose, dismissible = true }: { visible: boolean; title: string; children: unknown; footer: unknown; onClose: () => void; dismissible?: boolean }) => visible
-      ? React.createElement(View, null,
-        React.createElement(Pressable, { testID: 'api-picker-backdrop', disabled: !dismissible, onPress: () => { if (dismissible) onClose(); } }),
-        React.createElement(Text, null, title), children, footer)
-      : null,
-    ProgrammingAction: ({ label, onPress, disabled, loading }: { label: string; onPress: () => void; disabled?: boolean; loading?: boolean }) => {
-    mockSubmit = onPress;
-    return React.createElement(Pressable, { accessibilityRole: 'button', accessibilityLabel: label,
-      accessibilityState: { disabled: Boolean(disabled || loading), busy: Boolean(loading) }, disabled: Boolean(disabled || loading), onPress }, React.createElement(Text, null, label));
-  } };
-});
+const mockApiTargets = jest.fn((): Array<{ id: string; hubUrl: string; deviceId: string; computerId: string; deviceName: string; pairedAt: number }> => []);
 jest.mock('../remote/store', () => ({
   useRemote: () => ({ connectionId: mockConnectionId }),
   setAgentApi: (...args: unknown[]) => mockSetApi(...args),
+  apiStationChoices: () => mockApiTargets(),
 }));
 jest.mock('../components/Icon', () => ({ Icon: () => null }));
 jest.mock('../components/ui', () => {
@@ -39,7 +34,6 @@ jest.mock('../components/ui', () => {
         React.createElement(Text, null, title), children, footer)
       : null,
     PrimaryButton: ({ label, onPress, disabled, loading }: { label: string; onPress: () => void; disabled?: boolean; loading?: boolean }) => {
-      mockSubmit = onPress;
       return React.createElement(Pressable, {
         accessibilityRole: 'button', accessibilityLabel: label,
         accessibilityState: { disabled: Boolean(disabled || loading), busy: Boolean(loading) },
@@ -68,196 +62,260 @@ function deferred<T>() {
 function fixture(overrides: Partial<React.ComponentProps<typeof ApiPicker>> = {}) {
   return { visible: true, deviceId: 'pc-a', agent, apis, sessionKey: 'codex:original', onClose: jest.fn(), onChanged: jest.fn(), ...overrides };
 }
-beforeEach(() => { jest.clearAllMocks(); mockSetApi.mockReset(); mockConnectionId = 'station-a'; });
+beforeEach(() => { jest.clearAllMocks(); mockRowPress.clear(); mockSetApi.mockReset(); mockApiTargets.mockReset().mockReturnValue([]); mockConnectionId = 'station-a'; });
 
-test('API library is named, concise and never submits merely by opening or choosing a row', async () => {
+test('unsupported official accounts stay disabled and offer an explicit same-computer station choice', async () => {
+  const account: RemoteApiOption = { id: 'official', name: 'Fixture Account', models: [], sourceType: 'official_account',
+    remoteEligibility: { supported: false, reason: 'unsupported', apiRemote: true, accountRemote: false } };
+  mockApiTargets.mockReturnValue([{ id: 'supported-b', hubUrl: 'https://b.example/salcara-hub/v1', deviceId: 'pc-b', computerId: 'same', deviceName: 'Fixture', pairedAt: 1 }]);
+  const props = fixture({ apis: [...apis, account] });
+  mockSetApi.mockResolvedValue(agent);
+  const view = await render(<ApiPicker {...props} />);
+  expect(view.getByRole('radio', { name: 'Fixture Account' }).props.accessibilityState.disabled).toBe(true);
+  expect(view.getByText('本站暂不支持账号远程')).toBeTruthy();
+  await fireEvent.press(view.getByRole('radio', { name: 'Fixture Account' }));
+  expect(mockSetApi).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByLabelText('为 Fixture Account 选择支持的中转站'));
+  await fireEvent.press(view.getByText('b.example'));
+  expect(mockSetApi).toHaveBeenCalledWith('pc-a', 'codex', 'official', '', 'codex:original', 'supported-b');
+});
+
+test('opening, outside dismissal and choosing the current API never write', async () => {
   const props = fixture();
   const view = await render(<ApiPicker {...props} />);
-  expect(view.getByText('更换 API')).toBeTruthy();
-  expect(view.getAllByRole('radio').map((row) => row.props.accessibilityLabel)).toEqual(['跟随电脑', '主力', '备用']);
-  expect(view.getByRole('radio', { name: '主力' }).props.accessibilityState.checked).toBe(true);
+  expect(view.getAllByRole('radio').map(row => row.props.accessibilityLabel)).toEqual(['默认 API', '主力', '备用']);
+  expect(view.queryByText('使用这个设置')).toBeNull();
   expect(view.queryByText('gpt-fixture')).toBeNull();
   expect(view.queryByText('opaque-primary')).toBeNull();
-  expect(view.queryByText('关闭')).toBeNull();
-  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.checked).toBe(true);
-  expect(mockSetApi).not.toHaveBeenCalled();
-  expect(props.onChanged).not.toHaveBeenCalled();
-});
-
-test('outside dismissal cancels the unsaved choice and reopening restores the active API', async () => {
-  const props = fixture();
-  const view = await render(<ApiPicker {...props} />);
-  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  await fireEvent.press(view.getByTestId('api-picker-backdrop'));
+  await fireEvent.press(view.getByTestId('agent-api-menu-backdrop'));
   expect(props.onClose).toHaveBeenCalledTimes(1);
   expect(mockSetApi).not.toHaveBeenCalled();
-  expect(props.onChanged).not.toHaveBeenCalled();
   await view.rerender(<ApiPicker {...props} visible={false} />);
   await view.rerender(<ApiPicker {...props} />);
-  expect(view.getByRole('radio', { name: '主力' }).props.accessibilityState.checked).toBe(true);
-  expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.checked).toBe(false);
+  await fireEvent.press(view.getByRole('radio', { name: '主力' }));
+  expect(props.onClose).toHaveBeenCalledTimes(2);
+  expect(mockSetApi).not.toHaveBeenCalled();
 });
 
-test('confirmation sends only an opaque API handle and retains the original conversation', async () => {
+test('a long API menu stays bounded with a fixed default choice and selects every saved handle without search', async () => {
+  const options = Array.from({ length: 24 }, (_, index) => ({ id: `saved-${index}`, name: `API ${index}`, models: [] }));
+  const select = jest.fn(), close = jest.fn();
+  const view = await render(<ApiChoiceMenu visible apis={options} current="saved-0" onSelect={select} onClose={close} />);
+  type MenuNode = NonNullable<ReturnType<typeof view.toJSON>>;
+  const descendants = (node: MenuNode): MenuNode[] => [node, ...node.children.flatMap(child => typeof child === 'string' ? [] : descendants(child))];
+  const nodes = descendants(view.toJSON()!);
+  expect(nodes.some(node => node.type.includes('TextInput'))).toBe(false);
+  expect(view.getAllByRole('radio')).toHaveLength(options.length + 1);
+  const menuStyle = StyleSheet.flatten(view.getByTestId('agent-api-menu').props.style);
+  expect(menuStyle.maxHeight).toBeGreaterThan(0);
+  expect(menuStyle.maxHeight).toBeLessThanOrEqual(320);
+  const list = nodes.find(node => node.type.includes('ScrollView') && descendants(node).some(child => child.props.accessibilityLabel === 'API 0'));
+  expect(list).toBeDefined();
+  expect(list!.props.horizontal).not.toBe(true);
+  expect(descendants(list!).some(node => node.props.accessibilityLabel === '默认 API')).toBe(false);
+  expect(within(view.getByTestId('agent-api-menu-default')).getByRole('radio', { name: '默认 API' })).toBeTruthy();
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
+  for (const option of options) await fireEvent.press(view.getByRole('radio', { name: option.name }));
+  expect(select.mock.calls.map(([id]) => id)).toEqual(['', ...options.map(option => option.id)]);
+  expect(close).not.toHaveBeenCalled();
+});
+
+test('a choice sends only its handle and closes after the receipt', async () => {
   const props = fixture();
   const updated = { ...agent, api: { ...agent.api, accountId: 'opaque-backup', name: '备用' } };
   mockSetApi.mockResolvedValue(updated);
   const view = await render(<ApiPicker {...props} />);
   await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
   expect(mockSetApi).toHaveBeenCalledTimes(1);
   expect(mockSetApi).toHaveBeenCalledWith('pc-a', 'codex', 'opaque-backup', '', 'codex:original');
-  expect(props.onChanged).toHaveBeenCalledWith(updated);
+  expect(props.onChanged).toHaveBeenCalledWith(updated, 'opaque-backup');
   expect(props.onClose).toHaveBeenCalledTimes(1);
 });
 
-test('same-tick repeated confirmation and row changes cannot duplicate or mutate a pending submission', async () => {
+test('duplicate presses and dismissal cannot mutate an in-flight choice', async () => {
   const request = deferred<AgentProfile>(); mockSetApi.mockReturnValue(request.promise);
-  const view = await render(<ApiPicker {...fixture()} />);
-  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  const submit = mockSubmit;
-  await act(async () => { submit(); submit(); });
-  await fireEvent.press(view.getByRole('radio', { name: '跟随电脑' }));
-  expect(mockSetApi).toHaveBeenCalledTimes(1);
-  expect(mockSetApi).toHaveBeenCalledWith('pc-a', 'codex', 'opaque-backup', '', 'codex:original');
-  expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.checked).toBe(true);
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.busy).toBe(true);
-  await act(async () => { request.resolve(agent); });
-});
-
-test('an API removed from the current library cannot be submitted', async () => {
-  const props = fixture();
-  const view = await render(<ApiPicker {...props} />);
-  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  await view.rerender(<ApiPicker {...props} apis={[apis[0]]} />);
-  expect(view.queryByRole('radio', { name: '备用' })).toBeNull();
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.disabled).toBe(true);
-  await act(async () => { mockSubmit(); });
-  expect(mockSetApi).not.toHaveBeenCalled();
-  await fireEvent.press(view.getByRole('radio', { name: '主力' }));
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.disabled).toBe(false);
-});
-
-test('a queued old UI press cannot dispatch against a different window scope or a reopened window', async () => {
-  const props = fixture();
-  const view = await render(<ApiPicker {...props} />);
-  const oldSubmit = mockSubmit;
-  await view.rerender(<ApiPicker {...props} deviceId="pc-b" sessionKey="codex:other" />);
-  await act(async () => { oldSubmit(); });
-  expect(mockSetApi).not.toHaveBeenCalled();
-  const beforeReopen = mockSubmit;
-  await view.rerender(<ApiPicker {...props} deviceId="pc-b" sessionKey="codex:other" visible={false} />);
-  await view.rerender(<ApiPicker {...props} deviceId="pc-b" sessionKey="codex:other" />);
-  await act(async () => { beforeReopen(); });
-  expect(mockSetApi).not.toHaveBeenCalled();
-});
-
-test('queued UI presses recheck the latest Key catalog and task block before dispatch', async () => {
-  const props = fixture();
-  const view = await render(<ApiPicker {...props} />);
-  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  const beforeRemoval = mockSubmit;
-  await view.rerender(<ApiPicker {...props} apis={[apis[0]]} />);
-  await act(async () => { beforeRemoval(); });
-  expect(mockSetApi).not.toHaveBeenCalled();
-  await view.rerender(<ApiPicker {...props} />);
-  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  const beforeBlock = mockSubmit;
-  await view.rerender(<ApiPicker {...props} blocked="当前任务进行中" />);
-  await act(async () => { beforeBlock(); });
-  expect(mockSetApi).not.toHaveBeenCalled();
-});
-
-test('pending dismissal is blocked and an external close/reopen keeps the mutation locked until its receipt', async () => {
-  const oldRequest = deferred<AgentProfile>(), newRequest = deferred<AgentProfile>();
-  mockSetApi.mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(newRequest.promise);
-  const props = fixture();
-  const view = await render(<ApiPicker {...props} />);
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
-  await fireEvent.press(view.getByTestId('api-picker-backdrop'));
+  const props = fixture(); const busy = jest.fn();
+  const view = await render(<ApiPicker {...props} onBusyChange={busy} />);
+  const press = mockRowPress.get('备用')!;
+  await act(async () => { press(); press(); });
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
+  await fireEvent.press(view.getByTestId('agent-api-menu-backdrop'));
   expect(props.onClose).not.toHaveBeenCalled();
+  expect(mockSetApi).toHaveBeenCalledTimes(1);
+  expect(view.getByRole('radio', { name: '主力' }).props.accessibilityState.checked).toBe(true);
+  expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.busy).toBe(true);
+  await act(async () => request.resolve(agent));
+  expect(busy.mock.calls.map(call => call[0])).toEqual([true, false]);
+  expect(busy.mock.calls[0][1]).toBe(busy.mock.calls[1][1]);
+});
+
+test.each(['removed', 'blocked', 'unsupported', 'pending', 'device', 'closed'] as const)('queued selection rechecks %s before dispatch', async condition => {
+  const props = fixture(); const view = await render(<ApiPicker {...props} />);
+  const press = mockRowPress.get('备用')!;
+  const next = condition === 'removed' ? { apis: [apis[0]] }
+    : condition === 'blocked' ? { blocked: '当前任务进行中' }
+    : condition === 'unsupported' ? { apis: [apis[0], { ...apis[1], sourceType: 'official_account' as const }] }
+    : condition === 'pending' ? { agent: { ...agent, api: { ...agent.api, pending: true } } }
+    : condition === 'device' ? { deviceId: 'pc-b' } : { visible: false };
+  await view.rerender(<ApiPicker {...props} {...next} />);
+  await act(async () => press());
+  expect(mockSetApi).not.toHaveBeenCalled();
+});
+
+test.each(['connection', 'device', 'session', 'agent'] as const)('late %s receipts cannot change the new selection scope', async condition => {
+  const request = deferred<AgentProfile>(); mockSetApi.mockReturnValue(request.promise);
+  const props = fixture(); const view = await render(<ApiPicker {...props} />);
+  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
+  if (condition === 'connection') mockConnectionId = 'station-b';
+  const next = condition === 'device' ? { deviceId: 'pc-b' }
+    : condition === 'session' ? { sessionKey: 'codex:new' }
+    : condition === 'agent' ? { agent: { ...agent, id: 'claude' } } : {};
+  await view.rerender(<ApiPicker {...props} {...next} />);
+  await act(async () => request.resolve(agent));
+  expect(props.onChanged).not.toHaveBeenCalled();
+  expect(props.onClose).not.toHaveBeenCalled();
+});
+
+test('external hide and reopen keeps the pending write locked until its receipt', async () => {
+  const request = deferred<AgentProfile>(); mockSetApi.mockReturnValue(request.promise);
+  const props = fixture(); const view = await render(<ApiPicker {...props} />);
+  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
   await view.rerender(<ApiPicker {...props} visible={false} />);
   await view.rerender(<ApiPicker {...props} />);
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.busy).toBe(true);
-  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
   expect(mockSetApi).toHaveBeenCalledTimes(1);
-  await act(async () => { oldRequest.resolve(agent); });
+  await act(async () => request.resolve(agent));
   expect(props.onChanged).toHaveBeenCalledTimes(1);
   expect(props.onClose).not.toHaveBeenCalled();
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.busy).toBe(false);
-  await act(async () => { mockSubmit(); });
-  expect(mockSetApi).toHaveBeenCalledTimes(2);
-  await act(async () => { newRequest.resolve(agent); });
-  expect(props.onChanged).toHaveBeenCalledTimes(2);
-  expect(props.onClose).toHaveBeenCalledTimes(1);
-  expect(mockToast).not.toHaveBeenCalled();
 });
 
-test.each(['connection', 'device', 'session', 'agent'] as const)('a late receipt from a changed %s cannot interfere with the current window', async (changedScope) => {
-  const oldRequest = deferred<AgentProfile>(), newRequest = deferred<AgentProfile>();
-  mockSetApi.mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(newRequest.promise);
-  const props = fixture();
+test('a failed popup switch reports its target safely and closes without changing the actual selection', async () => {
+  mockSetApi.mockRejectedValueOnce(new Error('private.example sk-secret'));
+  const onFailed = jest.fn(), close = jest.fn(), props = fixture({ onFailed, onClose: close });
   const view = await render(<ApiPicker {...props} />);
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
-  if (changedScope === 'connection') mockConnectionId = 'station-b';
-  const next = {
-    ...props,
-    ...(changedScope === 'device' ? { deviceId: 'pc-b' } : {}),
-    ...(changedScope === 'session' ? { sessionKey: 'codex:other' } : {}),
-    ...(changedScope === 'agent' ? { agent: { ...agent, id: 'claude' as const, tool: 'claude' as const } } : {}),
-  };
-  await view.rerender(<ApiPicker {...next} />);
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.busy).toBe(true);
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
+  expect(view.getByRole('radio', { name: '主力' }).props.accessibilityState.checked).toBe(true);
+  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
+  expect(onFailed).toHaveBeenCalledTimes(1);
+  expect(onFailed).toHaveBeenCalledWith('opaque-backup');
+  expect(props.onChanged).not.toHaveBeenCalled();
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+  expect(onFailed.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0]);
+  expect(mockToast).toHaveBeenCalledWith('暂未确认切换结果，请稍后重新选择', 'alert');
+  expect(JSON.stringify(mockToast.mock.calls)).not.toMatch(/private\.example|sk-secret/);
+  expect(view.queryByText(/private\.example|sk-secret/)).toBeNull();
+  expect(view.queryByTestId('agent-api-menu')).toBeNull();
   expect(mockSetApi).toHaveBeenCalledTimes(1);
-  await act(async () => { oldRequest.reject(new Error('旧连接回执')); });
-  expect(props.onChanged).not.toHaveBeenCalled();
-  expect(props.onClose).not.toHaveBeenCalled();
-  expect(mockToast).not.toHaveBeenCalled();
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.busy).toBe(false);
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
-  expect(mockSetApi).toHaveBeenCalledTimes(2);
-  expect(mockSetApi).toHaveBeenLastCalledWith(next.deviceId, next.agent.id, 'opaque-primary', '', next.sessionKey);
-  await act(async () => { newRequest.resolve(agent); });
-  expect(props.onChanged).toHaveBeenCalledTimes(1);
-  expect(props.onClose).toHaveBeenCalledTimes(1);
 });
 
-test('an unmounted picker ignores both late failure notifications and callbacks', async () => {
-  const request = deferred<AgentProfile>(); mockSetApi.mockReturnValue(request.promise);
+test('a closed failure exposes no recovery buttons and retained choices cannot replay the write', async () => {
   const props = fixture();
   const view = await render(<ApiPicker {...props} />);
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
-  await view.unmount();
-  await act(async () => { request.reject(new Error('已离开会话')); });
-  expect(props.onChanged).not.toHaveBeenCalled();
-  expect(props.onClose).not.toHaveBeenCalled();
-  expect(mockToast).not.toHaveBeenCalled();
+  expect(view.queryByRole('button', { name: '核对 API 状态' })).toBeNull();
+  expect(view.queryByRole('button', { name: '重试切换 API' })).toBeNull();
+  const backup = mockRowPress.get('备用')!, follow = mockRowPress.get('默认 API')!;
+  mockSetApi.mockRejectedValueOnce(new Error('connection lost'));
+  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
+  await view.rerender(<ApiPicker {...props} />);
+  await act(async () => { backup(); backup(); follow(); });
+  expect(view.queryByTestId('agent-api-menu')).toBeNull();
+  expect(view.queryByRole('button', { name: '核对 API 状态' })).toBeNull();
+  expect(view.queryByRole('button', { name: '重试切换 API' })).toBeNull();
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+  expect(mockSetApi).toHaveBeenCalledTimes(1);
 });
 
-test('an active failed switch leaves the selection intact and can be retried explicitly', async () => {
+test('retry requires reopening and a fresh choice while duplicate or retained choices remain inert', async () => {
+  const request = deferred<AgentProfile>();
+  mockSetApi.mockRejectedValueOnce(new Error('timeout')).mockReturnValueOnce(request.promise);
+  const props = fixture(), view = await render(<ApiPicker {...props} />);
+  const oldChoice = mockRowPress.get('备用')!;
+  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
+  await view.rerender(<ApiPicker {...props} visible={false} />);
+  await view.rerender(<ApiPicker {...props} />);
+  expect(view.getByRole('radio', { name: '主力' }).props.accessibilityState.checked).toBe(true);
+  expect(view.queryByRole('alert')).toBeNull();
+  expect(view.queryByRole('button', { name: '重试切换 API' })).toBeNull();
+  expect(mockSetApi).toHaveBeenCalledTimes(1);
+  await act(async () => oldChoice());
+  expect(mockSetApi).toHaveBeenCalledTimes(1);
+  const freshChoice = mockRowPress.get('备用')!;
+  await act(async () => { freshChoice(); freshChoice(); });
+  expect(mockSetApi).toHaveBeenCalledTimes(2);
+  expect(mockSetApi).toHaveBeenLastCalledWith('pc-a', 'codex', 'opaque-backup', '', 'codex:original');
+  expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.busy).toBe(true);
+  await act(async () => request.resolve(agent));
+  await act(async () => { oldChoice(); freshChoice(); });
+  expect(mockSetApi).toHaveBeenCalledTimes(2);
+  expect(props.onClose).toHaveBeenCalledTimes(2);
+});
+
+test('a failed station switch returns to API choices and requires selecting the station again', async () => {
+  const account: RemoteApiOption = { id: 'official', name: '官方账号', models: [], sourceType: 'official_account',
+    remoteEligibility: { supported: false, reason: 'unsupported', apiRemote: true, accountRemote: false } };
+  mockApiTargets.mockReturnValue([{ id: 'supported-b', hubUrl: 'https://b.example/salcara-hub/v1', deviceId: 'pc-b', computerId: 'same', deviceName: 'Fixture', pairedAt: 1 }]);
+  mockSetApi.mockRejectedValueOnce(new Error('timeout')).mockResolvedValueOnce(agent);
+  const props = fixture({ apis: [...apis, account] }), view = await render(<ApiPicker {...props} />);
+  await fireEvent.press(view.getByLabelText('为 官方账号 选择支持的中转站'));
+  const oldStation = mockRowPress.get('b.example')!;
+  await fireEvent.press(view.getByText('b.example'));
+  expect(mockSetApi).toHaveBeenLastCalledWith('pc-a', 'codex', 'official', '', 'codex:original', 'supported-b');
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+  await view.rerender(<ApiPicker {...props} visible={false} />);
+  mockApiTargets.mockReturnValue([{ id: 'supported-c', hubUrl: 'https://c.example/salcara-hub/v1', deviceId: 'pc-c', computerId: 'same', deviceName: 'Fixture', pairedAt: 1 }]);
+  await view.rerender(<ApiPicker {...props} />);
+  expect(view.getByRole('radio', { name: '官方账号' }).props.accessibilityState.disabled).toBe(true);
+  expect(view.queryByText('b.example')).toBeNull();
+  expect(view.queryByText('c.example')).toBeNull();
+  await act(async () => oldStation());
+  expect(mockSetApi).toHaveBeenCalledTimes(1);
+  await fireEvent.press(view.getByLabelText('为 官方账号 选择支持的中转站'));
+  await fireEvent.press(view.getByText('c.example'));
+  expect(mockSetApi).toHaveBeenCalledTimes(2);
+  expect(mockSetApi).toHaveBeenLastCalledWith('pc-a', 'codex', 'official', '', 'codex:original', 'supported-c');
+});
+
+test('reopening after failure can choose a different target instead of replaying the failed API', async () => {
   const props = fixture();
-  mockSetApi.mockRejectedValueOnce(new Error('电脑暂时离线')).mockResolvedValueOnce(agent);
+  mockSetApi.mockRejectedValueOnce(new Error('timeout')).mockResolvedValueOnce(agent);
   const view = await render(<ApiPicker {...props} />);
   await fireEvent.press(view.getByRole('radio', { name: '备用' }));
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
-  expect(mockToast).toHaveBeenCalledWith('电脑暂时离线', 'alert');
-  expect(props.onClose).not.toHaveBeenCalled();
-  expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.checked).toBe(true);
-  expect(view.getByLabelText('使用这个设置').props.accessibilityState.busy).toBe(false);
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
+  await view.rerender(<ApiPicker {...props} visible={false} />);
+  await view.rerender(<ApiPicker {...props} />);
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
   expect(mockSetApi).toHaveBeenCalledTimes(2);
-  expect(props.onClose).toHaveBeenCalledTimes(1);
+  expect(mockSetApi).toHaveBeenLastCalledWith('pc-a', 'codex', '', '', 'codex:original');
+  expect(props.onChanged).toHaveBeenCalledWith(agent, '');
 });
 
-test('following the computer clears only the remote API override, not the session identity', async () => {
+test('reopening for another device does not revive a choice captured before the failed request', async () => {
+  const props = fixture();
+  mockSetApi.mockRejectedValueOnce(new Error('timeout'));
+  const view = await render(<ApiPicker {...props} />);
+  const oldChoice = mockRowPress.get('备用')!;
+  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
+  await view.rerender(<ApiPicker {...props} visible={false} />);
+  await view.rerender(<ApiPicker {...props} deviceId="another-computer" />);
+  await act(async () => oldChoice());
+  expect(mockSetApi).toHaveBeenCalledTimes(1);
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+  expect(props.onChanged).not.toHaveBeenCalled();
+});
+
+test('following the computer clears only the override and preserves the conversation', async () => {
   mockSetApi.mockResolvedValue(agent);
   const view = await render(<ApiPicker {...fixture()} />);
-  await fireEvent.press(view.getByRole('radio', { name: '跟随电脑' }));
-  await fireEvent.press(view.getByLabelText('使用这个设置'));
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
   expect(mockSetApi).toHaveBeenCalledWith('pc-a', 'codex', '', '', 'codex:original');
+});
+
+test('an unmounted picker ignores late failure and never emits a raw diagnostic', async () => {
+  const request = deferred<AgentProfile>(); mockSetApi.mockReturnValue(request.promise);
+  const props = fixture(); const view = await render(<ApiPicker {...props} />);
+  await fireEvent.press(view.getByRole('radio', { name: '备用' }));
+  await view.unmount();
+  await act(async () => request.reject(new Error('private sk-secret')));
+  expect(props.onChanged).not.toHaveBeenCalled(); expect(props.onClose).not.toHaveBeenCalled();
+  expect(mockToast).not.toHaveBeenCalled();
 });
 
 test('inline Key list is content only: no new overlay, title or confirmation button', async () => {
@@ -271,14 +329,14 @@ test('inline Key list is content only: no new overlay, title or confirmation but
   expect(mockSetApi).not.toHaveBeenCalled();
 });
 
-test('horizontal shallow-arc swipes browse Key names without changing the actual API', async () => {
+test('horizontal tabs browse Key names without changing the actual API', async () => {
   const options = Array.from({ length: 8 }, (_, index) => ({ id: `opaque-${index}`, name: `API ${index}`, models: [] }));
   const view = await render(<InlineApiPicker {...fixture({ apis: options, agent: { ...agent, api: { ...agent.api, accountId: 'opaque-0' } } })} />);
   const strip = view.getByTestId('remote-api-key-strip');
   expect(strip.props.horizontal).toBe(true);
   const step = strip.props.snapToInterval;
   await fireEvent.scroll(strip, { nativeEvent: { contentOffset: { x: step * 5, y: 0 } } });
-  expect(view.getAllByRole('radio')).toHaveLength(3);
+  expect(view.getAllByRole('radio')).toHaveLength(9);
   expect(view.getByRole('radio', { name: 'API 4' }).props.accessibilityState.checked).toBe(false);
   expect(mockSetApi).not.toHaveBeenCalled();
   await fireEvent.press(view.getByRole('radio', { name: 'API 4' }));
@@ -294,7 +352,7 @@ test('pressing the current inline Key is a no-op with no worker/API command or b
   expect(busy).not.toHaveBeenCalled();
   expect(view.queryByTestId('remote-api-switch-spinner')).toBeNull();
   await view.rerender(<InlineApiPicker {...props} agent={{ ...agent, api: { ...agent.api, source: 'computer' } }} onBusyChange={busy} />);
-  await fireEvent.press(view.getByRole('radio', { name: '跟随电脑' }));
+  await fireEvent.press(view.getByRole('radio', { name: '主力' }));
   expect(mockSetApi).not.toHaveBeenCalled();
 });
 
@@ -310,10 +368,10 @@ test('inline named row immediately switches its opaque handle and shows the spin
   expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.busy).toBe(true);
   expect(view.getAllByRole('radio').every((row) => row.props.accessibilityState.disabled)).toBe(true);
   expect(loading).toHaveBeenLastCalledWith(true, expect.any(String));
-  await fireEvent.press(view.getByRole('radio', { name: '跟随电脑' }));
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
   expect(mockSetApi).toHaveBeenCalledTimes(1);
   await act(async () => { request.resolve(agent); });
-  expect(props.onChanged).toHaveBeenCalledWith(agent);
+  expect(props.onChanged).toHaveBeenCalledWith(agent, 'opaque-backup');
   expect(props.onClose).not.toHaveBeenCalled();
   expect(view.getByTestId('remote-inline-api-picker')).toBeTruthy();
   expect(loading).toHaveBeenLastCalledWith(false, loading.mock.calls[0][1]);
@@ -335,7 +393,7 @@ test('inline failed switches preserve actual API selection and allow an explicit
   const view = await render(<InlineApiPicker {...props} />);
   await fireEvent.press(view.getByRole('radio', { name: '备用' }));
   expect(mockToast).not.toHaveBeenCalled();
-  expect(view.getByText('电脑暂时离线').props.accessibilityRole).toBe('alert');
+  expect(view.getByText('电脑已断开连接，请连接后重试').props.accessibilityRole).toBe('alert');
   expect(view.getByRole('radio', { name: '主力' }).props.accessibilityState.checked).toBe(true);
   expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.disabled).toBe(false);
   expect(view.queryByTestId('remote-api-switch-spinner')).toBeNull();
@@ -352,15 +410,15 @@ test('inline close/reopen cannot start a second switch and same-scope acknowledg
   await fireEvent.press(view.getByRole('radio', { name: '备用' }));
   await view.rerender(<InlineApiPicker {...props} visible={false} />);
   await view.rerender(<InlineApiPicker {...props} />);
-  await fireEvent.press(view.getByRole('radio', { name: '跟随电脑' }));
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
   expect(mockSetApi).toHaveBeenCalledTimes(1);
   expect(view.getByRole('radio', { name: '备用' }).props.accessibilityState.busy).toBe(true);
   await act(async () => { oldRequest.resolve(agent); });
   expect(props.onClose).not.toHaveBeenCalled();
   expect(props.onChanged).toHaveBeenCalledTimes(1);
-  await fireEvent.press(view.getByRole('radio', { name: '跟随电脑' }));
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
   expect(mockSetApi).toHaveBeenCalledTimes(2);
-  expect(view.getByRole('radio', { name: '跟随电脑' }).props.accessibilityState.busy).toBe(true);
+  expect(view.getByRole('radio', { name: '默认 API' }).props.accessibilityState.busy).toBe(true);
   await act(async () => { newRequest.resolve(agent); });
   expect(props.onClose).not.toHaveBeenCalled();
   expect(props.onChanged).toHaveBeenCalledTimes(2);
@@ -389,12 +447,12 @@ test('inline API labels remain arbitrary names and ambiguous names are disambigu
     { id: 'second', name: 'claude-opus-5-5', models: [] },
     { id: 'already-suffixed', name: 'claude-opus-5-5 · 2', models: [] },
     { id: 'empty', name: '   ', models: [] },
-    { id: 'reserved', name: '跟随电脑', models: [] },
+    { id: 'reserved', name: '默认 API', models: [] },
     { id: 'first', name: '重复 ID 不显示', models: [] },
   ];
   const view = await render(<InlineApiPicker {...fixture({ apis: names })} />);
   expect(Array.from({ length: 6 }, (_, index) => view.getByTestId(`remote-api-key-${index}`, { includeHiddenElements: true }).props.accessibilityLabel)).toEqual([
-    '跟随电脑', 'claude-opus-5-5', 'claude-opus-5-5 · 3', 'claude-opus-5-5 · 2', '未命名 API', '跟随电脑 · 2',
+    '默认 API', 'claude-opus-5-5', 'claude-opus-5-5 · 3', 'claude-opus-5-5 · 2', '未命名 API', '默认 API · 2',
   ]);
   const strip = view.getByTestId('remote-api-key-strip');
   await fireEvent.scroll(strip, { nativeEvent: { contentOffset: { x: strip.props.snapToInterval * 2, y: 0 } } });
@@ -402,16 +460,16 @@ test('inline API labels remain arbitrary names and ambiguous names are disambigu
   expect(mockSetApi).toHaveBeenCalledWith('pc-a', 'codex', 'second', '', 'codex:original');
 });
 
-test('inline computer-backed settings check follow-computer and blocked rows cannot mutate API', async () => {
+test('inline computer-backed settings use the actual default API name and blocked rows cannot mutate API', async () => {
   const props = fixture({ agent: { ...agent, api: { ...agent.api, source: 'computer' } }, blocked: '当前任务进行中' });
   const view = await render(<InlineApiPicker {...props} />);
-  expect(view.getByRole('radio', { name: '跟随电脑' }).props.accessibilityState.checked).toBe(true);
+  expect(view.getByRole('radio', { name: '主力' }).props.accessibilityState.checked).toBe(true);
   expect(view.getByText('当前任务进行中')).toBeTruthy();
   await fireEvent.press(view.getByTestId('remote-api-key-1'));
   expect(mockSetApi).not.toHaveBeenCalled();
 });
 
-test('StrictMode remount does not disable switching and the permanent Key arc remains available after a successful write', async () => {
+test('StrictMode remount does not disable switching and the API tabs remains available after a successful write', async () => {
   mockSetApi.mockResolvedValue(agent);
   const props = fixture();
   const view = await render(<React.StrictMode><InlineApiPicker {...props} /></React.StrictMode>);
@@ -423,7 +481,7 @@ test('StrictMode remount does not disable switching and the permanent Key arc re
   await view.rerender(<React.StrictMode><InlineApiPicker {...props} apis={[...apis]} /></React.StrictMode>);
   expect(view.getByTestId('remote-inline-api-picker')).toBeTruthy();
   expect(mockSetApi).toHaveBeenCalledTimes(1);
-  await fireEvent.press(view.getByRole('radio', { name: '跟随电脑' }));
+  await fireEvent.press(view.getByRole('radio', { name: '默认 API' }));
   expect(mockSetApi).toHaveBeenCalledTimes(2);
 });
 
@@ -486,7 +544,7 @@ test.each(['resolved', 'rejected'] as const)('an immediately %s API request rele
   expect(props.onChanged).toHaveBeenCalledTimes(outcome === 'resolved' ? 1 : 0);
 });
 
-test('a persistent parent request lock disables a freshly mounted arc and queued presses', async () => {
+test('a persistent parent request lock disables a freshly mounted tabs and queued presses', async () => {
   const props = fixture(); const view = await render(<InlineApiPicker {...props} externalBusy />);
   expect(view.getAllByRole('radio').every(row => row.props.accessibilityState.disabled)).toBe(true);
   await fireEvent.press(view.getByRole('radio', { name: '备用' })); expect(mockSetApi).not.toHaveBeenCalled();
