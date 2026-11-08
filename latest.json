@@ -1,15 +1,15 @@
 {
-  "version": "1.8.2",
-  "tagName": "v1.8.2",
-  "title": "Salcara AI v1.8.2",
-  "notes": "# Salcara Android 1.8.2\n\n本版本保留既有手机界面与动效，修复远程编程内核：断线/长离线恢复、A→B 中转站受限切换、会话目录十条分页、对话首屏两条消息与继续加载、历史读取取消和绑定状态竞态。\n\nAPK 使用原有正式包名和签名，可覆盖安装 1.8.1；versionCode 为 23。原生桌面能力仍以电脑端授权和宿主接口实际返回为准。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.2",
-  "publishedAt": "2026-10-07T10:17:49Z",
+  "version": "1.8.3",
+  "tagName": "v1.8.3",
+  "title": "Salcara Android v1.8.3",
+  "notes": "# Salcara Android 1.8.3\r\n\r\n本版将手机和平板的远程工作区、电脑 Agent 管理和 Hub 用户授权配套交付。建议同时使用 **Salcara Desktop 1.6.5** 与 **Salcara Hub 0.5.3**。\r\n\r\n- 重做亮色会话界面、紧凑输入框和弹窗；Code 与 Work 按电脑、Agent 和项目分别组织，切换电脑时同步切换 API、草稿及会话。\r\n- 支持独立网页标签、代码预览、终端、审阅、临时工具和主对话中的产物预览；Agent 打开的网页保留在后台，用户主动打开时进入对应标签。\r\n- 完善排队消息编辑、最新输入恢复、图片重试、已完成消息提醒、模型能力与权限约束，保留正在编辑的新草稿。\r\n- 接入 DeepSeek Harness 与 Hermes 的能力展示；扫码配对后复用绑定，补齐断线重连、历史恢复、通知状态和设备/API 管理。\r\n- 补齐系统权限按需申请、后台监听恢复和被 Hub 暂停用户后的配对保留。\r\n\r\n正式 Android 包名保持 `top.salcara.image`，版本为 1.8.3（versionCode 24）。沿用既有正式签名；发布流程检查与 1.8.2 的签名一致及版本递增，不使用独立测试包替代。\r\n\r\n## 使用边界\r\n\r\n功能随电脑上 Agent 的实际能力开放。Hermes 既有会话固定启动时的 API/模型，换来源后通常需要新会话；DeepSeek/Hermes 的 Bridge 历史视图目前最多最近 400 个事件。Claude 的 Bridge 重启后不会自动接管原进程会话。不能把本版描述为与 Codex 所有能力完全相同。\r\n\r\n本轮包含源码自动回归和浏览器/原生构建检查。实体手机、公网、真实收费模型、后台推送送达与 iOS 签名分发不属于本次已完成的端到端验收；后台恢复仍受系统和厂商省电规则限制。GitHub 发布不等于已部署用户服务器。\r\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.3",
+  "publishedAt": "2026-11-08T13:45:47Z",
   "apk": {
-    "name": "salcara-image-android-v1.8.2.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.2/salcara-image-android-v1.8.2.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/618325217",
-    "size": 97845025,
-    "digest": "sha256:7b45ea11de309ae0cf53cc40d7899b63ce49fe28af4c459b3adb84a7c169eee8"
+    "name": "salcara-image-android-v1.8.3.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.3/salcara-image-android-v1.8.3.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/723924494",
+    "size": 117227282,
+    "digest": "sha256:52ad02df9a45f3e66aa1d626c9be1a0557acf924ec11a948ec6b7f3507328465"
   }
 }
