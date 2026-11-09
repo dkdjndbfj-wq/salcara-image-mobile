@@ -17,7 +17,7 @@ function isPrivateHost(hostname: string): boolean {
   return false;
 }
 
-export function canonicalHubUrl(input: string, allowLoopback = false): string {
+function remoteUrl(input: string, allowLoopback = false): URL {
   const value = input.trim();
   if (!value || value.length > 512 || /[\\\s]/.test(value)) throw new Error('请输入完整的 HTTPS 中转站地址');
   let url: URL;
@@ -26,8 +26,26 @@ export function canonicalHubUrl(input: string, allowLoopback = false): string {
   const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(url.hostname);
   if (url.protocol !== 'https:' && !(allowLoopback && loopback && url.protocol === 'http:')) throw new Error('远程连接必须使用 HTTPS');
   if (isPrivateHost(url.hostname) && !(allowLoopback && loopback)) throw new Error('请使用中转站的公网 HTTPS 地址');
-  if (!url.hostname || !['', '/', '/v1', '/v1/', HUB_PATH, `${HUB_PATH}/`].includes(url.pathname)) throw new Error('请输入中转站首页地址，不要输入其他接口路径');
-  return `${url.origin}${HUB_PATH}`;
+  const rawPath = value.match(/^https?:\/\/[^/]+(\/.*)?$/i)?.[1] ?? '/';
+  if (!url.hostname || rawPath.includes('//') || rawPath.split('/').some(part => part && (!/^[A-Za-z0-9._~-]+$/.test(part) || part === '.' || part === '..'))) throw new Error('远程接口路径格式不正确');
+  return url;
+}
+
+export function canonicalHubUrl(input: string, allowLoopback = false): string {
+  const url = remoteUrl(input, allowLoopback), path = url.pathname.replace(/\/$/, '');
+  if (!path) return `${url.origin}${HUB_PATH}`;
+  if (path.endsWith('/salcara-hub')) return `${url.origin}${path}/v1`;
+  if (!path.endsWith('/v1')) throw new Error('请输入中转站首页地址，不要输入其他接口路径');
+  return `${url.origin}${path}`;
+}
+
+/** At most three anonymous probes; the ordinary model API URL itself is never changed. */
+export function remoteDiscoveryCandidates(input: string): string[] {
+  const url = remoteUrl(input), path = url.pathname.replace(/\/$/, '');
+  if (path.endsWith('/salcara-hub') || path.endsWith('/salcara-hub/v1')) return [canonicalHubUrl(input)];
+  const prefix = path === '/v1' ? '' : path.replace(/\/v1$/, '');
+  return [...new Set([`${url.origin}${prefix}${HUB_PATH}`, `${url.origin}${HUB_PATH}`,
+    ...(prefix ? [`${url.origin}${prefix}/v1`] : path === '/v1' ? [`${url.origin}/v1`] : [])])];
 }
 
 export function readPairQr(raw: string, selectedHubUrl: string | null, now = Date.now(), allowLoopback = false): PairQr {

@@ -9,7 +9,12 @@ export interface IngressManifest {
   version: 1; hub_instance_id: string; identity_public_key: string; canonical_url: string;
   revision: number; issued_at: number; expires_at: number;
   endpoints: Array<{ id: string; url: string; priority: number }>;
+  signed_payload?: string; signature?: string;
 }
+export class IngressIdentityError extends Error {
+  constructor() { super('无法确认原中转站身份，请在电脑端检查远程登记；已保存的配对和聊天记录保留'); this.name = 'IngressIdentityError'; }
+}
+class PublicIngressError extends Error { constructor(readonly status: number) { super('invalid ingress response'); } }
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const integer = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 function apiUrl(value: unknown): value is string {
@@ -20,14 +25,28 @@ function base64(value: unknown, length: number): Uint8Array {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', bytes = new Uint8Array(length);
   let bits = 0, buffer = 0, index = 0;
   for (const char of value.replace(/=+$/, '')) { buffer = (buffer << 6) | alphabet.indexOf(char); bits += 6; if (bits >= 8) { bits -= 8; if (index >= length) throw new Error('invalid ingress encoding'); bytes[index++] = (buffer >> bits) & 255; } }
-  if (index !== length || (buffer & ((1 << bits) - 1)) !== 0 || !value.endsWith(length % 3 === 1 ? '==' : '=')) throw new Error('invalid ingress encoding');
+  const padding = length % 3 === 1 ? '==' : length % 3 === 2 ? '=' : '';
+  if (index !== length || (buffer & ((1 << bits) - 1)) !== 0 || value.length - value.replace(/=+$/, '').length !== padding.length) throw new Error('invalid ingress encoding');
   return bytes;
 }
-export function parseIngressManifest(value: unknown, canonical: string, now = Date.now()): IngressManifest {
-  if (!apiUrl(canonical) || !record(value) || value.version !== 1 || value.canonical_url !== canonical
+export function parseIngressManifest(value: unknown, canonical: string, now = Date.now(), allowExpired = false, requireLogicalMembership = true): IngressManifest {
+  let signature: { signed_payload: string; signature: string } | undefined;
+  if (record(value) && ('signed_payload' in value || 'signature' in value)) {
+    if (typeof value.signed_payload !== 'string' || value.signed_payload.length > 12_000) throw new Error('invalid signed ingress manifest');
+    const length = value.signed_payload.length / 4 * 3 - (value.signed_payload.endsWith('==') ? 2 : value.signed_payload.endsWith('=') ? 1 : 0);
+    const payload = base64(value.signed_payload, length), decoded = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload));
+    if (!record(decoded) || 'signed_payload' in decoded || 'signature' in decoded) throw new Error('invalid signed ingress payload');
+    const prefix = new TextEncoder().encode('salcara-ingress-manifest-v1\n'), message = new Uint8Array(prefix.length + payload.length);
+    message.set(prefix); message.set(payload, prefix.length);
+    if (!verify(base64(value.signature, 64), message, base64(decoded.identity_public_key, 32), { zip215: false })) throw new Error('invalid ingress signature');
+    signature = { signed_payload: value.signed_payload, signature: value.signature as string };
+    value = decoded; // Only signed fields may authorize forwarding credentials.
+  }
+  const manifestCanonical = signature && record(value) ? value.canonical_url : canonical;
+  if (!apiUrl(canonical) || !apiUrl(manifestCanonical) || !record(value) || value.version !== 1 || value.canonical_url !== manifestCanonical
     || typeof value.hub_instance_id !== 'string' || !/^[a-f0-9]{32}$/.test(value.hub_instance_id)
-    || !integer(value.revision) || !integer(value.issued_at) || !integer(value.expires_at)
-    || value.issued_at > now + SKEW || value.expires_at <= now || value.expires_at <= value.issued_at || value.expires_at - value.issued_at > DAY
+    || !integer(value.revision) || value.revision < 1 || !integer(value.issued_at) || !integer(value.expires_at)
+    || value.issued_at > now + SKEW || !allowExpired && value.expires_at <= now || value.expires_at <= value.issued_at || value.expires_at - value.issued_at > DAY
     || !Array.isArray(value.endpoints) || value.endpoints.length < 1 || value.endpoints.length > 8) throw new Error('invalid ingress manifest');
   base64(value.identity_public_key, 32);
   const ids = new Set(), urls = new Set();
@@ -36,9 +55,10 @@ export function parseIngressManifest(value: unknown, canonical: string, now = Da
       || !integer(endpoint.priority) || endpoint.priority > 1000 || ids.has(endpoint.id) || urls.has(endpoint.url)) throw new Error('invalid ingress endpoint');
     ids.add(endpoint.id); urls.add(endpoint.url); return { id: endpoint.id, url: endpoint.url, priority: endpoint.priority };
   });
-  if (!endpoints.some(endpoint => endpoint.id === 'canonical' && endpoint.url === canonical)) throw new Error('missing canonical ingress');
-  return { version: 1, hub_instance_id: value.hub_instance_id, identity_public_key: value.identity_public_key as string, canonical_url: canonical,
-    revision: value.revision, issued_at: value.issued_at, expires_at: value.expires_at, endpoints };
+  if (!endpoints.some(endpoint => endpoint.id === 'canonical' && endpoint.url === manifestCanonical)) throw new Error('missing canonical ingress');
+  if (signature && requireLogicalMembership && !endpoints.some(endpoint => endpoint.url === canonical)) throw new Error('logical ingress is not authorized');
+  return { version: 1, hub_instance_id: value.hub_instance_id, identity_public_key: value.identity_public_key as string, canonical_url: manifestCanonical,
+    revision: value.revision, issued_at: value.issued_at, expires_at: value.expires_at, endpoints, ...signature };
 }
 export function verifyIngressProof(value: unknown, manifest: IngressManifest, nonce: string, now = Date.now()): boolean {
   try {
@@ -51,16 +71,28 @@ export function verifyIngressProof(value: unknown, manifest: IngressManifest, no
 }
 
 interface Storage { read(canonical: string): Promise<string | null>; write(canonical: string, value: string): Promise<void> }
-interface Entry { manifest?: IngressManifest; loaded: Promise<void>; refreshing?: Promise<void>; retryAt: number; failed: Map<string, number>; leases: Map<string, number>; proofs: Map<string, Promise<void>> }
+interface Entry { manifest?: IngressManifest; epoch: number; invalidIdentity?: boolean; loaded: Promise<void>; refreshing?: Promise<void>; retryAt: number; failed: Map<string, number>; leases: Map<string, number>; proofs: Map<string, Promise<void>> }
 /** Only transport URLs change. Canonical identity, credentials, cursors and receipts stay with callers. */
 export function createIngressRouter(options: { fetch: FetchLike; nonce: () => string; storage?: Storage; now?: () => number }) {
   const now = options.now ?? Date.now, entries = new Map<string, Entry>();
+  // Cache eviction must not split writes to one durable pin into independent
+  // queues. Retain only active storage tails, including an already-started write.
+  const persisting = new Map<string, Promise<void>>();
   function entry(canonical: string): Entry {
     const cached = entries.get(canonical); if (cached) return cached;
-    const value: Entry = { loaded: Promise.resolve(), retryAt: 0, failed: new Map(), leases: new Map(), proofs: new Map() };
+    const value: Entry = { epoch: 0, loaded: Promise.resolve(), retryAt: 0, failed: new Map(), leases: new Map(), proofs: new Map() };
     entries.set(canonical, value); if (entries.size > 32) entries.delete(entries.keys().next().value!);
-    value.loaded = (async () => { try { const raw = await options.storage?.read(canonical); if (raw && raw.length <= MAX_BODY && !value.manifest) value.manifest = parseIngressManifest(JSON.parse(raw), canonical, now()); } catch { /* Missing, expired or invalid cache never authorizes an alternate. */ } })();
+    value.loaded = (async () => { try { const raw = await options.storage?.read(canonical); if (raw && raw.length <= MAX_BODY && !value.manifest) value.manifest = parseIngressManifest(JSON.parse(raw), canonical, now(), true, false); } catch { /* An expired valid cache retains its pin, but cannot authorize an alternate. */ } })();
     return value;
+  }
+  function persist(canonical: string, current: Entry, manifest: IngressManifest | undefined, epoch: number, active: () => boolean = () => true): Promise<void> {
+    const next = (persisting.get(canonical) ?? Promise.resolve()).then(async () => {
+      if (entries.get(canonical) === current && current.epoch === epoch && active()) await options.storage?.write(canonical, JSON.stringify(manifest ?? {}));
+    });
+    const settled = next.catch(() => undefined);
+    persisting.set(canonical, settled);
+    void settled.then(() => { if (persisting.get(canonical) === settled) persisting.delete(canonical); });
+    return next;
   }
   async function publicJson(url: string, signal?: AbortSignal): Promise<unknown> {
     const controller = new AbortController(), abort = () => controller.abort();
@@ -71,7 +103,8 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
       return await Promise.race([aborted, (async () => {
         if (controller.signal.aborted) throw new Error('ingress cancelled');
         const response = await options.fetch(url, { method: 'GET', headers: { Accept: 'application/json' }, credentials: 'omit', redirect: 'error', signal: controller.signal });
-        if (!response.ok || response.redirected || response.url && response.url !== url) throw new Error('invalid ingress response');
+        if (!response.ok) throw new PublicIngressError(response.status);
+        if (response.redirected || response.url && response.url !== url) throw new Error('invalid ingress response');
         if (Number(response.headers?.get?.('content-length')) > MAX_BODY) throw new Error('invalid ingress response');
         const reader = (response.body as { getReader?: () => { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel?(): Promise<unknown> } } | undefined)?.getReader?.();
         let raw = '';
@@ -99,12 +132,19 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
     if (current.refreshing) return current.refreshing;
     if (current.retryAt > now()) return;
     current.retryAt = now() + 60_000;
+    const epoch = current.epoch;
     current.refreshing = (async () => {
       try {
-        const manifest = parseIngressManifest(await publicJson(`${canonical}/ingress/manifest`), canonical, now()), old = current.manifest;
-        if (old && (old.hub_instance_id !== manifest.hub_instance_id || old.identity_public_key !== manifest.identity_public_key || manifest.revision < old.revision)) return;
+        const raw = await publicJson(`${canonical}/ingress/manifest`);
+        if (current.epoch !== epoch) return;
+        let manifest: IngressManifest;
+        try { manifest = parseIngressManifest(raw, canonical, now(), false, !current.manifest); }
+        catch (error) { current.invalidIdentity = true; throw error; }
+        const old = current.manifest;
+        if (old && (old.hub_instance_id !== manifest.hub_instance_id || old.identity_public_key !== manifest.identity_public_key || manifest.revision < old.revision || old.signature && !manifest.signature)) { current.invalidIdentity = true; return; }
+        current.invalidIdentity = false;
         current.manifest = manifest; current.leases.clear(); current.failed.clear(); current.retryAt = now() + 6 * 60 * 60_000;
-        await options.storage?.write(canonical, JSON.stringify(manifest));
+        await persist(canonical, current, manifest, epoch);
       } catch { /* Original canonical remains usable; stale authority is never extended. */ }
       finally { current.refreshing = undefined; }
     })();
@@ -141,6 +181,7 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
       if (signal?.aborted) throw new Error('ingress cancelled');
       if ((current.failed.get(endpoint.url) ?? 0) > now()) continue;
       if (endpoint.url === canonical) return canonical;
+      if (!manifest.signature) continue;
       if ((current.leases.get(endpoint.url) ?? 0) > now()) return endpoint.url;
       if (++checks > 3) break;
       try {
@@ -155,9 +196,23 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
   async function fetch(canonical: string, path: string, init: Record<string, unknown>) {
     if (!path.startsWith('/') || path.startsWith('//') || /[\\\r\n]/.test(path)) throw new Error('invalid ingress path');
     const signal = init.signal as AbortSignal | undefined, attempts = String(init.method ?? 'GET').toUpperCase() === 'GET' ? 2 : 1;
+    const headers = init.headers as Record<string, unknown> | undefined;
+    const authenticated = headers && Object.keys(headers).some(key => /^(authorization|x-salcara-(pair|bot)-token)$/i.test(key) && headers[key]);
+    const current = entry(canonical); await current.loaded;
+    if (authenticated) {
+      await refresh(canonical);
+      if (current.invalidIdentity || current.manifest && current.manifest.expires_at <= now()) throw new IngressIdentityError();
+    }
     let last: unknown;
     for (let index = 0; index < attempts; index++) {
-      const endpoint = await resolve(canonical, signal);
+      let endpoint = await resolve(canonical, signal);
+      if (authenticated && current.manifest && endpoint === canonical && (current.leases.get(canonical) ?? 0) <= now()) {
+        try { await prove(canonical, current, current.manifest, canonical); }
+        catch {
+          endpoint = await resolve(canonical, signal);
+          if (endpoint === canonical) throw new IngressIdentityError();
+        }
+      }
       if (signal?.aborted) throw new Error('ingress cancelled');
       try {
         const response = await options.fetch(`${endpoint}${path}`, { ...init, redirect: 'error', credentials: 'omit' });
@@ -168,5 +223,43 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
     }
     throw last;
   }
-  return { refresh, resolve, fetch, fail, snapshot(canonical: string): IngressManifest | undefined { const value = entries.get(canonical)?.manifest; return value && value.expires_at > now() ? JSON.parse(JSON.stringify(value)) : undefined; } };
+  async function verifyAlias(canonical: string, candidate: string): Promise<boolean> {
+    if (!apiUrl(canonical) || !apiUrl(candidate)) return false;
+    const current = entry(canonical); await current.loaded; await refresh(canonical);
+    const pin = current.manifest;
+    if (!pin) return false;
+    try {
+      const next = parseIngressManifest(await publicJson(`${candidate}/ingress/manifest`), canonical, now(), false, false);
+      if (!next.signature || next.hub_instance_id !== pin.hub_instance_id || next.identity_public_key !== pin.identity_public_key
+        || next.revision < pin.revision || !next.endpoints.some(endpoint => endpoint.url === candidate)) return false;
+      const nonce = options.nonce();
+      const proof = await publicJson(`${candidate}/ingress/identity?nonce=${nonce}`);
+      if (!verifyIngressProof(proof, next, nonce, now()) || current.manifest !== pin) return false;
+      current.manifest = next; current.invalidIdentity = false; current.leases.clear(); current.failed.clear();
+      current.leases.set(candidate, Math.min(next.expires_at, (proof as { expires_at: number }).expires_at, now() + 10_000));
+      await persist(canonical, current, next, current.epoch);
+      return true;
+    } catch { return false; }
+  }
+  /** A successful, explicitly confirmed new QR binding may replace a reset Hub's pin. */
+  async function confirmPairingIdentity(canonical: string, active: () => boolean): Promise<void> {
+    const current = entry(canonical); await current.loaded;
+    if (!active()) return;
+    const epoch = ++current.epoch;
+    let next: IngressManifest | undefined;
+    try { next = parseIngressManifest(await publicJson(`${canonical}/ingress/manifest`), canonical, now()); }
+    catch (error) {
+      if (!(error instanceof PublicIngressError && error.status === 404) && current.manifest) throw new IngressIdentityError();
+    }
+    if (!active() || current.epoch !== epoch) return;
+    await persist(canonical, current, next, epoch, active);
+    if (!active() || current.epoch !== epoch) return;
+    current.manifest = next; current.invalidIdentity = false; current.leases.clear(); current.failed.clear();
+    current.retryAt = now() + (next ? 6 * 60 * 60_000 : 60_000);
+  }
+  function pinSnapshot(canonical: string): IngressManifest | undefined {
+    const value = entries.get(canonical)?.manifest;
+    return value ? JSON.parse(JSON.stringify(value.signature ? value : { ...value, endpoints: value.endpoints.filter(endpoint => endpoint.url === canonical) })) : undefined;
+  }
+  return { refresh, resolve, fetch, fail, verifyAlias, confirmPairingIdentity, pinSnapshot, snapshot(canonical: string): IngressManifest | undefined { const value = entries.get(canonical)?.manifest; return value && value.expires_at > now() ? pinSnapshot(canonical) : undefined; } };
 }

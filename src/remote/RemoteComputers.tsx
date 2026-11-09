@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, T
 import { Icon } from '../components/Icon';
 import { AppDialog, showToast } from '../components/ui';
 import { themed, useDesk } from '../theme';
-import { remoteDeviceConnected } from './connection-state';
+import { remoteConnectionState, remoteDeviceConnected, savedConnectionHealthLabel } from './connection-state';
 import { connectionDisplayName, computerGroupKey, pairedComputerCount, type RemoteConnection } from './connections';
 import { getRemoteState, useSavedConnection, probeSavedConnections, renameRemoteConnection, revokeRemoteConnectionById, type RemoteState, type SavedConnectionHealth } from './store';
 import { listDirectPairings, getDirectConnectionState, reconnectDirect, forgetDirectPairing, type DirectConnectionState, type DirectPairingInfo } from './direct-pairing';
@@ -206,9 +206,8 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
         const sameName = computerGroups.some(value => value.key !== group.key && connectionDisplayName(value.connections[0]).toLocaleLowerCase() === displayName.toLocaleLowerCase());
         const host = stationHost(item.hubUrl);
         const mode = connectionKind(item), modes = [...new Set(group.connections.map(connectionKind))];
-        const unreachable = mode === 'bot' ? 'Bot 服务不可达' : '中转站不可达';
-        const stateLabel = healthState === 'checking' ? '检查中' : healthState === 'online' ? '在线' : healthState === 'offline' ? '电脑离线' : healthState === 'reauth' ? '需要重新绑定' : unreachable;
-        const info = current ? online ? '在线' : remote.connection === 'error' || remote.connectionError ? unreachable
+        const stateLabel = savedConnectionHealthLabel(healthState, mode === 'bot');
+        const info = current ? online ? '在线' : remote.connection === 'error' || remote.connectionError ? remoteConnectionState(remote, device).label
           : remote.connection === 'connecting' || remote.connection === 'retrying' ? '正在连接'
             : remote.connection === 'open' && device && !device.online ? '电脑离线' : '未连接' : stateLabel;
         const open = () => { if (group.connections.length > 1) setSwitching(item); else void select(item); };
@@ -233,7 +232,7 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
         const active=profile.id===remote.connectionId&&!directSelected&&!demoActive;
         const mode=connectionKind(profile), station=stationHost(profile.hubUrl);
         const status=health[profile.id];
-        const detail=status==='online'?'在线':status==='offline'?'电脑离线':status==='reauth'?'需要重新绑定':status==='unreachable'?'暂时不可达':'检查中';
+        const detail=savedConnectionHealthLabel(status, mode==='bot');
         return <ProgrammingRow key={profile.id} first={index===0} icon={connectionModeIcon(mode)} title={`${connectionModeLabel(mode)} · ${station}`} detail={active?`当前 · ${detail}`:detail}
           accessibilityLabel={`${active?'当前':'切换到'}${connectionModeLabel(mode)} ${station} ${profile.deviceId}`} trailing={active?'check':'chevron'}
           onPress={()=>{setSwitching(null);void select(profile);}}/>;

@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { createIngressRouter, parseIngressManifest, verifyIngressProof, type IngressManifest } from '../remote/ingress';
-import { command, devices, openStream, setHubFetch, type FetchLike } from '../remote/client';
+import { command, confirmQrPair, devices, discoverStation, openStream, setHubFetch, type FetchLike } from '../remote/client';
 
 const canonical = 'https://hub.example/salcara-hub/v1', backup = 'https://entry.example/salcara-hub/v1';
 const keys = generateKeyPairSync('ed25519');
@@ -10,6 +10,11 @@ const json = (value: unknown, status = 200) => ({ ok: status >= 200 && status < 
 function manifest(now = Date.now()): IngressManifest {
   return { version: 1, hub_instance_id: hubId, identity_public_key: publicKey, canonical_url: canonical, revision: 3,
     issued_at: now, expires_at: now + 86_400_000, endpoints: [{ id: 'canonical', url: canonical, priority: 100 }, { id: 'backup', url: backup, priority: 50 }] };
+}
+function signedManifest(value = manifest()): IngressManifest {
+  const { signed_payload: _payload, signature: _signature, ...payload } = value;
+  const bytes = Buffer.from(JSON.stringify(payload));
+  return { ...payload, signed_payload: bytes.toString('base64'), signature: sign(null, Buffer.concat([Buffer.from('salcara-ingress-manifest-v1\n'), bytes]), keys.privateKey).toString('base64') };
 }
 function proof(n = nonce, now = Date.now(), patch: Record<string, unknown> = {}) {
   const body = { version: 1, hub_instance_id: hubId, nonce: n, issued_at: now, expires_at: now + 30_000, ...patch };
@@ -24,6 +29,149 @@ test('accepts a real Ed25519 signature from the Hub contract', () => {
   expect(parseIngressManifest(m, canonical, now)).toEqual(m);
   expect(verifyIngressProof(proof(nonce, now), m, nonce, now)).toBe(true);
   expect(verifyIngressProof({ ...proof(nonce, now), signature: 'A'.repeat(86) + '==' }, m, nonce, now)).toBe(false);
+});
+
+test('signed manifests use only the original signed bytes and ignore forged flat aliases', () => {
+  const m = signedManifest(), evil = 'https://proxy.example/salcara-hub/v1';
+  const parsed = parseIngressManifest({ ...m, endpoints: [...m.endpoints, { id: 'proxy', url: evil, priority: 0 }] }, canonical);
+  expect(parsed.endpoints.some(item => item.url === evil)).toBe(false);
+  const changed = Buffer.from(JSON.stringify({ ...manifest(), hub_instance_id: 'c'.repeat(32) })).toString('base64');
+  expect(() => parseIngressManifest({ ...m, signed_payload: changed }, canonical)).toThrow('signature');
+});
+
+test('unsigned manifests never authorize an alternate, even with a forwarded valid nonce proof', async () => {
+  const calls: string[] = [];
+  const router = createIngressRouter({ nonce: () => nonce, fetch: async url => { calls.push(url); return url.endsWith('/manifest') ? json(manifest()) : json(proof()); } });
+  await router.refresh(canonical);
+  expect(await router.resolve(canonical)).toBe(canonical);
+  expect(await router.verifyAlias(canonical, backup)).toBe(false);
+  expect(calls.some(url => url.startsWith(`${backup}/ingress/identity`))).toBe(false);
+  expect(router.snapshot(canonical)?.endpoints).toEqual([manifest().endpoints[0]]);
+});
+
+test('a verified same-Hub alias preserves the saved canonical identity and checks membership before proof', async () => {
+  const calls: Array<{ url: string; init: Record<string, unknown> }> = [];
+  const router = createIngressRouter({ nonce: () => nonce, storage: { read: async () => JSON.stringify(signedManifest()), write: async () => undefined }, fetch: async (url, init) => {
+    calls.push({ url, init });
+    if (url.startsWith(canonical)) throw new Error('original offline');
+    return url.endsWith('/manifest') ? json(signedManifest()) : json(proof());
+  } });
+  expect(await router.verifyAlias(canonical, backup)).toBe(true);
+  expect(router.snapshot(canonical)?.canonical_url).toBe(canonical);
+  expect(calls.every(call => JSON.stringify(call.init.headers) === '{"Accept":"application/json"}' && call.init.redirect === 'error' && call.init.credentials === 'omit')).toBe(true);
+  expect(await router.verifyAlias(canonical, 'https://unlisted.example/salcara-hub/v1')).toBe(false);
+  expect(calls.some(call => call.url.includes('unlisted.example') && call.url.includes('/identity?'))).toBe(false);
+});
+
+test('first pairing through a signed alias pins the Hub identity and preserves its logical URL across restart', async () => {
+  let saved = '';
+  const calls: string[] = [];
+  const storage = { read: async () => saved || null, write: async (_key: string, raw: string) => { saved = raw; } };
+  const fetch: FetchLike = async url => {
+    calls.push(url);
+    if (url.endsWith('/manifest')) return json(signedManifest());
+    if (url.includes('/identity?')) return json(proof(new URL(url).searchParams.get('nonce')!));
+    return json({ devices: [] });
+  };
+  const router = createIngressRouter({ nonce: () => nonce, storage, fetch });
+  await router.confirmPairingIdentity(backup, () => true);
+  expect(router.pinSnapshot(backup)?.canonical_url).toBe(canonical);
+  expect(parseIngressManifest(signedManifest(), backup).canonical_url).toBe(canonical);
+  expect(() => parseIngressManifest(signedManifest(), 'https://unlisted.example/v1')).toThrow('not authorized');
+  const restarted = createIngressRouter({ nonce: () => nonce, storage, fetch });
+  const result = await restarted.fetch(backup, '/app/devices', { headers: { 'X-Salcara-Pair-Token': 'private-pair' } });
+  expect(result.endpoint).toBe(backup);
+  expect(restarted.pinSnapshot(backup)?.hub_instance_id).toBe(hubId);
+  expect(calls.filter(url => url.endsWith('/app/devices'))).toEqual([`${backup}/app/devices`]);
+});
+
+test('a durable alias pin is retained when a newer signed routing list retires that logical URL', async () => {
+  const replacement = 'https://new-entry.example/Custom/v1';
+  const current = signedManifest({ ...manifest(), endpoints: [manifest().endpoints[0], { id: 'replacement', url: replacement, priority: 1 }] });
+  let sent = '';
+  const router = createIngressRouter({ nonce: () => nonce, storage: { read: async () => JSON.stringify(current), write: async () => undefined }, fetch: async (url, init) => {
+    if (url.endsWith('/manifest')) throw new Error('retired alias');
+    if (url.includes('/identity?')) return json(proof(new URL(url).searchParams.get('nonce')!));
+    if ((init.headers as Record<string, string>)['X-Salcara-Pair-Token']) sent = url;
+    return json({ devices: [] });
+  } });
+  await router.fetch(backup, '/app/devices', { headers: { 'X-Salcara-Pair-Token': 'private-pair' } });
+  expect(sent).toBe(`${replacement}/app/devices`);
+  expect(router.pinSnapshot(backup)?.hub_instance_id).toBe(hubId);
+});
+
+test('a replacement QR claim and anonymous discovery never use an older Hub routing authority', async () => {
+  const calls: Array<{ url: string; init: Record<string, unknown> }> = [];
+  setHubFetch(async (url, init) => {
+    calls.push({ url, init });
+    if (url.endsWith('/manifest')) return json(signedManifest());
+    if (url.includes('/identity?')) return json(proof(new URL(url).searchParams.get('nonce')!));
+    if (url.endsWith('/ping')) return json({ service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, authModes: ['device-pairing'], capabilities: ['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1'] });
+    if (url.endsWith('/app/pair/qr')) return json({ pair_token: 'd'.repeat(64), device: { deviceId: 'replacement-device', name: 'New computer', tools: [], projects: [] } });
+    return json({ devices: [] });
+  }, true);
+  await devices({ url: canonical, pairToken: 'old-pair', deviceId: 'old-device' });
+  expect(calls.some(call => call.url === `${backup}/app/devices`)).toBe(true);
+  await discoverStation(canonical);
+  await confirmQrPair({ type: 'salcara-remote-pair', version: 1, hubUrl: canonical, deviceId: 'replacement-device', deviceName: 'New computer', ticket: 'e'.repeat(64), expiresAt: Date.now() + 300_000 });
+  expect(calls.filter(call => call.url.endsWith('/ping')).map(call => call.url)).toEqual([`${canonical}/ping`]);
+  const claim = calls.find(call => call.url.endsWith('/app/pair/qr'))!;
+  expect(claim.url).toBe(`${canonical}/app/pair/qr`);
+  expect(JSON.parse(claim.init.body as string).ticket).toBe('e'.repeat(64));
+  expect(claim.init.redirect).toBe('error'); expect(claim.init.credentials).toBe('omit');
+  expect(claim.init.headers).not.toHaveProperty('X-Salcara-Pair-Token');
+});
+
+test('expired stored authority retains its pin and does not forward credentials after a Hub reset', async () => {
+  const now = Date.now(), previous = signedManifest(manifest(now - 86_400_001)); let credentialed = 0;
+  const router = createIngressRouter({ now: () => now, nonce: () => nonce, storage: { read: async () => JSON.stringify(previous), write: async () => undefined }, fetch: async (url, init) => {
+    if (JSON.stringify(init.headers).includes('private-pair')) credentialed++;
+    return url.endsWith('/manifest') ? json(signedManifest({ ...manifest(now), hub_instance_id: 'e'.repeat(32) })) : json(proof());
+  } });
+  await expect(router.fetch(canonical, '/app/devices', { headers: { 'X-Salcara-Pair-Token': 'private-pair' } })).rejects.toThrow('原中转站身份');
+  expect(credentialed).toBe(0); expect(router.pinSnapshot(canonical)?.hub_instance_id).toBe(hubId);
+});
+
+test('only a successful explicitly confirmed pairing may replace a reset identity pin', async () => {
+  const next = signedManifest({ ...manifest(), hub_instance_id: 'e'.repeat(32) });
+  const router = createIngressRouter({ nonce: () => nonce, storage: { read: async () => JSON.stringify(signedManifest()), write: async () => undefined }, fetch: async () => json(next) });
+  await router.confirmPairingIdentity(canonical, () => false);
+  expect(router.pinSnapshot(canonical)?.hub_instance_id).toBe(hubId);
+  await router.confirmPairingIdentity(canonical, () => true);
+  expect(router.pinSnapshot(canonical)?.hub_instance_id).toBe(next.hub_instance_id);
+});
+
+test('a late old manifest storage write cannot overwrite a newly paired Hub identity on restart', async () => {
+  let release!: () => void, entered = false, calls = 0, saved = '';
+  const oldWrite = new Promise<void>(done => { release = done; });
+  const next = signedManifest({ ...manifest(), hub_instance_id: 'e'.repeat(32) });
+  const storage = { read: async () => saved || null, write: async (_url: string, value: string) => {
+    if (!entered) { entered = true; await oldWrite; } saved = value;
+  } };
+  const router = createIngressRouter({ nonce: () => nonce, storage, fetch: async () => json(++calls === 1 ? signedManifest() : next) });
+  const refreshing = router.refresh(canonical); await flush(); expect(entered).toBe(true);
+  const pairing = router.confirmPairingIdentity(canonical, () => true); await flush(); release();
+  await Promise.all([refreshing, pairing]);
+  const restarted = createIngressRouter({ nonce: () => nonce, storage, fetch: async () => json({}, 503) });
+  await restarted.resolve(canonical);
+  expect(restarted.pinSnapshot(canonical)?.hub_instance_id).toBe(next.hub_instance_id);
+});
+
+test('evicting a cache entry cannot let its delayed storage write restore an older pairing pin', async () => {
+  let release!: () => void, entered = false, calls = 0, saved = '';
+  const blocked = new Promise<void>(done => { release = done; });
+  const next = signedManifest({ ...manifest(), hub_instance_id: 'e'.repeat(32) });
+  const storage = { read: async (url: string) => url === canonical ? saved || null : null, write: async (_url: string, value: string) => {
+    if (!entered) { entered = true; await blocked; } saved = value;
+  } };
+  const router = createIngressRouter({ nonce: () => nonce, storage, fetch: async () => json(++calls === 1 ? signedManifest() : next) });
+  const refreshing = router.refresh(canonical); await flush(); expect(entered).toBe(true);
+  for (let i = 0; i < 32; i++) await router.resolve(`https://entry-${i}.example/v1`);
+  const pairing = router.confirmPairingIdentity(canonical, () => true);
+  await flush(); release(); await Promise.all([refreshing, pairing]);
+  const restarted = createIngressRouter({ nonce: () => nonce, storage, fetch: async () => json({}, 503) });
+  await restarted.resolve(canonical);
+  expect(restarted.pinSnapshot(canonical)?.hub_instance_id).toBe(next.hub_instance_id);
 });
 
 test.each([
@@ -43,9 +191,10 @@ test.each([
 });
 
 test('loads persisted authority, preflights fallback without credentials, and keeps canonical identity', async () => {
-  const m = manifest(), calls: Array<{ url: string; init: Record<string, unknown> }> = [];
+  const m = signedManifest(), calls: Array<{ url: string; init: Record<string, unknown> }> = [];
   const fetch: FetchLike = async (url, init) => {
     calls.push({ url, init });
+    if (url === `${canonical}/ingress/manifest`) throw new Error('offline');
     if (url.startsWith(`${canonical}/ingress/identity`)) throw new Error('offline');
     if (url.startsWith(`${backup}/ingress/identity`)) return json(proof(new URL(url).searchParams.get('nonce')!));
     return json({ devices: [] });
@@ -62,7 +211,7 @@ test('loads persisted authority, preflights fallback without credentials, and ke
 test('a response lost after POST does not cause replay on another ingress', async () => {
   let posts = 0;
   const fetch: FetchLike = async (url, init) => {
-    if (url.endsWith('/manifest')) return json(manifest());
+    if (url.endsWith('/manifest')) return json(signedManifest());
     if (url.includes('/identity?')) return json(proof(new URL(url).searchParams.get('nonce')!));
     if (init.method === 'POST') { posts++; throw new Error('response lost'); }
     return json({});
@@ -78,7 +227,7 @@ test('failed GET can retry through a freshly verified backup, auth failures cann
   const visited: string[] = [];
   let status = 503;
   const fetch: FetchLike = async url => {
-    if (url.endsWith('/manifest')) { const m = manifest(); m.endpoints[1].priority = 200; return json(m); }
+    if (url.endsWith('/manifest')) { const m = manifest(); m.endpoints[1].priority = 200; return json(signedManifest(m)); }
     if (url.includes('/identity?')) return json(proof(new URL(url).searchParams.get('nonce')!));
     visited.push(url); return json({}, url.startsWith(canonical) ? status : 200);
   };
@@ -96,7 +245,7 @@ test('healthy canonical endpoint requires no identity round trip', async () => {
   const calls: string[] = [];
   const router = createIngressRouter({ nonce: () => nonce, fetch: async url => {
     calls.push(url);
-    if (url.endsWith('/manifest')) { const m = manifest(); m.endpoints[1].priority = 200; return json(m); }
+    if (url.endsWith('/manifest')) { const m = manifest(); m.endpoints[1].priority = 200; return json(signedManifest(m)); }
     return json({});
   } });
   await router.refresh(canonical); calls.length = 0;
@@ -107,7 +256,7 @@ test('healthy canonical endpoint requires no identity round trip', async () => {
 test('concurrent requests share proof checks, but still each send their own request', async () => {
   let checks = 0, requests = 0;
   const router = createIngressRouter({ nonce: () => nonce, fetch: async url => {
-    if (url.endsWith('/manifest')) return json(manifest());
+    if (url.endsWith('/manifest')) return json(signedManifest());
     if (url.includes('/identity?')) { checks++; await flush(); return json(proof()); }
     requests++; return json({});
   } });
@@ -144,7 +293,7 @@ test('rejects redirect and changed identity without publishing or persisting eit
 test('abort during preflight never sends credentials afterward', async () => {
   const controller = new AbortController(); let credentialed = 0;
   const router = createIngressRouter({ nonce: () => nonce, fetch: async (url, init) => {
-    if (url.endsWith('/manifest')) return json(manifest());
+    if (url.endsWith('/manifest')) return json(signedManifest());
     if (url.includes('/identity?')) { controller.abort(); return json(proof()); }
     if (init.headers) credentialed++; return json({});
   } });
@@ -174,7 +323,7 @@ test('HTTP integration changes only transport and preserves command identity', a
   const calls: Array<{ url: string; init: Record<string, unknown> }> = [];
   const fetch: FetchLike = async (url, init) => {
     calls.push({ url, init });
-    if (url.endsWith('/manifest')) return json(manifest());
+    if (url.endsWith('/manifest')) return json(signedManifest());
     if (url.startsWith(`${canonical}/ingress/identity`)) throw new Error('offline');
     if (url.includes('/identity?')) return json(proof(new URL(url).searchParams.get('nonce')!));
     if (url.endsWith('/app/commands')) return json({ ok: true, result: {} });
@@ -195,7 +344,7 @@ test('SSE reconnect uses backup and resumes the same cursor', async () => {
   let learned = false, stream: ReturnType<typeof openStream> | undefined;
   const urls: string[] = [];
   const fetch: FetchLike = async (url) => {
-    if (url.endsWith('/manifest')) { learned = true; return json(manifest()); }
+    if (url.endsWith('/manifest')) { learned = true; return json(signedManifest()); }
     if (url.startsWith(`${canonical}/ingress/identity`)) throw new Error('offline');
     if (url.includes('/identity?')) return json(proof(new URL(url).searchParams.get('nonce')!));
     if (url.includes('/app/stream')) { urls.push(url); return { ok: true, status: 200, headers: { get: () => 'text/event-stream' }, text: async () => '' }; }

@@ -1,4 +1,17 @@
 import { remoteConnectionState, remoteDeviceConnected } from '../remote/connection-state';
+import { connectionFailure } from '../remote/connection-errors';
+import { HubError } from '../remote/client';
+
+test.each([
+  new HubError('private raw upstream body with secret-pair-token', 503),
+  new HubError('private raw upstream body with secret-pair-token', 403, 'unknown_access_policy'),
+  new HubError('private raw upstream body with secret-pair-token', 403, 'device_credentials_invalid'),
+  new Error('private raw upstream body with secret-pair-token'),
+])('transport connection state never persists an arbitrary server body: %s', error => {
+  const failure = connectionFailure(error);
+  expect(failure.connectionError).toBeTruthy();
+  expect(JSON.stringify(failure)).not.toMatch(/private|upstream|secret-pair-token/);
+});
 
 test('a cached online computer never bypasses a disconnected Hub transport', () => {
   const device = { online: true };
@@ -33,4 +46,12 @@ test('connection details use the selected Bot or relay and reject another comput
   expect(remoteConnectionState(remote, { deviceId: bot.deviceId, online: true }).tone).toBe('connected');
   expect(remoteConnectionState({ ...remote, connectionId: relay.id }, { deviceId: relay.deviceId, online: false }).detail).toContain('中转站');
   expect(JSON.stringify(status)).not.toMatch(/private\.example|private-group|pc-a|pc-b/);
+});
+
+test.each([
+  ['pairing', '需要重新绑定'], ['permission', '远程访问受限'], ['enrollment', '电脑需要重新登记'],
+  ['unsupported', '远程服务不兼容'], ['unavailable', '远程服务暂不可用'], ['timeout', '远程连接超时'],
+] as const)('status preserves the safe %s reason without displaying raw service response data', (connectionProblem, label) => {
+  const status = remoteConnectionState({ connection: 'error', connectionError: 'PRIVATE_CREDENTIAL', connectionProblem });
+  expect(status.label).toBe(label); expect(JSON.stringify(status)).not.toContain('PRIVATE_CREDENTIAL');
 });

@@ -1,7 +1,7 @@
 import type { ProviderProfile } from '../domain';
 import { confirmPair, setHubFetch, type FetchLike } from '../remote/client';
 import { connectionToken, loadConnections } from '../remote/connections';
-import { bootRemote, diagnoseRemoteConnection, getRemoteState, onRemoteChange, pairScannedRemoteQr, parseScannedRemoteQr, resetRemoteForTests, watchCredentials } from '../remote/store';
+import { bootRemote, diagnoseRemoteConnection, getRemoteState, onRemoteChange, pairScannedRemoteQr, parseScannedRemoteQr, resetRemoteForTests, signInRemote, watchCredentials } from '../remote/store';
 
 const mockSettings = new Map<string, string>(), mockSecrets = new Map<string, string>();
 const mockReadSetting = jest.fn(), mockReadSecret = jest.fn(), mockReadProvider = jest.fn(), mockWriteSetting = jest.fn();
@@ -56,20 +56,19 @@ test('switching the paired computer cancels a pending Hub probe before a compute
   expect(targets).toEqual(['hub']); expect(getRemoteState().devices[0].deviceId).toBe('new-pc');
 });
 
-test.each(['selection', 'provider-key', 'pair-token'] as const)('late legacy startup cannot overwrite a newly paired station after its %s read', async pauseAt => {
+test.each(['selection', 'pair-token'] as const)('late legacy startup cannot overwrite a newly paired station after its %s read', async pauseAt => {
   mockSettings.set('remote_service', provider.id); mockSecrets.set('remote-pair-legacy-a', 'a'.repeat(64));
   const read = deferred<string | null>(); let entered = false;
   if (pauseAt === 'selection') mockReadSetting.mockImplementation(async (key: string) => {
     if (key === 'remote_service') { entered = true; return read.promise; } return mockSettings.get(key) ?? null;
   });
-  else if (pauseAt === 'provider-key') mockReadProvider.mockImplementation(async () => { entered = true; return read.promise; });
   else mockReadSecret.mockImplementation(async (key: string) => {
     if (key === 'remote-pair-legacy-a') { entered = true; return read.promise; } return mockSecrets.get(key) ?? null;
   });
   const starting = bootRemote([provider]); await flush(); expect(entered).toBe(true);
   await pairScannedRemoteQr(qr());
   const current = getRemoteState().connectionId;
-  read.resolve(pauseAt === 'selection' ? provider.id : pauseAt === 'provider-key' ? 'synthetic-legacy-key' : 'a'.repeat(64));
+  read.resolve(pauseAt === 'selection' ? provider.id : 'a'.repeat(64));
   await starting;
   expect(getRemoteState()).toMatchObject({ phase: 'ready', serviceId: null, connectionId: current, selectedHubUrl: hubUrl });
   expect(watchCredentials()).toEqual({ url: hubUrl, pairToken: 'c'.repeat(64) });
@@ -100,7 +99,43 @@ test('normal legacy startup still restores its own unchanged credentials', async
   mockSettings.set('remote_service', provider.id); mockSecrets.set('remote-pair-legacy-a', 'a'.repeat(64));
   await bootRemote([provider]);
   expect(getRemoteState()).toMatchObject({ phase: 'ready', serviceId: provider.id, connectionId: null });
-  expect(watchCredentials()).toEqual({ url: 'https://legacy-a.example/salcara-hub/v1', key: 'synthetic-legacy-key', pairToken: 'a'.repeat(64) });
+  expect(watchCredentials()).toEqual({ url: 'https://legacy-a.example/salcara-hub/v1', pairToken: 'a'.repeat(64) });
+  expect(mockReadProvider).not.toHaveBeenCalled();
+});
+
+test('legacy API selection discovers anonymously without model key storage or /me login', async () => {
+  const calls: Array<{ endpoint: string; headers: unknown }> = [];
+  mockReadProvider.mockRejectedValue(new Error('model key store must not be read'));
+  setHubFetch(async (endpoint, init) => { calls.push({ endpoint, headers: init.headers }); return transport(endpoint, init); });
+  await bootRemote([]); await signInRemote(provider);
+  expect(getRemoteState()).toMatchObject({ phase: 'pairing', serviceId: provider.id });
+  expect(calls).toHaveLength(1); expect(calls[0].endpoint).toBe('https://legacy-a.example/salcara-hub/v1/ping');
+  expect(calls[0].headers).toEqual({ Accept: 'application/json' });
+  expect(mockReadProvider).not.toHaveBeenCalled();
+});
+
+test('late legacy discovery cannot replace a newer QR pairing or read its old pairing token', async () => {
+  const read = deferred<Awaited<ReturnType<FetchLike>>>(); let entered = false;
+  setHubFetch(async (endpoint, init) => {
+    if (endpoint.startsWith('https://legacy-a.example')) { entered = true; return read.promise; }
+    return transport(endpoint, init);
+  });
+  await bootRemote([]); const pending = signInRemote(provider); const rejected = expect(pending).rejects.toThrow('连接选择已改变');
+  await flush(); expect(entered).toBe(true); await pairScannedRemoteQr(qr());
+  read.resolve(await transport('https://legacy-a.example/salcara-hub/v1/ping', {})); await rejected;
+  expect(watchCredentials()).toEqual({ url: hubUrl, pairToken: 'c'.repeat(64) });
+  expect(mockReadSecret.mock.calls.some(([key]) => key === 'remote-pair-legacy-a')).toBe(false);
+});
+
+test('a newly discovered prefixed Hub never receives a legacy token issued for the default root Hub', async () => {
+  mockSecrets.set('remote-pair-legacy-a', 'a'.repeat(64));
+  const headers: unknown[] = [];
+  setHubFetch(async (endpoint, init) => { headers.push(init.headers); return transport(endpoint, init); });
+  await bootRemote([]); await signInRemote({ ...provider, baseUrl: 'https://legacy-a.example/tenant/v1' });
+  expect(getRemoteState()).toMatchObject({ phase: 'pairing' });
+  expect(watchCredentials()).toBeNull(); expect(headers).toEqual([{ Accept: 'application/json' }]);
+  expect(mockSecrets.get('remote-pair-legacy-a')).toBe('a'.repeat(64));
+  expect(mockReadProvider).not.toHaveBeenCalled();
 });
 
 test('a successful direct QR publishes ready state together with its credentials for notification subscribers', async () => {

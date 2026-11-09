@@ -12,8 +12,9 @@ import java.util.concurrent.CancellationException
 /** Worker-thread transport selection. Pairing and event cursors stay on the canonical Hub. */
 internal class SalcaraIngressRouter {
   private data class Endpoint(val id: String, val url: String, val priority: Int)
-  private data class Manifest(val hubId: String, val key: String, val revision: Long, val expires: Long, val endpoints: List<Endpoint>)
+  private data class Manifest(val hubId: String, val key: String, val revision: Long, val expires: Long, val endpoints: List<Endpoint>, val signed: Boolean)
   private var canonical = ""
+  private var credentialScope = ""
   private var manifest: Manifest? = null
   private var refreshAt = 0L
   private val failed = HashMap<String, Long>()
@@ -22,28 +23,29 @@ internal class SalcaraIngressRouter {
 
   fun fail(endpoint: String) { failed[endpoint] = System.currentTimeMillis() + 30_000; leases.remove(endpoint) }
 
-  fun resolve(url: String, handedOver: JSONObject?, active: () -> Boolean): String {
-    if (canonical != url) { canonical = url; manifest = null; refreshAt = 0; failed.clear(); leases.clear() }
+  fun resolve(url: String, handedOver: JSONObject?, pairingScope: String = "", active: () -> Boolean): String {
+    if (canonical != url || credentialScope != pairingScope) { canonical = url; credentialScope = pairingScope; manifest = null; refreshAt = 0; failed.clear(); leases.clear() }
     if (!validUrl(url)) return url
     val now = System.currentTimeMillis()
     // The caller hands over only a manifest previously read from the original
     // canonical HTTPS address. Validate its shape and expiration again here.
-    try { if (handedOver != null) accept(parse(handedOver, url, now)) } catch (_: Exception) { }
+    try { if (handedOver != null) accept(parse(handedOver, url, now, true, false)) } catch (_: Exception) { }
     if (!active()) throw CancellationException()
     if (refreshAt <= now) {
       refreshAt = now + 60_000
       try {
-        val next = parse(publicJson("$url/ingress/manifest", active), url, System.currentTimeMillis())
+        val next = parse(publicJson("$url/ingress/manifest", active), url, System.currentTimeMillis(), requireLogicalMembership = manifest == null)
         if (accept(next)) refreshAt = System.currentTimeMillis() + 6 * 60 * 60_000
       } catch (_: Exception) { }
     }
     if (!active()) throw CancellationException()
-    val authority = manifest?.takeIf { it.expires > System.currentTimeMillis() } ?: return url
+    val authority = manifest ?: return url
+    require(authority.expires > System.currentTimeMillis()) { "Hub identity must be refreshed before sending pairing credentials" }
     var checks = 0
     for (endpoint in authority.endpoints.sortedBy { it.priority }) {
       if (!active()) throw CancellationException()
       if ((failed[endpoint.url] ?: 0) > System.currentTimeMillis()) continue
-      if (endpoint.url == url) return url
+      if (endpoint.url != url && !authority.signed) continue
       if ((leases[endpoint.url] ?: 0) > System.currentTimeMillis()) return endpoint.url
       if (++checks > 3) break
       try {
@@ -65,25 +67,38 @@ internal class SalcaraIngressRouter {
       catch (_: Exception) { fail(endpoint.url) }
     }
     if (!active()) throw CancellationException()
-    return url
+    throw IllegalStateException("Cannot verify the saved Hub identity")
   }
 
   private fun accept(next: Manifest): Boolean {
     val previous = manifest
-    if (previous != null && (previous.hubId != next.hubId || previous.key != next.key || previous.revision > next.revision)) return false
-    if (previous != null && previous.revision == next.revision && previous.expires >= next.expires) return true
+    if (previous != null && (previous.hubId != next.hubId || previous.key != next.key || previous.revision > next.revision || previous.signed && !next.signed)) return false
+    if (previous != null && previous.revision == next.revision && previous.expires >= next.expires && (!next.signed || previous.signed)) return true
     manifest = next; leases.clear(); failed.clear()
     return true
   }
 
-  private fun parse(value: JSONObject, url: String, now: Long): Manifest {
+  private fun parse(input: JSONObject, url: String, now: Long, allowExpired: Boolean = false, requireLogicalMembership: Boolean = true): Manifest {
+    val signed = input.has("signed_payload") || input.has("signature")
+    val value = if (signed) {
+      val encoded = input.getString("signed_payload")
+      require(encoded.length <= 12_000 && encoded.matches(Regex("[A-Za-z0-9+/]+={0,2}")))
+      val payload = Base64.decode(encoded, Base64.NO_WRAP)
+      require(Base64.encodeToString(payload, Base64.NO_WRAP) == encoded)
+      val decoded = JSONObject(Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(payload)).toString())
+      require(!decoded.has("signed_payload") && !decoded.has("signature"))
+      val prefix = "salcara-ingress-manifest-v1\n".toByteArray(Charsets.UTF_8)
+      Ed25519Verify(bytes(decoded.getString("identity_public_key"), 32)).verify(bytes(input.getString("signature"), 64), prefix + payload)
+      decoded
+    } else input
     val hubId = value.getString("hub_instance_id")
     val key = value.getString("identity_public_key")
     val revision = number(value, "revision")
     val issued = number(value, "issued_at")
     val expires = number(value, "expires_at")
-    require(number(value, "version") == 1L && value.getString("canonical_url") == url && hubId.matches(Regex("[a-f0-9]{32}")))
-    require(issued <= now + 30_000 && expires > now && expires > issued && expires - issued <= 86_400_000)
+    val manifestCanonical = if (signed) value.getString("canonical_url") else url
+    require(validUrl(manifestCanonical) && number(value, "version") == 1L && value.getString("canonical_url") == manifestCanonical && hubId.matches(Regex("[a-f0-9]{32}")))
+    require(revision > 0 && issued <= now + 30_000 && (allowExpired || expires > now) && expires > issued && expires - issued <= 86_400_000)
     bytes(key, 32)
     val rows = value.getJSONArray("endpoints")
     require(rows.length() in 1..8)
@@ -96,8 +111,9 @@ internal class SalcaraIngressRouter {
       Endpoint(id, endpoint, priority.toInt())
     }
     require(endpoints.map { it.id }.distinct().size == endpoints.size && endpoints.map { it.url }.distinct().size == endpoints.size)
-    require(endpoints.any { it.id == "canonical" && it.url == url })
-    return Manifest(hubId, key, revision, expires, endpoints)
+    require(endpoints.any { it.id == "canonical" && it.url == manifestCanonical })
+    require(!signed || !requireLogicalMembership || endpoints.any { it.url == url })
+    return Manifest(hubId, key, revision, expires, endpoints, signed)
   }
 
   private fun publicJson(url: String, active: () -> Boolean): JSONObject {
@@ -151,7 +167,8 @@ internal class SalcaraIngressRouter {
         }
       value.length <= 512 && value.startsWith("https://") && !Regex("[\\\\\\s]").containsMatchIn(value) && url.scheme == "https"
         && url.rawUserInfo == null && url.rawQuery == null && url.rawFragment == null && !privateHost
-        && url.rawPath == "/salcara-hub/v1" && url.port != 443 && (url.port == -1 || url.port in 1..65535)
+        && url.rawPath.endsWith("/v1") && !url.rawPath.contains("//") && url.rawPath.split('/').drop(1).all { it.matches(Regex("[A-Za-z0-9._~-]+")) && it != "." && it != ".." }
+        && url.port != 443 && (url.port == -1 || url.port in 1..65535)
     } catch (_: Exception) { false }
   }
 }

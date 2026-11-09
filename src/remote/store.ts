@@ -15,9 +15,9 @@ import { parseComputerActivity, type ComputerActivity } from './computer-activit
 
 import type { ProviderProfile } from '../domain';
 import { getSetting, setSetting } from '../storage/database';
-import { getProviderKey } from '../storage/secure-keys';
+import { connectionFailure, connectionProblem, type ConnectionProblem } from './connection-errors';
 import {
-  command, confirmPair, confirmQrPair, devices as fetchDevices, discoverStation, hubUrlFor, HubError, isExecutionPolicyError, me, ping, revokePair, sessionEventsPage, parseFeatureChange,
+  command, confirmPair, confirmQrPair, devices as fetchDevices, discoverStation, hubUrlFor, HubError, isExecutionPolicyError, isPairingAuthenticationError, ping, revokePair, sessionEventsPage, parseFeatureChange, verifyHubAlias, confirmPairingHubIdentity,
   type AgentId, type AgentProfile, type ApprovalMode, type AttachmentRef, type Command, type Decision, type DeviceStatus, type Effort, type Hub, type HubEvent, type Project, type ClaudeDesktopScope, type WorkspaceMode,
   type RemoteApiOption, type SessionInfo, type ToolId, type ToolKind, type Usage, type PermissionMode,
   type RemoteQuestion, type QuestionAnswers, type ModelCapability, type ModelCatalog,
@@ -542,6 +542,7 @@ export interface RemoteState {
   probes: Record<string, Probe>;
   connection: Connection;
   connectionError?: string;
+  connectionProblem?: ConnectionProblem;
   connectionSync?: { connectionId: string; loading: boolean; failed: { hubUrl: string; message: string }[]; error?: string; checkedAt?: number };
   devices: DeviceStatus[];
   devicesLoaded: boolean;
@@ -954,6 +955,18 @@ export async function connectStation(stationUrl: string, stillWanted: () => bool
     // Discovery is read-only. Leaving the setup page must not discard the
     // currently paired computer or its cached conversations when it finishes.
     if (!stillWanted()) return;
+    const selected = state.connections.find(item => item.id === state.connectionId);
+    const saved = state.connections.filter(item => item.hubUrl === discovery.url);
+    const sameStation = saved.find(item => item.id === selected?.id) ?? (saved.length === 1 ? saved[0] : undefined);
+    const aliasCandidate = selected ?? (state.connections.length === 1 ? state.connections[0] : undefined);
+    const reusable = sameStation ?? (aliasCandidate && await verifyHubAlias(aliasCandidate.hubUrl, discovery.url) ? aliasCandidate : undefined);
+    if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重试');
+    if (!stillWanted()) return;
+    if (reusable) {
+      committed = true;
+      await useSavedConnection(reusable.id, true, { stillWanted });
+      return;
+    }
     selectionAttempted = true;
     await selectConnection(null);
     if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重试');
@@ -1009,6 +1022,7 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
   set({ signingIn: id });
   const current = () => generation === connectionGeneration && stillWanted();
   const requireOnline = options.requireOnline === true && !deferNetwork;
+  let pairedRequestIssued = false;
   try {
     const discovery = deferNetwork ? null : await discoverStation(profile.hubUrl);
     if (!current()) return;
@@ -1026,6 +1040,7 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
     const activeOwner: Hub = { url: profile.hubUrl, pairToken: token, ...(profile.botGroupId ? { botToken: token } : {}), deviceId: profile.deviceId };
     // An available Hub does not imply that this exact computer is reachable.
     // Authenticate and verify the target before replacing the old connection.
+    pairedRequestIssued = requireOnline;
     const confirmedDevices = requireOnline ? await fetchDevices(activeOwner) : undefined;
     if (!current()) return;
     if (confirmedDevices && !confirmedDevices.some(item => item.deviceId === profile.deviceId && item.online)) {
@@ -1054,7 +1069,7 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
     if (!current()) return;
     // Preserve the confirmed A-side owner when a handover's target is unavailable.
     if (!requireOnline && !options.handoverOperationId) resetConnection({ phase: 'ready', connectionId: profile.id, selectedHubUrl: profile.hubUrl,
-      signingIn: null, devicesLoaded: true, connection: 'error', connectionError: (error as Error).message });
+      signingIn: null, devicesLoaded: true, connection: 'error', ...connectionFailure(error, pairedRequestIssued) });
     throw error;
   } finally {
     if (generation === connectionGeneration && state.signingIn === id) set({ signingIn: null });
@@ -1090,9 +1105,11 @@ async function pairScannedRemoteQrImpl(validated: PairQr, stillWanted: () => boo
     deviceId: validated.deviceId, deviceName: result.device.name, pairedAt: Date.now(), ...(validated.computerId ? { computerId: validated.computerId } : {}) };
   const connections = await saveConnection(profile, result.token, () => pairingOwners.get(profile.id) === attempt);
   if (generation !== connectionGeneration || attempt !== pairingGeneration || !stillWanted()) { set({ connections }); return; }
+  await confirmPairingHubIdentity(profile.hubUrl, () => generation === connectionGeneration && attempt === pairingGeneration && stillWanted());
+  if (generation !== connectionGeneration || attempt !== pairingGeneration || !stillWanted()) { set({ connections }); return; }
   if (!await selectConnectionIf(profile.id, () => generation === connectionGeneration && attempt === pairingGeneration && stillWanted())) { set({ connections }); return; }
   resetConnection({ phase: 'ready', connections, connectionId: profile.id, selectedHubUrl: profile.hubUrl,
-    devices: [result.device], devicesLoaded: true, connection: 'open', connectionError: undefined }, {
+    devices: [result.device], devicesLoaded: true, connection: 'open', connectionError: undefined, connectionProblem: undefined }, {
     owner: { url: profile.hubUrl, pairToken: result.token, deviceId: profile.deviceId }, capabilities: discovery.capabilities,
   });
   void syncRemoteConnections(true);
@@ -1135,10 +1152,12 @@ async function pairRemoteQrImpl(validated: PairQr, attempt: number): Promise<voi
   };
   const connections = await saveConnection(profile, result.token, () => pairingOwners.get(profile.id) === attempt);
   if (generation !== connectionGeneration || attempt !== pairingGeneration) { set({ connections }); return; }
+  await confirmPairingHubIdentity(profile.hubUrl, () => generation === connectionGeneration && attempt === pairingGeneration);
+  if (generation !== connectionGeneration || attempt !== pairingGeneration) { set({ connections }); return; }
   if (!await selectConnectionIf(profile.id, () => generation === connectionGeneration && attempt === pairingGeneration)) { set({ connections }); return; }
   hub = { url: profile.hubUrl, pairToken: result.token, deviceId: profile.deviceId };
   lastSeq = 0;
-  set({ phase: 'ready', connections, connectionId: profile.id, devices: [result.device], devicesLoaded: true, connection: 'open', connectionError: undefined });
+  set({ phase: 'ready', connections, connectionId: profile.id, devices: [result.device], devicesLoaded: true, connection: 'open', connectionError: undefined, connectionProblem: undefined });
   void syncRemoteConnections(true);
 }
 
@@ -1160,7 +1179,7 @@ export async function renameRemoteConnection(id: string, alias: string): Promise
   set({ connections });
 }
 
-export type SavedConnectionHealth = 'online' | 'offline' | 'unreachable' | 'reauth';
+export type SavedConnectionHealth = 'online' | 'offline' | 'unreachable' | 'reauth' | 'denied' | 'enrollment' | 'unsupported' | 'unavailable' | 'timeout';
 /** Read every saved computer without changing the selected route or its UI state. */
 export async function probeSavedConnections(): Promise<Record<string, SavedConnectionHealth>> {
   const profiles = state.connections;
@@ -1176,7 +1195,8 @@ export async function probeSavedConnections(): Promise<Record<string, SavedConne
         const device = devices.find(item => item.deviceId === profile.deviceId);
         health[profile.id] = device?.online ? 'online' : 'offline';
       } catch (error) {
-        health[profile.id] = error instanceof HubError && (error.status === 401 || error.status === 403) ? 'reauth' : 'unreachable';
+        const problem = connectionProblem(error);
+        health[profile.id] = problem === 'pairing' ? 'reauth' : problem === 'permission' ? 'denied' : problem === 'network' ? 'unreachable' : problem;
       }
     }
   };
@@ -1233,7 +1253,7 @@ async function revokeRemoteConnectionImpl(id: string): Promise<void> {
     expectedTokens.set(item.id, token);
     if (!token) return item;
     try { await revokePair({ url: item.hubUrl, deviceId: item.deviceId, pairToken: token, botToken: item.botGroupId ? token : undefined }); }
-    catch (error) { if (!(error instanceof HubError) || error.status !== 401 && error.status !== 403) throw error; }
+    catch (error) { if (!isPairingAuthenticationError(error)) throw error; }
     return item;
   }));
   // A successful revoke permanently invalidates the captured old credential,
@@ -1292,7 +1312,7 @@ async function revokeRemoteConnectionImpl(id: string): Promise<void> {
       return;
     }
     resetConnection({ phase: 'pairing', connectionId: null, selectedHubUrl: currentProfile?.hubUrl ?? profile.hubUrl,
-      devices: [], devicesLoaded: true, connection: 'idle', connectionError: undefined, sessions: {}, agents: {}, timelines: {}, approvals: {}, focus: null, connections });
+      devices: [], devicesLoaded: true, connection: 'idle', connectionError: undefined, connectionProblem: undefined, sessions: {}, agents: {}, timelines: {}, approvals: {}, focus: null, connections });
     return;
   }
   set({ connections: await loadConnections() });
@@ -1335,13 +1355,12 @@ export async function bootRemote(providers: ProviderProfile[]): Promise<void> {
   const owner = hub;
   const current = () => generation === connectionGeneration && hub === owner && state.serviceId === service.id
     && !state.connectionId && !state.selectedHubUrl;
-  const key = await getProviderKey(service.id).catch(() => null);
-  if (!current()) return;
-  const url = hubUrlFor(service.baseUrl);
-  if (!key || !url) return;
+  // Legacy pair tokens were issued only for this exact origin's default Hub.
+  const url = hubUrlFor(service.baseUrl) ? canonicalHubUrl(new URL(service.baseUrl).origin) : null;
+  if (!url) return;
   const pairToken = await getPairToken(service.id).catch(() => null);
   if (!current()) return;
-  hub = { url, key, pairToken: pairToken ?? undefined };
+  hub = { url, pairToken: pairToken ?? undefined };
   set({ phase: pairToken ? 'ready' : 'pairing' });
   if (pairToken) startDemandConnection();
 }
@@ -1397,18 +1416,19 @@ export async function signInRemote(service: ProviderProfile): Promise<void> {
   const generation = ++connectionGeneration;
   set({ signingIn: service.id });
   try {
-    const key = await getProviderKey(service.id);
-    if (!key) throw new Error(`没有找到“${service.name}”的 API 密钥`);
-    const pairToken = await getPairToken(service.id).catch(() => null);
-    const next = { url, key, pairToken: pairToken ?? undefined };
-    await me(next);
+    // Legacy account selections migrate without reading or sending model credentials.
+    const discovery = await discoverStation(service.baseUrl);
     if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重试');
+    const pairToken = discovery.url === canonicalHubUrl(new URL(service.baseUrl).origin) ? await getPairToken(service.id).catch(() => null) : null;
+    if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重试');
+    const next: Hub = { url: discovery.url, pairToken: pairToken ?? undefined };
     let paired = Boolean(pairToken);
     if (paired) {
       try { await fetchDevices(next); }
       catch (error) {
         // A transient outage must not erase an existing one-to-one pairing.
-        if (error instanceof HubError && error.status === 403) {
+        if (generation !== connectionGeneration) throw new Error('连接选择已改变，请重试');
+        if (isPairingAuthenticationError(error)) {
           paired = false;
           await deletePairToken(service.id, pairToken ?? undefined).catch(() => undefined);
           next.pairToken = undefined;
@@ -1419,6 +1439,7 @@ export async function signInRemote(service: ProviderProfile): Promise<void> {
     stopStream(); connectionGeneration += 1;
     const committedGeneration = connectionGeneration;
     hub = next;
+    hubCapabilities = new Set(discovery.capabilities);
     lastSeq = 0;
     await setSetting(SETTING, service.id);
     if (committedGeneration !== connectionGeneration) throw new Error('连接选择已改变，请重试');
@@ -1463,7 +1484,7 @@ export async function pairRemote(code: string): Promise<void> {
   }
   hub = { ...owner, pairToken: result.token };
   lastSeq = 0;
-  set({ phase: 'ready', devices: [result.device], devicesLoaded: true, connection: 'open', connectionError: undefined });
+  set({ phase: 'ready', devices: [result.device], devicesLoaded: true, connection: 'open', connectionError: undefined, connectionProblem: undefined });
 }
 
 /** Synchronize other relays belonging to the selected physical computer. A
@@ -1544,11 +1565,11 @@ export async function refreshDevices(quiet = false): Promise<void> {
     pairedDevicesRequestIssued = true;
     const list = await fetchDevices(owner);
     if (!current()) return;
-    set({ devices: list, devicesLoaded: true, connection: 'open', connectionError: undefined });
+    set({ devices: list, devicesLoaded: true, connection: 'open', connectionError: undefined, connectionProblem: undefined });
     if (list.some(item => item.deviceId === owner.deviceId && item.online)) void syncRemoteConnections();
   } catch (error) {
     if (!current()) return;
-    if (pairedDevicesRequestIssued && error instanceof HubError && (error.status === 403 || error.status === 401)) {
+    if (pairedDevicesRequestIssued && isPairingAuthenticationError(error)) {
       stopStream();
       const cacheScope = remoteCacheScope();
       const deliveryScope = remoteDeliveryScope();
@@ -1586,10 +1607,12 @@ export async function refreshDevices(quiet = false): Promise<void> {
       await discardPendingHandover();
       if (hub !== revokedHub) return;
       set({ phase: 'pairing', serviceId: profile ? null : state.serviceId, connections,
-        connectionId: null, selectedHubUrl: owner.url, devices: [], sessions: {}, agents: {}, timelines: {}, approvals: {}, focus: null,
-        connection: 'error', connectionError: error.message });
+        connectionId: null, selectedHubUrl: owner.url, devices: [], devicesLoaded: true, sessions: {}, agents: {}, timelines: {}, approvals: {}, focus: null,
+        connection: 'error', ...connectionFailure(error) });
+      if (!quiet) throw error;
+      return;
     }
-    set({ devicesLoaded: true, connectionError: (error as Error).message, connection: 'error' });
+    set({ devicesLoaded: true, ...connectionFailure(error, pairedDevicesRequestIssued), connection: 'error' });
     if (!quiet) throw error;
   }
 }
@@ -1991,12 +2014,12 @@ async function runCommand<T = Record<string, unknown>>(owner: Hub, deviceId: str
             key.startsWith(`${deviceId}|`) ? { ...timeline, items: timeline.items.map(item => item.kind === 'message' && item.local && item.clientId === requestId
               ? { ...item, clientId: executionId } : item) } : timeline])) }));
         } }) : await command<T>(owner, deviceId, input, requestId, signal, options);
-    if (!quiet && owner === hub) set((current) => ({ connection: 'open', connectionError: undefined,
+    if (!quiet && owner === hub) set((current) => ({ connection: 'open', connectionError: undefined, connectionProblem: undefined,
       ...(!requestId ? { devices: current.devices.map((device) => device.deviceId === deviceId ? { ...device, online: true } : device) } : {}) }));
     return result;
   } catch (error) {
     if (!quiet && owner === hub && !isExecutionPolicyError(error) && error instanceof HubError && (error.status === 0 || error.status >= 500 || error.status === 401 || error.status === 403 || error.status === 409)) {
-      set({ connection: 'error', connectionError: error.message });
+      set({ connection: 'error', ...connectionFailure(error) });
     }
     throw error;
   }
@@ -2171,14 +2194,14 @@ async function syncSessionEventsCore(deviceId: string, sessionKey: string, waitS
       if (!result.hasMore || result.nextSeq <= after || result.scannedEventCount === 0) break;
     }
     if (!state.devices.some(device => device.deviceId === deviceId && device.online === false)) await reconcileIncompleteAssistantTurn(deviceId, sessionKey, signal);
-    set({ connection: 'open', connectionError: undefined });
+    set({ connection: 'open', connectionError: undefined, connectionProblem: undefined });
   } catch (error) {
     // A desktop lease/history error is local to this thread. It must not
     // falsely turn a healthy phone -> Hub -> computer link into "offline".
     // Read admission/rate limits also prove neither a lost connection nor a
     // recovery from an earlier failure. Preserve link state and the cursor;
     // still reject so useLiveSync backs off instead of spinning on HTTP 429.
-    if (!signal?.aborted && currentRequest() && error instanceof HubError && error.status !== 200 && error.status !== 429) set({ connection: 'error', connectionError: error.message });
+    if (!signal?.aborted && currentRequest() && error instanceof HubError && error.status !== 200 && error.status !== 429) set({ connection: 'error', ...connectionFailure(error) });
     throw error;
   }
 }

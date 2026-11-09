@@ -255,7 +255,7 @@ function configureNative(follow: boolean) {
   nativeFollowing = remoteNotificationsEnabled() && follow && watching && Boolean(credentials) && !credentials?.botToken && Boolean(navigationScope) && (running.length > 0 || Boolean(target));
   try {
     native.configureWatch(JSON.stringify(nativeFollowing && credentials ? {
-      version: ++configVersion, follow: true, hubUrl: credentials.url, pairToken: credentials.pairToken ?? '', key: credentials.key ?? '', wait: hubSupportsWait(),
+      version: ++configVersion, follow: true, hubUrl: credentials.url, pairToken: credentials.pairToken ?? '', wait: hubSupportsWait(),
       navigationScope,
       ingressManifest: hubIngressSnapshot?.(credentials.url),
       // 后台待命: follow the whole computer (Hub scope=device), not only the running tasks.

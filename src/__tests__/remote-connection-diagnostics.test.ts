@@ -37,6 +37,9 @@ test.each([
   [404, '', 'unsupported'], [405, '', 'unsupported'], [401, '', 'reauth'], [403, '', 'reauth'],
   [429, 'diagnostic_rate_limited', 'busy'], [503, 'diagnostic_busy', 'busy'], [504, 'diagnostic_timeout', 'timeout'],
   [409, 'diagnostic_device_offline', 'offline'], [502, 'diagnostic_reply_invalid', 'invalid'], [500, 'unknown', 'unreachable'],
+  [403, 'pair_credentials_invalid', 'reauth'], [403, 'device_credentials_invalid', 'enrollment'],
+  [403, 'source_grant_required', 'denied'], [403, 'station_policy_invalid', 'denied'], [423, 'user_disabled', 'denied'],
+  [403, 'unknown_policy', 'denied'],
 ])('HTTP %s %s produces a bounded reason and no fabricated duration', async (status, code, expected) => {
   setHubFetch(async () => reply({ error: `${owner.url} secret-raw-error`, code }, status as number));
   const measured = await measureConnection(owner, owner.deviceId!);

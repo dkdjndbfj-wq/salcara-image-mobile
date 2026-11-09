@@ -2,12 +2,13 @@ import { fetch as expoFetch } from 'expo/fetch';
 import { randomUUID } from 'expo-crypto';
 
 import { readSse } from '../api/sse';
-import { canonicalHubUrl, type PairQr } from './pairing';
+import { canonicalHubUrl, remoteDiscoveryCandidates, type PairQr } from './pairing';
 import { notificationScopeFor } from './notification-scope';
 import { parseBrowserNavigation, type BrowserNavigation } from './browser-navigation';
 import { parseComputerActivity, type ComputerActivity } from './computer-activity';
 import { executionRetryAt, validRetryAt } from './execution-retry';
 import { ingressRuntime } from './ingress-runtime';
+import { IngressIdentityError } from './ingress';
 export type { BrowserNavigation } from './browser-navigation';
 
 /** Salcara Hub client — see remote/docs/PROTOCOL.md. The hub sits on the relay's own origin. */
@@ -424,8 +425,7 @@ export function originOf(baseUrl: string): string | null {
 }
 
 export function hubUrlFor(baseUrl: string): string | null {
-  const origin = originOf(baseUrl);
-  return origin ? `${origin}/salcara-hub/v1` : null;
+  try { return remoteDiscoveryCandidates(baseUrl)[0] ?? null; } catch { return null; }
 }
 
 let fetchImpl: FetchLike = expoFetch as unknown as FetchLike;
@@ -438,7 +438,10 @@ export function setHubFetch(next: FetchLike | null, enableIngress = false) {
   ingress = ingressRuntime((url, init) => fetchImpl(url, init));
 }
 /** Public, already validated authority handed to the Android background watcher. */
-export function hubIngressSnapshot(canonical: string) { return ingressEnabled ? ingress.snapshot(canonical) : undefined; }
+export function hubIngressSnapshot(canonical: string) { return ingressEnabled ? ingress.pinSnapshot(canonical) : undefined; }
+/** A candidate may reuse a saved pairing only after signed membership and a fresh pinned proof. */
+export async function verifyHubAlias(canonical: string, candidate: string): Promise<boolean> { return ingressEnabled && await ingress.verifyAlias(canonical, candidate); }
+export async function confirmPairingHubIdentity(canonical: string, active: () => boolean): Promise<void> { if (ingressEnabled) await ingress.confirmPairingIdentity(canonical, active); }
 async function transportFetch(canonical: string, path: string, init: Record<string, unknown>) {
   if (!ingressEnabled) return { response: await fetchImpl(`${canonical}${path}`, init), endpoint: canonical };
   const result = await ingress.fetch(canonical, path, init);
@@ -460,12 +463,30 @@ async function readJson(response: Awaited<ReturnType<FetchLike>>): Promise<Recor
   } catch { throw new HubError('响应未接收完整，保留原请求等待重试'); }
 }
 
-function httpMessage(status: number, error: unknown): string {
-  if (status === 401 || status === 403) return '配对凭证无效或已撤销，请重新扫码连接电脑';
+function httpMessage(status: number, error: unknown, pairedRequest: boolean): string {
+  if (status === 401 || status === 403) return pairedRequest ? '配对凭证无效或已撤销，请重新扫码连接电脑' : '中转站拒绝远程服务检测，请联系管理员检查远程入口';
   if (typeof error === 'string' && error) return error;
   if (status === 404) return '这个 API 不支持远程编程';
   if (status === 409) return '电脑不在线';
   return `中转站暂时不可用（HTTP ${status}）`;
+}
+
+function httpFailure(status: number, json: Record<string, unknown>, pairedRequest: boolean): HubError {
+  const code = typeof json.code === 'string' && /^[a-z][a-z0-9_]{0,95}$/.test(json.code) ? json.code : json.code === undefined || json.code === '' ? undefined : 'remote_error_unknown';
+  const message = code?.startsWith('source_') ? '这个来源暂时无法在本站运行'
+    : code?.startsWith('station_') ? '本站远程能力尚未就绪，请更新或刷新后重试'
+    : code === 'remote_execution_disabled' ? '本站已暂停远程执行'
+    : code === 'device_credentials_invalid' || code === 'device_enrollment_required' || code === 'enrollment_claim_invalid' ? '电脑的远程登记需要恢复，请在电脑端重新登记'
+    : (status === 401 || status === 403) && code && !pairingErrorCodes.has(code) ? '远程访问未获授权，请检查电脑端授权或联系管理员'
+    : httpMessage(status, json.error, pairedRequest);
+  return new HubError(message, status, code);
+}
+
+const pairingErrorCodes = new Set(['pair_credentials_invalid', 'phone_pairing_invalid', 'phone_pairing_required', 'pairing_invalid', 'bot_phone_credentials_invalid', 'diagnostic_pairing_invalid']);
+/** Only an authenticated phone request can use this compatibility fallback. */
+export function isPairingAuthenticationError(error: unknown): boolean {
+  return error instanceof HubError && (error.status === 401 || error.status === 403)
+    && (!error.code || pairingErrorCodes.has(error.code));
 }
 
 function authHeaders(hub: Hub | { url: string; key?: string }) {
@@ -490,7 +511,7 @@ function withAbort<T>(signal: AbortSignal, operation: () => Promise<T>): Promise
   });
 }
 
-async function request(hub: Hub | { url: string; key?: string }, path: string, init: { method?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal } = {}) {
+async function request(hub: Hub | { url: string; key?: string }, path: string, init: { method?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal; exact?: boolean } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? 20_000);
   const forwardAbort = () => controller.abort();
@@ -500,28 +521,30 @@ async function request(hub: Hub | { url: string; key?: string }, path: string, i
   }
   let response: Awaited<ReturnType<FetchLike>>;
   try {
-    const transport = await withAbort(controller.signal, () => transportFetch(hub.url, path, {
+    const wire = {
       method: init.method ?? 'GET',
       headers: { Accept: 'application/json', ...authHeaders(hub), ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
       body: init.body ? JSON.stringify(init.body) : undefined,
       signal: controller.signal, credentials: 'omit', redirect: 'error',
-    }));
+    };
+    // A QR ticket belongs to the newly confirmed exact URL. Old routing
+    // authority must not forward a replacement Hub's one-time pairing secret.
+    const transport = await withAbort(controller.signal, async () => init.exact
+      ? { response: await fetchImpl(`${hub.url}${path}`, wire), endpoint: hub.url }
+      : transportFetch(hub.url, path, wire));
     response = transport.response;
     checkResponseScope(response, transport.endpoint);
+    if (init.exact && response.url && response.url !== `${hub.url}${path}`) throw new HubError('中转站接口发生重定向，已停止连接以保护配对凭证');
     const json = await withAbort(controller.signal, () => response.ok ? readJson(response) : readJson(response).catch(() => ({} as Record<string, unknown>)));
     if (!response.ok) {
-      const code = typeof json.code === 'string' ? json.code : undefined;
-      // Policy denials do not mean the phone pairing has expired.
-      const message = code?.startsWith('source_') ? '这个来源暂时无法在本站运行'
-        : code?.startsWith('station_') ? '本站远程能力尚未就绪，请更新或刷新后重试'
-        : code === 'remote_execution_disabled' ? '本站已暂停远程执行' : httpMessage(response.status, json.error);
-      throw new HubError(message, response.status, code);
+      throw httpFailure(response.status, path === '/ping' ? { ...json, error: undefined } : json, Boolean('pairToken' in hub && hub.pairToken || 'botToken' in hub && hub.botToken));
     }
     return json;
   } catch (error) {
     if (error instanceof HubError) throw error;
+    if (error instanceof IngressIdentityError) throw new HubError(error.message, 409, 'hub_identity_changed');
     if (init.signal?.aborted) throw new HubError('请求已取消', 499, 'aborted');
-    throw new HubError(controller.signal.aborted ? '中转站响应超时，请稍后再试' : '连不上中转站，请检查网络');
+    throw new HubError(controller.signal.aborted ? '中转站响应超时，请稍后再试' : '连不上中转站，请检查网络', 0, controller.signal.aborted ? 'hub_timeout' : 'hub_unreachable');
   } finally {
     clearTimeout(timer);
     init.signal?.removeEventListener('abort', forwardAbort);
@@ -536,7 +559,7 @@ export function isExecutionPolicyError(error: unknown): boolean {
 
 /** True when this origin runs a Salcara Hub (no key needed). */
 export async function ping(hubUrl: string): Promise<boolean> {
-  try { return (await request({ url: hubUrl }, '/ping', { timeoutMs: 6000 })).service === 'salcara-hub'; } catch { return false; }
+  try { return (await request({ url: hubUrl }, '/ping', { timeoutMs: 6000, exact: true })).service === 'salcara-hub'; } catch { return false; }
 }
 
 /** A paired, side-effect-free probe; never falls back to the command API. */
@@ -560,20 +583,27 @@ export async function diagnosticProbe(hub: Hub, deviceId: string, nonce: string,
 export interface HubDiscovery { url: string; service: 'salcara-hub'; protocol: 'salcara-remote'; protocolVersion: 1; capabilities: string[] }
 /** Discovery is public and requires all device-only pairing capabilities, not an API-user login. */
 export async function discoverStation(stationUrl: string): Promise<HubDiscovery> {
-  const url = canonicalHubUrl(stationUrl);
-  const result = await request({ url }, '/ping', { timeoutMs: 6000 });
-  const capabilities = Array.isArray(result.capabilities) ? result.capabilities.filter((item): item is string => typeof item === 'string') : [];
-  if (result.service !== 'salcara-hub' || result.protocol !== 'salcara-remote' || result.protocolVersion !== 1
-    || !Array.isArray(result.authModes) || !result.authModes.includes('device-pairing')
-    || !['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1'].every((item) => capabilities.includes(item))) {
-    throw new HubError('这个中转站没有安装兼容的扫码远程插件，请联系站长');
+  let failure: unknown;
+  for (const url of remoteDiscoveryCandidates(stationUrl)) {
+    try {
+      const result = await request({ url }, '/ping', { timeoutMs: 2500, exact: true });
+      const capabilities = Array.isArray(result.capabilities) ? result.capabilities.filter((item): item is string => typeof item === 'string') : [];
+      if (result.service !== 'salcara-hub' || result.protocol !== 'salcara-remote' || result.protocolVersion !== 1
+        || !Array.isArray(result.authModes) || !result.authModes.includes('device-pairing')
+        || !['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1'].every((item) => capabilities.includes(item))) {
+        throw new HubError('这个中转站没有安装兼容的扫码远程插件，请联系站长', 404, 'remote_unsupported');
+      }
+      return { url, service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, capabilities };
+    } catch (error) {
+      if (!failure || failure instanceof HubError && (failure.status === 404 || failure.status === 405)) failure = error;
+    }
   }
-  return { url, service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, capabilities };
+  throw failure;
 }
 
 export async function confirmQrPair(qr: PairQr, phoneId?: string): Promise<{ token: string; device: DeviceStatus }> {
   if (qr.computerId && (!phoneId || !/^[a-f0-9]{64}$/.test(phoneId))) throw new HubError('请更新手机端后重新扫码');
-  const result = await request({ url: qr.hubUrl }, '/app/pair/qr', { method: 'POST', body: { deviceId: qr.deviceId, ticket: qr.ticket, ...(phoneId ? { phoneId } : {}) } });
+  const result = await request({ url: qr.hubUrl }, '/app/pair/qr', { method: 'POST', body: { deviceId: qr.deviceId, ticket: qr.ticket, ...(phoneId ? { phoneId } : {}) }, exact: true });
   const device = result.device as DeviceStatus | undefined;
   if (qr.computerId && result.computerId !== qr.computerId) throw new HubError('二维码的电脑身份与中转站不一致，请重新生成');
   if (typeof result.pair_token !== 'string' || !/^[a-f0-9]{64}$/.test(result.pair_token) || !device
@@ -913,7 +943,7 @@ export function openStream(options: StreamOptions): StreamHandle {
       checkResponseScope(response, endpoint);
       if (!response.ok) {
         const json = await readJson(response).catch(() => ({} as Record<string, unknown>));
-        throw new HubError(httpMessage(response.status, json.error), response.status);
+        throw httpFailure(response.status, json, Boolean(hub.pairToken || hub.botToken));
       }
       if (!response.headers?.get?.('content-type')?.toLowerCase().includes('text/event-stream')) throw new HubError('中转站没有返回远程事件流，请检查插件和反向代理配置');
       delay = BACKOFF_MIN;

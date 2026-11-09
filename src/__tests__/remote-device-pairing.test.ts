@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalHubUrl, readPairQr } from '../remote/pairing';
+import { canonicalHubUrl, readPairQr, remoteDiscoveryCandidates } from '../remote/pairing';
 import { command, confirmQrPair, discoverStation, devices, openStream, setHubFetch, type DeviceStatus, type FetchLike } from '../remote/client';
 import { computerGroupKey, connectionDisplayName, connectionId, connectionToken, deliveryCredentialId, forgetConnection, loadConnections, renameConnection, saveConnection, selectConnectionIf, selectedConnection } from '../remote/connections';
 import { resetDeliveryForTests } from '../remote/delivery';
@@ -45,11 +45,35 @@ beforeEach(() => { resetRemoteForTests(); mockSettings.clear(); mockSecrets.clea
 afterEach(() => { resetRemoteForTests(); setHubFetch(null); });
 
 test('station address is strict, canonical, credential-free and HTTPS', () => {
-  expect(canonicalHubUrl(' HTTPS://Station.Example:443/v1/ ')).toBe(url);
+  expect(canonicalHubUrl(' HTTPS://Station.Example:443/v1/ ')).toBe(`${origin}/v1`);
   expect(canonicalHubUrl(url)).toBe(url);
   for (const input of ['http://station.example', 'http://10.0.0.1', 'https://localhost', 'https://192.168.1.1', 'https://127.0.0.1', 'https://[::1]', 'https://[fd00::1]', 'https://u:pass@station.example', `${origin}?`, `${origin}#`, `${origin}?key=secret`, `${origin}/other`, `${origin}/salcara-hub/v1/../other`, `${origin}\\evil`]) expect(() => canonicalHubUrl(input)).toThrow();
   expect(() => canonicalHubUrl('http://127.0.0.1:123')).toThrow();
   expect(canonicalHubUrl('http://127.0.0.1:123', true)).toBe('http://127.0.0.1:123/salcara-hub/v1');
+});
+
+test('discovery preserves API prefixes while QR and ingress accept only safe explicit Hub paths', async () => {
+  expect(canonicalHubUrl(`${origin}/Tenant-A/salcara-hub`)).toBe(`${origin}/Tenant-A/salcara-hub/v1`);
+  expect(canonicalHubUrl(`${origin}/Tenant-A/plugin/v1`)).toBe(`${origin}/Tenant-A/plugin/v1`);
+  expect(remoteDiscoveryCandidates(`${origin}/Tenant-A/api/v1`)).toEqual([
+    `${origin}/Tenant-A/api/salcara-hub/v1`, url, `${origin}/Tenant-A/api/v1`,
+  ]);
+  for (const path of ['/a//salcara-hub/v1', '/a/../salcara-hub/v1', '/a/./v1', '/a/%2e%2e/v1', '/a/%252f/v1', '/a/%2f/v1']) expect(() => canonicalHubUrl(`${origin}${path}`)).toThrow();
+  const visited: Array<{ endpoint: string; init: Parameters<FetchLike>[1] }> = [];
+  setHubFetch(async (endpoint, init) => { visited.push({ endpoint, init }); return endpoint === `${origin}/Tenant-A/api/v1/ping` ? response(discovery) : response({}, 404); });
+  await expect(discoverStation(`${origin}/Tenant-A/api/v1`)).resolves.toMatchObject({ url: `${origin}/Tenant-A/api/v1` });
+  expect(visited.map(item => item.endpoint)).toEqual(remoteDiscoveryCandidates(`${origin}/Tenant-A/api/v1`).map(value => `${value}/ping`));
+  for (const { init } of visited) expect(init).toMatchObject({ headers: { Accept: 'application/json' }, credentials: 'omit', redirect: 'error' });
+  expect(visited.every(({ init }) => Object.keys(init.headers as object).length === 1)).toBe(true);
+  expect(mockGetProviderKey).not.toHaveBeenCalled();
+});
+
+test('returning to the same discovered Hub retains its paired computer instead of asking to scan again', async () => {
+  setHubFetch(stationTransport([])); await bootRemote([]); await pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify(qr())));
+  const id = getRemoteState().connectionId!;
+  await connectStation(`${origin}/v1`);
+  expect(getRemoteState()).toMatchObject({ phase: 'ready', connectionId: id, selectedHubUrl: url });
+  expect(await connectionToken(getRemoteState().connections.find(item => item.id === id)!)).toBe(token);
 });
 
 test('one QR imports saved relays, retries partial failures and restores without scanning again', async () => {
@@ -655,7 +679,7 @@ test('saved computer health probes are read-only and distinguish offline from un
   await pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify(secondQr)));
   const activeId = getRemoteState().connectionId;
   calls.length = 0;
-  await expect(probeSavedConnections()).resolves.toEqual({ [firstId]: 'offline', [activeId!]: 'unreachable' });
+  await expect(probeSavedConnections()).resolves.toEqual({ [firstId]: 'offline', [activeId!]: 'unavailable' });
   expect(calls.filter(endpoint => endpoint.endsWith('/app/devices'))).toHaveLength(2);
   expect(getRemoteState().connectionId).toBe(activeId);
   expect(getRemoteState().phase).toBe('ready');
@@ -796,6 +820,41 @@ test('administrator suspension retains pairing across restart and re-enabling re
   expect(getRemoteState().connection).toBe('open');
   expect(getRemoteState().connectionId).toBe(id);
   expect(getRemoteState().devices[0].deviceId).toBe(device.deviceId);
+});
+
+test.each(['source_grant_required', 'station_policy_invalid', 'remote_execution_disabled', 'device_credentials_invalid', 'device_enrollment_required', 'unknown_policy'])('authenticated %s denial retains pairing and outboxes across restart', async code => {
+  setHubFetch(stationTransport([])); await bootRemote([]); await pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify(qr())));
+  const id = getRemoteState().connectionId!, scope = remoteDeliveryScope();
+  const receipt = pendingFixture(scope, device.deviceId, 1), question = questionFixture(scope, device.deviceId, 1);
+  mockSettings.set('remote_pending_delivery_v1', JSON.stringify([receipt])); mockSettings.set('remote_question_outbox_v1', JSON.stringify([question]));
+  setHubFetch(async endpoint => endpoint.endsWith('/ping') ? response(discovery) : response({ code, error: 'private raw response' }, 403));
+  await expect(refreshDevices()).rejects.toMatchObject({ status: 403, code });
+  expect(getRemoteState()).toMatchObject({ phase: 'ready', connectionId: id, connectionProblem: code.startsWith('device_') ? 'enrollment' : 'permission' });
+  expect(await connectionToken(getRemoteState().connections.find(item => item.id === id)!)).toBe(token);
+  expect(await probeSavedConnections()).toEqual({ [id]: code.startsWith('device_') ? 'enrollment' : 'denied' });
+  expect(JSON.parse(mockSettings.get('remote_pending_delivery_v1')!)).toEqual([receipt]);
+  expect(JSON.parse(mockSettings.get('remote_question_outbox_v1')!)).toEqual([question]);
+  resetRemoteForTests(); await bootRemote([]); expect(getRemoteState().connectionId).toBe(id);
+  setHubFetch(stationTransport([])); await refreshDevices();
+  expect(getRemoteState()).toMatchObject({ connection: 'open', connectionError: undefined, connectionProblem: undefined });
+});
+
+test('typed phone pairing rejection retires only its own saved credential', async () => {
+  setHubFetch(stationTransport([])); await bootRemote([]); await pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify(qr())));
+  const id = getRemoteState().connectionId!;
+  setHubFetch(async endpoint => endpoint.endsWith('/ping') ? response(discovery) : response({ code: 'pair_credentials_invalid' }, 403));
+  await expect(refreshDevices()).rejects.toMatchObject({ status: 403, code: 'pair_credentials_invalid' });
+  expect(getRemoteState()).toMatchObject({ phase: 'pairing', connectionId: null, connectionProblem: 'pairing' });
+  expect(mockSecrets.has(`remote-device-${id}`)).toBe(false);
+});
+
+test('a policy denial while revoking cannot delete a still-valid phone pairing', async () => {
+  const base = stationTransport([]); setHubFetch(base); await bootRemote([]); await pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify(qr())));
+  const id = getRemoteState().connectionId!;
+  setHubFetch(async (endpoint, init) => endpoint.endsWith('/app/pair/revoke') ? response({ code: 'source_grant_required' }, 403) : base(endpoint, init));
+  await expect(revokeRemoteConnection()).rejects.toThrow('未能解除绑定');
+  expect(getRemoteState()).toMatchObject({ phase: 'ready', connectionId: id });
+  expect(await connectionToken(getRemoteState().connections.find(item => item.id === id)!)).toBe(token);
 });
 
 test.each([401, 403])('anonymous discovery failure (%s) cannot retire an authenticated pairing after restart', async status => {
@@ -1048,7 +1107,7 @@ test('live sync starts at the newest event and long-polls only when the station 
   expect(getRemoteState().timelines[timelineKey('pc-1', 'codex:one')].items[0]).toMatchObject({ text: 'hi', final: false });
   waitSupported = true;
   resetRemoteForTests(); calls.length = 0;
-  await bootRemote([]); await connectStation(origin); await pairRemoteQr(parseRemoteQr(JSON.stringify(qr())));
+  await bootRemote([]); await connectStation(origin); await pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify(qr())));
   await syncSessionEvents('pc-1', 'codex:one', 20);
   expect(calls.filter((item) => item.url.includes('/app/events'))[1].url).toContain('wait=20');
 });

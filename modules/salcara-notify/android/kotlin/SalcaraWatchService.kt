@@ -223,9 +223,29 @@ class SalcaraWatchService : Service() {
   private fun ingressUrl(current: JSONObject): String {
     val hubUrl = current.optString("hubUrl").trimEnd('/')
     if (!hubUrl.startsWith("https://") && !hubUrl.startsWith("http://")) throw AuthError()
-    return ingress.resolve(hubUrl, current.optJSONObject("ingressManifest")) {
+    return ingress.resolve(hubUrl, current.optJSONObject("ingressManifest"), current.optString("navigationScope")) {
       active && running && !Thread.currentThread().isInterrupted && config === current && SalcaraNotifyModule.notificationsAllowed(this)
     }
+  }
+
+  private fun pairingRejected(connection: HttpURLConnection, status: Int): Boolean {
+    if (status != 401 && status != 403) return false
+    val code = try {
+      connection.errorStream?.use { input ->
+        val output = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(1024)
+        while (output.size() <= 4096) {
+          val count = input.read(buffer, 0, minOf(buffer.size, 4097 - output.size()))
+          if (count < 0) break
+          output.write(buffer, 0, count)
+        }
+        if (output.size() > 4096) return false
+        val bytes = output.toByteArray()
+        val body = JSONObject(String(bytes, Charsets.UTF_8))
+        if (!body.has("code")) null else body.opt("code") as? String ?: "unknown_remote_error"
+      }
+    } catch (_: Exception) { "unknown_remote_error" }
+    return phonePairingRejected(status, code)
   }
 
   /** One round over the configured computers; returns after a poll (long-poll when supported). */
@@ -258,10 +278,9 @@ class SalcaraWatchService : Service() {
     connection.readTimeout = if (wait) 45_000 else 20_000
     connection.setRequestProperty("Accept", "application/json")
     current.optString("pairToken").takeIf { it.isNotEmpty() }?.let { connection.setRequestProperty("X-Salcara-Pair-Token", it) }
-    current.optString("key").takeIf { it.isNotEmpty() }?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
     try {
       val status = connection.responseCode
-      if (status == 401 || status == 403) throw AuthError()
+      if (pairingRejected(connection, status)) throw AuthError()
       if (status !in 200..299) { if (status in 300..399 || status in listOf(502, 503, 504)) ingress.fail(hubUrl); sleep(10_000); return }
       val json = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
       if (config !== current || !SalcaraNotifyModule.notificationsAllowed(this)) return
@@ -305,10 +324,9 @@ class SalcaraWatchService : Service() {
     connection.readTimeout = if (wait) 40_000 else 20_000
     connection.setRequestProperty("Accept", "application/json")
     current.optString("pairToken").takeIf { it.isNotEmpty() }?.let { connection.setRequestProperty("X-Salcara-Pair-Token", it) }
-    current.optString("key").takeIf { it.isNotEmpty() }?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
     try {
       val status = connection.responseCode
-      if (status == 401 || status == 403) throw AuthError()
+      if (pairingRejected(connection, status)) throw AuthError()
       if (status !in 200..299) { if (status in 300..399 || status in listOf(502, 503, 504)) ingress.fail(hubUrl); sleep(5000); return }
       val json = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
       if (config !== current || !SalcaraNotifyModule.notificationsAllowed(this)) return
