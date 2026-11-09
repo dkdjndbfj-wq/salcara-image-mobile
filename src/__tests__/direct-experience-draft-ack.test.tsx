@@ -280,13 +280,43 @@ test('direct projectless start works with no granted projects and preserves expl
   if(command.type==='session.open')return {session:fresh,events:[]};
   throw new Error(`Unexpected ${command.type}`);
  });
- const view=await render(<DirectExperience/>);
- await fireEvent.press(await view.findByRole('button',{name:'新建会话'}));
+ const view=await render(<DirectExperience newConversationRequest={1}/>);
+ await fireEvent.press(await view.findByRole('button',{name:'选择 Codex'}));
  await fireEvent.press(await view.findByRole('button',{name:'不关联文件夹，直接开始'}));
  await waitFor(()=>expect(mockNewComposer.projectless).toBe(true));
  expect(mockNewComposer.cwd).toBe('');expect(mockRequest.mock.calls.some(([c])=>c.type==='session.start'||c.action==='mkdir')).toBe(false);
  let accepted=false;
  await act(async()=>{accepted=await mockNewComposer.onSend('independent',{owner:JSON.stringify(['pairing','pc',null,'codex','api_00112233','','code','projectless'])});});
  expect(accepted).toBe(true);expect(mockRequest).toHaveBeenCalledWith(expect.objectContaining({type:'session.start',projectless:true,cwd:'',workspaceMode:'code'}),expect.anything());
+ await view.unmount();
+});
+
+test('Direct global creation can choose another Agent and send from its newly created C drive folder',async()=>{
+ const fresh={...session,sessionKey:'claude:fresh',tool:'claude',client:'Claude Code',cwd:'C:/Users/new-project',workspaceMode:'code'};
+ mockRequest.mockImplementation(async(command:any)=>{
+  if(command.type==='agents.status')return {agents:['codex','claude'].map(id=>({id,tool:id,name:id==='codex'?'Codex':'Claude Code',available:true,remoteSendSupported:true,capabilities:{list:true,read:true,send:true},api}))};
+  if(command.type==='projects.list')return {projects:[],capabilities:['workspace.explorer.v1','session.projectless.v1']};
+  if(command.type==='sessions.list')return {sessions:[]};
+  if(command.type==='workspace.explorer')return {tool:command.tool,workspaceMode:command.workspaceMode,cwd:command.cwd,path:command.path,
+    ...(!command.cwd?{roots:[{path:'C:/',name:'C盘'}]}:command.action==='mkdir'?{project:{path:fresh.cwd,name:command.name}}:{directory:{path:command.path,entries:command.path?[]:[{name:'Users',path:'Users',kind:'directory'}]}})};
+  if(command.type==='session.start')return {sessionKey:fresh.sessionKey};
+  if(command.type==='session.open')return {session:fresh,events:[]};
+  throw new Error(`Unexpected ${command.type}`);
+ });
+ const fullscreen=jest.fn();
+ const view=await render(<DirectExperience newConversationRequest={1} onMobileWorkspaceVisibilityChange={fullscreen}/>);
+ await fireEvent.press(await view.findByRole('button',{name:'选择 Claude Code'}));
+ expect(fullscreen).toHaveBeenLastCalledWith(true);
+ await fireEvent.press(await view.findByLabelText('浏览磁盘 C:/'));
+ await fireEvent.press(await view.findByLabelText('浏览文件夹 Users'));
+ await fireEvent.press(await view.findByLabelText('在此位置新建文件夹'));
+ await fireEvent.changeText(view.getByLabelText('新文件夹名称'),'new-project');
+ await fireEvent.press(view.getByLabelText('创建文件夹并使用'));
+ await waitFor(()=>expect(mockNewComposer).toMatchObject({profile:{id:'claude'},cwd:fresh.cwd,projectless:false}));
+ expect(fullscreen).toHaveBeenLastCalledWith(false);
+ expect(mockRequest.mock.calls.some(([command])=>command.type==='session.start')).toBe(false);
+ await act(async()=>{expect(await mockNewComposer.onSend('new task',{owner:JSON.stringify(['pairing','pc',null,'claude','api_00112233',fresh.cwd,'code'])})).toBe(true);});
+ expect(mockRequest).toHaveBeenCalledWith(expect.objectContaining({type:'session.start',tool:'claude',cwd:fresh.cwd,workspaceMode:'code'}),expect.anything());
+ expect(mockRequest.mock.calls.filter(([command])=>command.type==='workspace.explorer'&&command.action==='mkdir')).toHaveLength(1);
  await view.unmount();
 });

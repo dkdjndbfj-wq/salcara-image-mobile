@@ -51,6 +51,7 @@ type PendingRequest = {
 type CommandSchema = { keys: readonly string[]; required: readonly string[] };
 const commandSchemas: Record<DirectCommand['type'], CommandSchema> = {
   'workspace.projects': { keys: ['type', 'controlSurface', 'tool', 'workspaceMode', 'action', 'cwd', 'path', 'cursor', 'name'], required: ['type', 'controlSurface', 'tool', 'workspaceMode', 'action', 'cwd', 'path'] },
+  'workspace.explorer': { keys: ['type', 'controlSurface', 'tool', 'workspaceMode', 'action', 'cwd', 'path', 'cursor', 'name'], required: ['type', 'controlSurface', 'tool', 'workspaceMode', 'action', 'cwd', 'path'] },
   'computer.management.status': { keys: ['type', 'controlSurface'], required: ['type', 'controlSurface'] },
   'computer.api.create': { keys: ['type', 'controlSurface', 'requestId', 'name', 'baseUrl', 'key', 'wire', 'authMode', 'models'], required: ['type', 'controlSurface', 'requestId', 'name', 'baseUrl', 'key', 'wire', 'authMode', 'models'] },
   'computer.agent.install': { keys: ['type', 'controlSurface', 'requestId', 'tool', 'confirmed'], required: ['type', 'controlSurface', 'requestId', 'tool', 'confirmed'] },
@@ -200,6 +201,16 @@ function validCommand(value: unknown): value is DirectCommand {
       || !schema.required.every(key => Object.hasOwn(value, key))
       || !Object.keys(value).every(key => schema.keys.includes(key))) return false;
     if (Object.hasOwn(value, 'projectless') && (value.type !== 'session.start' || value.projectless !== true || value.cwd !== '' || value.controlSurface !== 'cli' || value.entrypoint !== undefined || !['code','work'].includes(value.workspaceMode as string) || typeof value.operationId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value.operationId))) return false;
+    if (value.type === 'workspace.explorer') {
+      const relative = (path: unknown) => typeof path === 'string' && path.length <= 4096 && !/[\\:*?"<>|\p{Cc}\p{Cf}]/u.test(path)
+        && (path === '' || path.split('/').every(part => part && part.length <= 255 && part !== '.' && part !== '..' && part.trim() === part && !part.endsWith('.')));
+      if (value.controlSurface !== 'cli' || !['code', 'work'].includes(value.workspaceMode as string) || !['list', 'mkdir'].includes(value.action as string)
+        || typeof value.cwd !== 'string' || value.cwd.length > 4096 || /[\p{Cc}\p{Cf}]/u.test(value.cwd) || !relative(value.path)
+        || value.cwd === '' && (value.action !== 'list' || value.path !== '' || Object.hasOwn(value, 'cursor'))
+        || value.action === 'list' && Object.hasOwn(value, 'name')
+        || value.action === 'mkdir' && (!relative(value.name) || !value.name || (value.name as string).includes('/') || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value.name as string) || Object.hasOwn(value, 'cursor'))
+        || Object.hasOwn(value, 'cursor') && (typeof value.cursor !== 'string' || !/^[A-Za-z0-9_-]{1,512}$/.test(value.cursor))) return false;
+    }
     return Object.entries(value).every(([key, field]) => {
       if (field === undefined) return !schema.required.includes(key);
       if (typeof value.type === 'string' && value.type.startsWith('computer.')) {

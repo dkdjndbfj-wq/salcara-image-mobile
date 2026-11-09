@@ -272,6 +272,22 @@ test('direct projectless command retains the explicit flag and empty cwd',async(
  const request=requestDirect(command),frame=sentFrames().at(-1)!;
  expect(frame.command).toEqual(command);deliver({type:'response',requestId:frame.requestId,result:{sessionKey:'codex:new'}});await expect(request).resolves.toEqual({sessionKey:'codex:new'});
 });
+
+test('Direct explorer carries disk browsing and hidden directory creation without a project grant',async()=>{
+ for(const command of [
+  {type:'workspace.explorer',tool:'codex',controlSurface:'cli',workspaceMode:'code',action:'list',cwd:'',path:''},
+  {type:'workspace.explorer',tool:'claude',controlSurface:'cli',workspaceMode:'work',action:'mkdir',cwd:'C:/',path:'Users/test/.projects',name:'new'},
+ ]){
+  const request=requestDirect(command as Command),frame=sentFrames().at(-1)!;
+  expect(frame.command).toEqual(command);deliver({type:'response',requestId:frame.requestId,result:{}});await expect(request).resolves.toEqual({});
+ }
+});
+
+test.each([{action:'select'},{action:'delete'},{path:'../escape'},{path:'Users/../Windows'},{name:'NUL.txt',action:'mkdir'},{name:'child/path',action:'mkdir'},
+ {name:'unused'},{action:'mkdir',name:'new',cursor:'abc'},{cwd:'',path:'Users'},{controlSurface:'desktop'},{workspaceMode:'other'},{accountId:'api_00112233'}])('Direct explorer rejects invalid scope or action before transport: %p',async extra=>{
+ await expect(requestDirect({type:'workspace.explorer',tool:'codex',controlSurface:'cli',workspaceMode:'code',action:'list',cwd:'C:/',path:'',...extra} as Command)).rejects.toMatchObject({code:'protocol'});
+ expect(mockSendDirectPayload).not.toHaveBeenCalled();
+});
 test.each([{projectless:false},{projectless:'true'},{projectless:null},{cwd:'C:/Other'},{workspaceMode:undefined},{operationId:'../escape'},{entrypoint:'claude-desktop'},{type:'session.send'}])('direct projectless invalid combination is rejected before socket write: %p',async extra=>{
  const cmd={type:'session.start',tool:'codex',cwd:'',projectless:true,prompt:'new',workspaceMode:'code',controlSurface:'cli',operationId:'00000000-0000-4000-8000-000000000009',...extra};
  await expect(requestDirect(cmd as Command)).rejects.toMatchObject({code:'protocol'});expect(mockSendDirectPayload).not.toHaveBeenCalled();

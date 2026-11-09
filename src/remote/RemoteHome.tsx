@@ -5,6 +5,7 @@ import { Icon } from '../components/Icon';
 import Svg, { Defs, Pattern, Circle, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { themed, useDesk } from '../theme';
 import { DeskOrb } from './DeskOrb';
+import { AgentGrid } from './AgentGrid';
 import { ProgrammingCard, ProgrammingRow, ProgrammingSection, ProgrammingStatus } from './ProgrammingUi';
 import type { AgentId, AgentProfile, DeviceStatus, SessionInfo, WorkspaceMode } from './client';
 import { remoteDeviceConnected } from './connection-state';
@@ -71,9 +72,6 @@ export function RemoteHome({ visible, remote, device: remoteDevice, simulatedDev
   const effectiveOnline = directOnly ? Boolean(directDevice?.connected) : online || Boolean(simulatedDevice);
   const active = useRef({ visible, online: effectiveOnline }); active.current = { visible, online: effectiveOnline };
   const [manualRefreshing, setManualRefreshing] = useState(false);
-  const [agentGridWidth, setAgentGridWidth] = useState(0);
-  const agentColumns = agentGridWidth >= 580 ? 5 : agentGridWidth >= 336 ? 3 : 2;
-  const agentCardSize = agentGridWidth ? Math.min(132, (agentGridWidth - 8 * (agentColumns - 1)) / agentColumns) : 108;
   useEffect(() => { active.current.visible = visible; return () => { active.current.visible = false; }; }, [visible]);
   const canOperate = () => active.current.visible && generation.current === rendered;
   const action = (callback: () => void) => () => { if (canOperate()) callback(); };
@@ -164,20 +162,15 @@ export function RemoteHome({ visible, remote, device: remoteDevice, simulatedDev
     </ProgrammingCard> : null}
 
     {!directOnly ? <><ProgrammingSection title="AGENT" hint={deviceName ? `运行在${deviceName}` : '绑定电脑后可用'} />
-    <View style={styles.agents} onLayout={event => setAgentGridWidth(event.nativeEvent.layout.width)}>{choices.map((choice) => {
+    <AgentGrid items={choices.map((choice) => {
       const profile = agents?.list.find(item => item.id === choice.id);
       const missing = Boolean(agents?.loaded && (!profile || !profile.available));
       const unconfirmed = !builtinAgent(choice.id) && !profile;
       const disabled = missing || unconfirmed;
       const name = profile?.name || choice.name;
       const detail = unconfirmed ? agents?.loaded ? '电脑端未提供' : '连接后确认' : missing ? builtinAgent(choice.id) ? '未安装' : '未就绪' : profile ? agentApiLabel(profile) : AGENT_HINT[choice.id] ?? choice.detail;
-      return <Pressable key={choice.id} accessibilityRole="button" accessibilityLabel={`打开 ${name}`} accessibilityState={{ disabled }} disabled={disabled} onPress={action(() => { if (!disabled) onAgent(choice.id); })}
-        style={({ pressed }) => [styles.agent, { width: agentCardSize }, disabled && { opacity: 0.55 }, pressed && styles.agentPressed]}>
-        <ToolBadge tool={choice.tool} client={choice.client} size={24} />
-        <Text style={styles.agentName} numberOfLines={2}>{name}</Text>
-        <Text style={[styles.agentDetail, disabled && { color: d.faint }]} numberOfLines={1}>{detail}</Text>
-      </Pressable>;
-    })}</View>
+      return { id: choice.id, name, tool: choice.tool, client: choice.client, detail, disabled, accessibilityLabel: `打开 ${name}` };
+    })} onSelect={id => { if (canOperate()) onAgent(id); }} />
 
     <ProgrammingCard style={{ marginTop: 8 }}>
       <ProgrammingRow first icon="key" title="API 密钥" accessibilityLabel="API 管理" onPress={action(onApi)} trailing="chevron"
@@ -227,10 +220,6 @@ const useStyles = themed((_c, t) => StyleSheet.create({
   heroCtaText: { color: t.onInk, fontSize: 14, fontWeight: '600' },
   demoEntry: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 10, paddingHorizontal: 12, borderRadius: 16, backgroundColor: t.accentSoft, borderWidth: StyleSheet.hairlineWidth, borderColor: t.line }, demoIcon: { width: 30, height: 30, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, demoTitle: { color: t.text, fontSize: 13, fontWeight: '600' },
   body: { flex: 1, gap: 4, minWidth: 0 }, detail: { fontSize: 11.5, lineHeight: 16, color: t.muted },
-  agents: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  agent: { aspectRatio: 1, padding: 10, borderRadius: 14, backgroundColor: t.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: t.line, gap: 5 },
-  agentPressed: { backgroundColor: t.surface2, transform: [{ scale: 0.98 }] },
-  agentName: { color: t.text, fontSize: 13, lineHeight: 17, fontWeight: '600', flexGrow: 1 }, agentDetail: { color: t.muted, fontSize: 10.5, lineHeight: 14 },
   divider: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: t.line },
   task: { flexDirection: 'row', alignItems: 'center', gap: 11, minHeight: 52, paddingHorizontal: 14, paddingVertical: 8 }, taskPressed: { backgroundColor: t.press },
   taskTitle: { color: t.text, fontSize: 13.5, fontWeight: '500' },

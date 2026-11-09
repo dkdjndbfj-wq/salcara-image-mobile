@@ -2592,6 +2592,7 @@ export async function rememberAgent(agent: AgentId): Promise<void> { if (validAg
 
 /** Explicit no-folder starts require the forwarding/receipt schema on the station too. */
 export function hubSupportsProjectless(): boolean { return hubCapabilities.has('session.projectless.v1'); }
+export function hubSupportsExplorer(): boolean { return hubCapabilities.has('workspace.explorer.v1'); }
 /** True when the station can hold an empty events read open (live updates without a permanent stream). */
 export function hubSupportsWait(): boolean { return hubCapabilities.has('events.wait.v1'); }
 /** The active station can persist a bounded command receipt for an A→B handover. */

@@ -9,7 +9,7 @@ import { remoteDeviceConnected } from './connection-state';
 import { relTime } from './parts';
 import { ProgrammingAction, useProgrammingStyles } from './ProgrammingUi';
 import { agentSessions, agentSupports, desktopLiveFor, groupSessionsByProject, matchesSearch, originTag, sessionKeyAgentId, sessionWorkspaceMode, type SessionProjectGroup } from './projection';
-import { hubSupportsProjectless, hubSupportsSessionActions, loadMoreSessions, loadNativeSessions, loadSessions, loadClaudeDesktopHistory, remoteDeliveryScope, selectSessionDirectory, timelineKey, useRemote } from './store';
+import { hubSupportsSessionActions, loadMoreSessions, loadNativeSessions, loadSessions, loadClaudeDesktopHistory, remoteDeliveryScope, selectSessionDirectory, timelineKey, useRemote } from './store';
 import { useDemandSync } from './useDemandSync';
 import { useThreadTitles } from './thread-titles';
 import { SkeletonGroup, SkeletonRows } from '../components/Skeleton';
@@ -23,8 +23,6 @@ import { AgentDirectoryHeading } from './AgentDirectoryHeading';
 import { sidebarSessionStatus } from './sidebar-session-status';
 import { conversationFontFamily } from './conversation-typography';
 
-import { ProjectBrowser } from './ProjectBrowser';
-import { projectBrowserRequest } from './project-browser';
 
 const PER_PROJECT = 6;
 type ProjectSection = SessionProjectGroup & { data: SessionInfo[] };
@@ -75,8 +73,6 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
     };
     check(); return () => clearTimeout(timer);
   }, [visible, native, agent.desktopLive?.expiresAt]);
-  const [projectBrowser, setProjectBrowser] = useState(false);
-  const projectRequest = useMemo(() => projectBrowserRequest('remote', deviceId, agent.tool, workspaceMode), [scope]);
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
@@ -121,7 +117,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
     if (entranceRead.current === rendered || entry?.loading || page?.loading) return;
     entranceRead.current = rendered; refresh();
   }, [visible, scope, agent.id, online, desktopValid, historyValid, entry?.loading, page?.loading]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { setProjectBrowser(false); setQuery(''); setExpanded({}); setCollapsedProjects({}); setDirectoryView('sessions'); setActionSession(null); }, [scope, agent.id]);
+  useEffect(() => { setQuery(''); setExpanded({}); setCollapsedProjects({}); setDirectoryView('sessions'); setActionSession(null); }, [scope, agent.id]);
   useEffect(() => { setManualRefreshing(false); }, [visible, scope]);
 
   const pending = useMemo(() => new Set(Object.values(remote.approvals).filter(item => item.deviceId === deviceId).map(item => item.sessionKey)), [remote.approvals, deviceId]);
@@ -152,8 +148,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
         : <View style={styles.empty}><Icon name="chat" size={24} color={dk.faint} /><Text style={p.name}>{online ? '还没有对话' : '电脑离线'}</Text>{!online ? <Text style={p.detail}>上线后刷新会话</Text> : null}</View>;
 
   const directoryHeader = <View>
-    <AgentDirectoryHeading agentName={agent.name} deviceName={device?.name} mode={workspaceMode} disabled={!online}
-      onNewProject={directoryView !== 'archived' && !native && !readOnly && agent.remoteSendSupported ? () => { if (canOperate() && active.current.online) setProjectBrowser(true); } : undefined} />
+    <AgentDirectoryHeading agentName={agent.name} deviceName={device?.name} mode={workspaceMode} disabled={!online} />
     {archivesAllowed ? <View style={styles.modeTabs} accessibilityRole="tablist">
       {([{ id: 'sessions', label: '对话' }, { id: 'archived', label: '已归档' }] as const).map(item => <Pressable key={item.id}
         accessibilityRole="tab" accessibilityLabel={item.label} accessibilityState={{ selected: directoryView === item.id }}
@@ -186,10 +181,6 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
     </> : null}
   </View>;
 
-  if (projectBrowser && visible) return <ProjectBrowser key={scope} scopeKey={scope} tool={agent.tool} mode={workspaceMode} request={projectRequest}
-    projectlessUnavailable={agent.id === 'claude-desktop' ? '此桌面入口需要项目文件夹。也可以返回选择 Claude Code，再开始独立会话。' : typeof hubSupportsProjectless !== 'function' || !hubSupportsProjectless() || !device?.capabilities?.includes('session.projectless.v1') ? '电脑或中转站尚不支持此方式。可以先选择文件夹，或更新电脑端和中转站后再试。' : undefined}
-    onProjectless={() => { if (canOperate() && active.current.online) { setProjectBrowser(false); onNew(workspaceMode, '', true); } }}
-    onClose={() => { if (canOperate()) setProjectBrowser(false); }} onSelect={project => { if (canOperate() && active.current.online) { setProjectBrowser(false); onNew(workspaceMode, project.path); } }} />;
   return <View style={styles.screen} testID="remote-workspace">
     {directoryView === 'archived' && archivesAllowed ? <View style={styles.archivedPage}>
       <View style={styles.archivedHeader}>{directoryHeader}</View>

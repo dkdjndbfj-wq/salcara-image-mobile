@@ -11,6 +11,8 @@ const mockLoadNative = jest.fn<Promise<void>, unknown[]>(async () => undefined);
 const mockLoadHistory = jest.fn<Promise<void>, unknown[]>(async () => undefined);
 const mockLastAgent = jest.fn<Promise<AgentId>, []>(async () => 'codex');
 const mockRememberAgent = jest.fn();
+const mockExplorer = jest.fn();
+jest.mock('../remote/project-browser', () => ({ ...jest.requireActual('../remote/project-browser'), projectBrowserRequest: (_transport: string, _device: string, tool: string, mode: string) => (input: unknown) => mockExplorer(tool, mode, input) }));
 const mockSetApi = jest.fn();
 const mockToast = jest.fn();
 const mockSwitchSpace = jest.fn();
@@ -37,6 +39,7 @@ let mockRemote: RemoteState;
 let mockMenuActions: Array<{ label: string; onPress: () => void }> = [];
 let mockThreadProps: {
   visible: boolean; sessionKey: string | null; deviceId: string | null; agent: AgentProfile | null; verifying?: boolean;
+  newProjectPath?: string; newProjectless?: boolean;
   onClose: () => void;
 };
 const mockQr = { type: 'salcara-remote-pair', version: 1, hubUrl: 'https://station.example/salcara-hub/v1',
@@ -74,7 +77,7 @@ jest.mock('../remote/ProgrammingUi', () => {
   const panel = ({ visible, title, children, footer, headerRight }: Record<string, any>) => visible
     ? React.createElement(View, null, title ? React.createElement(Text, null, title) : null, headerRight, children, footer) : null;
   return { ...jest.requireActual('../remote/ProgrammingUi'), ProgrammingPanel: panel, ProgrammingSheet: panel, ProgrammingAction: ({ label, onPress, disabled, loading, ...props }: Record<string, any>) => {
-    return React.createElement(Pressable, { ...props, accessibilityRole: 'button', accessibilityLabel: label, accessibilityState: { disabled: Boolean(disabled || loading), busy: Boolean(loading) }, disabled: Boolean(disabled || loading), onPress }, React.createElement(Text, null, label));
+    return React.createElement(Pressable, { ...props, accessibilityRole: 'button', accessibilityLabel: props.accessibilityLabel ?? label, accessibilityState: { disabled: Boolean(disabled || loading), busy: Boolean(loading) }, disabled: Boolean(disabled || loading), onPress }, React.createElement(Text, null, label));
   } };
 });
 jest.mock('../remote/RemoteApiLibrary', () => ({
@@ -91,6 +94,7 @@ jest.mock('../remote/ThreadView', () => ({
   ThreadView: (props: typeof mockThreadProps) => { mockThreadProps = props; return null; },
 }));
 jest.mock('../remote/store', () => ({
+  hubSupportsExplorer: () => true, hubSupportsProjectless: () => true,
   useRemote: () => mockRemote,
   hydrateCachedThread: async () => undefined, hydrateCachedSessions: async () => undefined,
   getRemoteState: () => mockRemote,
@@ -160,6 +164,34 @@ function unpairedState(phase: RemoteState['phase'] = 'setup'): RemoteState {
   return { ...readyState(), phase, connectionId: null, selectedHubUrl: phase === 'pairing' ? mockQr.hubUrl : null,
     connections: [], connection: 'idle', devices: [], devicesLoaded: false, agents: {}, sessions: {} };
 }
+
+test('global home entry chooses Agent, disk and a new folder before opening the selected Agent editor', async () => {
+  mockRemote.devices[0].capabilities = ['workspace.explorer.v1', 'session.projectless.v1'];
+  mockExplorer.mockImplementation(async (tool, workspaceMode, input) => ({ tool, workspaceMode, cwd: input.cwd, path: input.path,
+    ...(!input.cwd ? { roots: [{ path: 'C:/', name: '本地磁盘 (C:)' }] } : input.action === 'mkdir' ? { project: { path: 'C:/new-project', name: input.name } } : { directory: { path: '', entries: [] } }) }));
+  const view = await render(<RemoteScreen />);
+  await fireEvent.press(await view.findByLabelText('新建全局会话'));
+  expect(view.getByLabelText('选择 Codex')).toBeTruthy(); expect(view.getByLabelText('选择 Claude Code')).toBeTruthy(); expect(mockExplorer).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByLabelText('选择 Claude Code'));
+  await fireEvent.press(await view.findByLabelText('浏览磁盘 C:/'));
+  await fireEvent.press(await view.findByLabelText('在此位置新建文件夹'));
+  await fireEvent.changeText(view.getByLabelText('新文件夹名称'), 'new-project');
+  await fireEvent.press(view.getByLabelText('创建文件夹并使用'));
+  expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: null, agent: { id: 'claude' }, newProjectPath: 'C:/new-project', newProjectless: false });
+  expect(mockExplorer.mock.calls.at(-1)).toEqual(['claude', 'code', { action: 'mkdir', cwd: 'C:/', path: '', name: 'new-project' }]);
+  await view.unmount();
+});
+
+test.each(['code', 'work'] as const)('global %s no-folder entry still chooses its Agent first', async mode => {
+  mockRemote.devices[0].capabilities = ['session.projectless.v1'];
+  const view = await render(<RemoteScreen />);
+  if (mode === 'work') await fireEvent.press(await view.findByRole('tab', { name: 'Work' }));
+  await fireEvent.press(await view.findByLabelText('新建全局会话'));
+  await fireEvent.press(view.getByLabelText('选择 Codex'));
+  await fireEvent.press(await view.findByLabelText('不关联文件夹，直接开始'));
+  expect(mockThreadProps).toMatchObject({ visible: true, agent: { id: 'codex' }, newProjectPath: '', newProjectless: true });
+  expect(mockExplorer).not.toHaveBeenCalled(); await view.unmount();
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -371,7 +403,7 @@ test('repeated directory API management presses open one library without reconne
   expect(mockConnectStation).not.toHaveBeenCalled(); expect(mockSetApi).not.toHaveBeenCalled();
   await fireEvent.press(view.getByLabelText('返回 API 资源库'));
   expect(view.getByText('修复购物车')).toBeTruthy();
-  expect(view.getByLabelText('新建 Code 对话')).toBeTruthy();
+  expect(view.getByLabelText('在 shop 中新建 Code 对话')).toBeTruthy();
   expect(mockThreadProps).toMatchObject({ visible: false, agent: { id: 'codex' } });
 });
 
@@ -649,7 +681,7 @@ test.each(['existing', 'new'] as const)('switching Agent clears the %s conversat
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Codex'));
   const oldSettings = view.getByLabelText('API 管理').props.onPress as () => void;
-  await fireEvent.press(view.getByLabelText(kind === 'existing' ? '修复购物车' : '新建 Code 对话'));
+  await fireEvent.press(view.getByLabelText(kind === 'existing' ? '修复购物车' : '在 shop 中新建 Code 对话'));
   expect(mockThreadProps.visible).toBe(true);
   await act(async () => mockThreadProps.onClose());
   await fireEvent.press(view.getByLabelText('返回'));
@@ -940,7 +972,7 @@ test('offline computer still shows cached sessions but cannot start a remote con
   await fireEvent.press(view.getByLabelText('打开 Codex'));
   expect(view.getByTestId('remote-workspace')).toBeTruthy();
   expect(view.getByText('修复购物车')).toBeTruthy();
-  expect(view.getByLabelText('新建 Code 对话').props.accessibilityState.disabled).toBe(true);
+  expect(view.getByLabelText('在 shop 中新建 Code 对话').props.accessibilityState.disabled).toBe(true);
 });
 
 test('session routing preserves an exact registered extension and rejects mismatched or unregistered namespaces', () => {

@@ -32,3 +32,11 @@ test.each(['remote','direct'] as const)('%s rejects a late reply and blocks furt
   await expect(request({action:'mkdir',cwd:'C:/allowed',path:'',name:'must-not-create'})).rejects.toThrow('电脑连接已变化');
   expect(call).toHaveBeenCalledTimes(1);
 });
+
+test.each(['remote','direct'] as const)('%s explorer uses a distinct command and cannot select a parent disk as the project',async transport=>{
+ const call=transport==='remote'?mockCommand:mockDirect;
+ const request=projectBrowserRequest(transport,'pc','claude','work',true);
+ await request({action:'mkdir',cwd:'C:/',path:'Users/test/.projects',name:'new'});
+ expect(call.mock.calls[0][transport==='remote'?2:0]).toEqual({type:'workspace.explorer',controlSurface:'cli',tool:'claude',workspaceMode:'work',action:'mkdir',cwd:'C:/',path:'Users/test/.projects',name:'new'});
+ await expect(request({action:'select',cwd:'C:/',path:''})).rejects.toThrow('命名');expect(call).toHaveBeenCalledTimes(1);
+});

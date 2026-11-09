@@ -350,6 +350,7 @@ export function parseHubEvent(value: unknown): HubEvent | undefined {
 
 export type Command =
   | { type: 'workspace.projects'; controlSurface: 'cli'; tool: ToolId; workspaceMode: WorkspaceMode; action: 'list' | 'select' | 'mkdir'; cwd: string; path: string; cursor?: string; name?: string }
+  | { type: 'workspace.explorer'; controlSurface: 'cli'; tool: ToolId; workspaceMode: WorkspaceMode; action: 'list' | 'mkdir'; cwd: string; path: string; cursor?: string; name?: string }
   | { type: 'workspace.git.read'; sessionKey:string; controlSurface:'cli'|'desktop'; expectedCwd:string; action:'status'|'diff'|'staged-diff'|'review'|'repositories'; repositoryPath?:string; path?:string;reviewScope?:import('./workspace-git').ReviewScope;reviewRef?:string;sourceDiff?:string }
   | ({ type: 'workspace.git.mutate'; sessionKey:string; controlSurface:'cli'|'desktop'; expectedCwd:string; action:import('./workspace-git').GitAction; expectedRevision:string } & import('./workspace-git').GitInput)
   | { type: 'agents.status' }
@@ -726,7 +727,7 @@ export async function command<T = Record<string, unknown>>(hub: Hub, deviceId: s
   let frozenRequestId = requestId;
   let sourceGrant: { payload: string; signature: string } | undefined;
   let acquisitionAttempted = false;
-  const readOnly = receiptOnly || cmd.type === 'workspace.projects' && cmd.action === 'list' || cmd.type === 'workspace.project.preview' && (cmd.action === 'inspect' || cmd.action === 'status') || cmd.type === 'session.side-question.tools' && cmd.action === 'read' || cmd.type === 'workspace.artifacts' && cmd.action !== 'save' || ['remote.connections.sync', 'agents.status', 'sessions.list', 'desktop.sessions.list', 'session.open', 'desktop.session.open', 'session.describe', 'projects.list', 'models.list', 'features.list', 'session.context', 'session.actions', 'sessions.archived', 'session.workflows', 'session.cooperation.prepare', 'session.side-question.read', 'remote.station.receipt', 'attachment.read', 'workspace.files.list', 'workspace.files.read', 'workspace.project.files.list', 'workspace.project.files.read', 'workspace.terminal.read', 'workspace.preview.frame', 'workspace.preview.file', 'workspace.git.read'].includes(cmd.type);
+  const readOnly = receiptOnly || (cmd.type === 'workspace.projects' || cmd.type === 'workspace.explorer') && cmd.action === 'list' || cmd.type === 'workspace.project.preview' && (cmd.action === 'inspect' || cmd.action === 'status') || cmd.type === 'session.side-question.tools' && cmd.action === 'read' || cmd.type === 'workspace.artifacts' && cmd.action !== 'save' || ['remote.connections.sync', 'agents.status', 'sessions.list', 'desktop.sessions.list', 'session.open', 'desktop.session.open', 'session.describe', 'projects.list', 'models.list', 'features.list', 'session.context', 'session.actions', 'sessions.archived', 'session.workflows', 'session.cooperation.prepare', 'session.side-question.read', 'remote.station.receipt', 'attachment.read', 'workspace.files.list', 'workspace.files.read', 'workspace.project.files.list', 'workspace.project.files.read', 'workspace.terminal.read', 'workspace.preview.frame', 'workspace.preview.file', 'workspace.git.read'].includes(cmd.type);
   // Model discovery is read-only in conversation terms but can contact the
   // upstream provider; station policy and a restricted source grant still apply.
   // v2 handovers only move an already-paired transport. They must not acquire
@@ -737,7 +738,7 @@ export async function command<T = Record<string, unknown>>(hub: Hub, deviceId: s
   // These tools are authorized by the paired computer and exact workspace.
   // They never call a model provider; even a server requesting a source grant
   // must not cause the phone to acquire or disclose unrelated API authority.
-  const workspaceLocal = ['workspace.projects', 'workspace.artifacts', 'workspace.git.read', 'workspace.git.mutate', 'workspace.files.mutate', 'workspace.preview.file', 'workspace.files.write', 'workspace.terminal.open', 'workspace.terminal.read', 'workspace.terminal.input', 'workspace.terminal.resize', 'workspace.terminal.close',
+  const workspaceLocal = ['workspace.projects', 'workspace.explorer', 'workspace.artifacts', 'workspace.git.read', 'workspace.git.mutate', 'workspace.files.mutate', 'workspace.preview.file', 'workspace.files.write', 'workspace.terminal.open', 'workspace.terminal.read', 'workspace.terminal.input', 'workspace.terminal.resize', 'workspace.terminal.close',
     'workspace.preview.open', 'workspace.preview.frame', 'workspace.preview.input', 'workspace.preview.close', 'workspace.project.preview'].includes(frozenCommand.type);
   const sourceProtected = !receiptOnly && !workspaceLocal && (!readOnly || cmd.type === 'models.list' || cmd.type === 'features.list' || cmd.type === 'session.context' || cmd.type === 'session.actions' || cmd.type === 'sessions.archived' || cmd.type === 'session.workflows' || cmd.type === 'session.cooperation.prepare' || cmd.type === 'session.side-question.read' || cmd.type === 'session.side-question.tools') && !transportOnlyHandover;
   // A dead/slow read formerly occupied the spinner for 3 × 55 seconds. Keep

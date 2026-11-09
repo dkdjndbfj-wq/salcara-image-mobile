@@ -23,6 +23,7 @@ import { RemoteComputers } from './RemoteComputers';
 import { RemoteBotBinding } from './RemoteBotBinding';
 import { RemoteApiLibrary } from './RemoteApiLibrary';
 import { RemoteWorkspace } from './RemoteWorkspace';
+import { NewConversationFlow } from './NewConversationFlow';
 import { openDesktopGithub } from './RemoteDownloads';
 import { notificationsSupported, retryBackgroundNotifications, setNotificationsEnabled, useBackgroundWatchStatus, useNotificationPermissionGranted, useNotificationsEnabled } from './notifications';
 import { setStandbyEnabled, usePushStatus } from './push';
@@ -35,7 +36,7 @@ import {
   builtinAgent, fallbackAgentProfiles, sessionWorkspaceMode, validAgentId,
 } from './projection';
 import {
-  getRemoteState, hydrateCachedThread, lastAgent, loadAgentProfiles, loadClaudeDesktopHistory, loadNativeSessions, loadSessions, pairRemote, pairScannedRemoteQr, parseScannedRemoteQr, rememberAgent,
+  getRemoteState, hydrateCachedThread, hubSupportsExplorer, hubSupportsProjectless, lastAgent, loadAgentProfiles, loadClaudeDesktopHistory, loadNativeSessions, loadSessions, pairRemote, pairScannedRemoteQr, parseScannedRemoteQr, rememberAgent,
   reloadSavedConnections, setRemoteFocus, setRemoteScreenOpen, useRemote, useSavedConnection, type RemoteState,
 } from './store';
 import { ThreadView, type ContinueSeed } from './ThreadView';
@@ -45,7 +46,7 @@ import { isSimulatedRemoteDevice, SIMULATED_REMOTE_AGENTS, SIMULATED_REMOTE_DEVI
 
 import type { SalcaraThreadLink } from './remote-links';
 
-type Route = 'home' | 'devices' | 'setup' | 'pairing' | 'workspace' | 'direct' | 'demo';
+type Route = 'home' | 'devices' | 'setup' | 'pairing' | 'workspace' | 'direct' | 'demo' | 'new-session';
 type DemoView = 'flow' | 'workspace';
 const DEMO_BINDING_KEY = 'salcara.remote.demo-binding.v1';
 const DEMO_API_KEY = 'salcara.remote.demo-apis.v1';
@@ -117,6 +118,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
   const [newThread, setNewThread] = useState(false);
   const [newProjectPath, setNewProjectPath] = useState('');
   const [newProjectless, setNewProjectless] = useState(false);
+  const [directNewRequest, setDirectNewRequest] = useState(0);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('code');
   const [newWorkspaceMode, setNewWorkspaceMode] = useState<WorkspaceMode>('code');
   const [seed, setSeed] = useState<ContinueSeed | null>(null);
@@ -134,6 +136,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
   const demoBack = useRef<(() => void) | null>(null);
   const registerDemoBack = useCallback((handler: (() => void) | null) => { demoBack.current = handler; }, []);
   const directBack = useChildBackAction();
+  const newFlowBack = useChildBackAction();
   const demoWorkspaceBack = useChildBackAction();
   const scope = JSON.stringify([remote.connectionId, remote.selectedHubUrl, remote.serviceId]);
   const navigation = useRef({ route, revision: 0, scope, visible });
@@ -176,7 +179,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
     setDirectChoice({deviceId:id,deviceName:current.deviceName}); setSelectedTransport('direct');
     return true;
   };
-  const openDirect = async () => {
+  const openDirect = async (newConversation = false) => {
     const target = directTarget;
     if (!target) { navigate('devices'); return; }
     const owner = {...navigation.current};
@@ -185,13 +188,14 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
       if (current.deviceId !== target.deviceId || current.status !== 'connected') await reconnectDirect(target.deviceId);
       if (!stillHere(owner.route,owner.revision,owner.scope)) return;
       if (!rememberDirect(target.deviceId)) throw new Error('直连目标已改变，请重新选择电脑');
+      setDirectNewRequest(value => newConversation ? value + 1 : 0);
       navigate('direct');
     } catch(error) { if(stillHere(owner.route,owner.revision,owner.scope)) showToast(error instanceof Error?error.message:'直连失败','alert'); }
   };
   const selectComputer = (selection:ComputerSelection) => {
     if (!stillHere('devices',revision)) return;
     if (selection.kind === 'direct') {
-      if (rememberDirect(selection.deviceId)) { setThreadKey(null); setNewThread(false); navigate('direct'); }
+      if (rememberDirect(selection.deviceId)) { setDirectNewRequest(0); setThreadKey(null); setNewThread(false); navigate('direct'); }
       return;
     }
     if (selection.kind === 'demo') {
@@ -285,6 +289,13 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
     }).catch((error: Error) => {
       if (stillHere('home', ownedRevision, ownedScope)) showToast(error.message, 'alert');
     });
+  };
+  const openGlobalNew = () => {
+    if (directSelected) { void openDirect(true); return; }
+    const targetDeviceId = profile?.deviceId ?? deviceId;
+    if (!targetDeviceId) { navigate('devices'); return; }
+    setDeviceId(targetDeviceId); setThreadKey(null); setNewThread(false); navigate('new-session');
+    void loadAgentProfiles(targetDeviceId).catch(() => undefined);
   };
   /** Opens a known conversation at once (cached copy first); Agent/API details are verified in background. */
   const openExisting = async (targetDeviceId: string, sessionKey: string, knownSession?: SessionInfo, expectedSource?: Pick<SalcaraThreadLink, 'agentId' | 'surface' | 'sessionScope'>) => {
@@ -431,7 +442,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
     setDeviceId(current => current === SIMULATED_REMOTE_DEVICE_ID && simulatedBound ? current : profile?.deviceId ?? (simulatedBound ? SIMULATED_REMOTE_DEVICE_ID : null));
     setThreadKey(null); setNewThread(false); setMenu(false); setApiLibrary(false); returnToHome.current = false;
     // A deliberate station check/QR flow may change the store scope. It owns its own completion guard.
-    if (navigation.current.route === 'workspace') navigate('home');
+    if (navigation.current.route === 'workspace' || navigation.current.route === 'new-session') navigate('home');
   }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (remote.phase !== 'ready') return;
@@ -483,6 +494,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
   }, [visible, remote.focus, remote.connectionId]);
 
   const back = () => {
+    if (route === 'new-session') { if (!newFlowBack.handle()) navigate('home'); return true; }
     if (route === 'pairing') { navigate(pairedComputerCount(remote.connections) || simulatedBound ? 'devices' : 'home'); return true; }
     if (route === 'direct') { if (!directBack.handle()) navigate('home'); return true; }
     if (route === 'setup') { navigate('devices'); return true; }
@@ -518,9 +530,10 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
   }, undefined, visible);
 
   return <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
-    {!mobileWorkspaceFullscreen ? <View style={styles.topBar}>
+    {!mobileWorkspaceFullscreen && route !== 'new-session' ? <View style={styles.topBar}>
       {route !== 'home' && route !== 'demo' ? <IconButton icon="chevronLeft" label="返回" onPress={() => { back(); }} /> : <View style={{ width: 40 }} />}
       <View style={{ flex: 1 }} />
+      {route === 'home' || route === 'workspace' || route === 'direct' ? <IconButton icon="compose" label="新建全局会话" onPress={openGlobalNew} /> : null}
       {device && !directSelected && !isSimulatedRemoteDevice(device.deviceId) && route !== 'direct' && route !== 'demo' ? <ConnectionIndicator remote={remote} device={device} onPress={() => setDiagnosticsOpen(true)} /> : null}
       {route !== 'home' ? <View style={styles.headerActions}>
         <IconButton icon="more" label="更多" onPress={() => setMenu(true)} />
@@ -573,7 +586,14 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
                 navigate('home');
               }} />
             : step === 'direct'
-              ? <DirectExperience workspaceMode={workspaceMode} onMobileWorkspaceVisibilityChange={reportDirectMobileWorkspace} onRegisterBack={directBack.register} />
+              ? <DirectExperience workspaceMode={workspaceMode} newConversationRequest={directNewRequest} onMobileWorkspaceVisibilityChange={reportDirectMobileWorkspace} onRegisterBack={directBack.register} />
+            : step === 'new-session' && deviceId
+              ? <NewConversationFlow key={JSON.stringify([scope, deviceId, workspaceMode])} scopeKey={scope} deviceId={deviceId} deviceName={device?.name} transport="remote" mode={workspaceMode}
+                agents={agents?.loaded ? agents.list : []} loading={Boolean(agents?.loading)} error={agents?.error} online={remoteDeviceConnected(remote, device)}
+                explorerAvailable={typeof hubSupportsExplorer === 'function' && hubSupportsExplorer() && Boolean(device?.capabilities?.includes('workspace.explorer.v1'))}
+                projectlessAvailable={typeof hubSupportsProjectless === 'function' && hubSupportsProjectless() && Boolean(device?.capabilities?.includes('session.projectless.v1'))}
+                onRefresh={() => { void loadAgentProfiles(deviceId).catch(() => undefined); }} onRegisterBack={newFlowBack.register} onClose={() => navigate('home')}
+                onComplete={selection => { if (!stillHere('new-session', revision, scope)) return; chooseAgent(selection.agent.id); void rememberAgent(selection.agent.id); setNewProjectPath(selection.cwd); setNewProjectless(selection.projectless === true); setNewWorkspaceMode(workspaceMode); setSeed(null); setThreadKey(null); setNewThread(true); returnToHome.current = true; navigate('workspace'); }} />
             : step === 'demo'
               ? demoView === 'flow'
                 ? <RemoteDemoFlow visible={visible} computer={{ ...SIMULATED_REMOTE_DEVICE, name: simulatedDeviceName }} agents={simulatedAgents} sessions={SIMULATED_REMOTE_SESSIONS} initialAgentId={demoFlowAgentId} initialWorkspaceMode={demoWorkspaceMode} onRegisterBack={registerDemoBack}

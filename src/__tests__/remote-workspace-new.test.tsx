@@ -384,12 +384,12 @@ test.each(['code', 'work'] as const)('%s keeps child tasks inside their parent c
   await fireEvent.press(view.getByLabelText('codex:parent')); expect(props.onOpen).toHaveBeenCalledWith('codex:parent');
 });
 
-test('header keeps Agent, computer and static mode compact with a separate new-project action', async () => {
+test('Agent directory keeps project-level new conversation separate from the global flow', async () => {
   mockRemote = ready([session('codex:work', { workspaceMode: 'work' })]);
   const { view, props } = await mount({ workspaceMode: 'work' });
   expect(view.getByRole('header', { name: 'Codex' })).toBeTruthy();
   expect(view.getByText('工作电脑')).toBeTruthy(); expect(view.getByText('Work 会话')).toBeTruthy();
-  expect(view.getByLabelText('新建会话')).toBeTruthy(); expect(view.queryByTestId('agent-directory-new')).toBeNull();
+  expect(view.queryByLabelText('新建会话')).toBeNull(); expect(view.queryByTestId('agent-directory-new')).toBeNull();
   expect(view.queryByLabelText('在 shop 中新建 Code 对话')).toBeNull();
   await fireEvent.press(view.getByLabelText('在 shop 中新建 Work 对话')); expect(props.onNew).toHaveBeenCalledWith('work', 'C:\\code\\shop');
 });
@@ -546,12 +546,11 @@ test('stale and offline pagination never request a next page', async () => {
 });
 
 
-test.each(['code','work'] as const)('projectless %s picker works with no project grants and does not start a task',async workspaceMode=>{
+test.each(['code','work'] as const)('Agent directory does not launch the global %s flow or choose an arbitrary empty project',async workspaceMode=>{
  mockRemote.devices[0].capabilities=['session.projectless.v1'];
  const {view,props}=await mount({workspaceMode});
- await fireEvent.press(view.getByLabelText('新建会话'));
- await fireEvent.press(view.getByLabelText('不关联文件夹，直接开始'));
- expect(props.onNew).toHaveBeenCalledWith(workspaceMode,'',true);expect(props.onOpen).not.toHaveBeenCalled();await view.unmount();
+ expect(view.queryByLabelText('新建会话')).toBeNull(); expect(view.queryByTestId('project-browser')).toBeNull();
+ expect(props.onNew).not.toHaveBeenCalled();expect(props.onOpen).not.toHaveBeenCalled();await view.unmount();
 });
 test('projectless group creates another independent conversation instead of inheriting a managed cwd',async()=>{
  mockRemote=ready([session('codex:independent',{projectless:true,cwd:'C:/managed/opaque'})]);

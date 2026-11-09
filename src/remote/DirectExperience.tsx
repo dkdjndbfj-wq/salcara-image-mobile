@@ -22,8 +22,7 @@ import { directActionUncertain, directRetryTarget } from './direct-turn-actions'
 import type { DirectComposerSubmission, DirectSendOutcome } from './DirectComposer';
 import { DirectNewComposer } from './DirectNewComposer';
 import { DirectProjectDirectory } from './DirectProjectDirectory';
-import { ProjectBrowser } from './ProjectBrowser';
-import { projectBrowserRequest } from './project-browser';
+import { NewConversationFlow, type NewConversationSelection } from './NewConversationFlow';
 import {conversationReadScope} from './conversation-unread';
 import { AgentDirectoryHeading } from './AgentDirectoryHeading';
 import { createDirectPendingOperation, type DirectPendingOperation } from './direct-pending-operation';
@@ -43,8 +42,9 @@ const INITIAL_MESSAGES = 2;
 const MAX_EVENTS = 800;
 const HISTORY_PAGE_MESSAGES = 10;
 
-export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisibilityChange, onRegisterBack }: {
+export function DirectExperience({ workspaceMode = 'code', newConversationRequest = 0, onMobileWorkspaceVisibilityChange, onRegisterBack }: {
   workspaceMode?: WorkspaceMode;
+  newConversationRequest?: number;
   onMobileWorkspaceVisibilityChange?: (visible: boolean) => void;
   onRegisterBack?: RegisterBackAction;
 }) {
@@ -74,7 +74,10 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
   const [pendingStop, setPendingStop] = useState<{identity:string;turnId:string;operationId:string}>();
   const [pendingRevision,setPendingRevision]=useState(0);
   const [newSession, setNewSession] = useState(false);
-  const [projectBrowser, setProjectBrowser] = useState(false);
+  const [globalNew, setGlobalNew] = useState(false);
+  const [globalSelection, setGlobalSelection] = useState<(NewConversationSelection & { scope: string }) | undefined>();
+  const seenNewRequest = useRef(0);
+  useEffect(() => { if (seenNewRequest.current !== newConversationRequest) { seenNewRequest.current = newConversationRequest; if (newConversationRequest) setGlobalNew(true); } }, [newConversationRequest]);
   const [managementOpen, setManagementOpen] = useState(false);
   const [draftRecovery,setDraftRecovery]=useState<ComposerDraftRecoveryReceipt>();
   const [uncertainStart, setUncertainStart] = useState(false);
@@ -91,9 +94,9 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
   const connectedOwner=useRef('');
   const connectionOwner=JSON.stringify([scope,connection.deviceId,workspaceMode]);
   useEffect(() => {
-    onMobileWorkspaceVisibilityChange?.(false);
+    onMobileWorkspaceVisibilityChange?.(globalNew);
     return () => onMobileWorkspaceVisibilityChange?.(false);
-  }, [scope, connectionGeneration, connection.status, selected?.sessionKey, workspaceMode, onMobileWorkspaceVisibilityChange]);
+  }, [scope, connectionGeneration, connection.status, selected?.sessionKey, workspaceMode, globalNew, onMobileWorkspaceVisibilityChange]);
   const remote: RemoteState = useMemo(() => {
     const deviceId = connection.deviceId;
     return { phase:'ready',serviceId:null,connections:[],connectionId:scope,selectedHubUrl:null,probes:{},connection:connection.status==='connected'?'open':'idle',
@@ -282,8 +285,14 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
   const projectIdentity = JSON.stringify([scope, connectionGeneration, connection.deviceId, agentId, workspaceMode]);
   const projectOwner = useMemo(() => ({ identity: projectIdentity }), [projectIdentity]);
   const projectOwnerRef = useRef(projectOwner); projectOwnerRef.current = projectOwner;
-  const projectRequest = useMemo(() => projectBrowserRequest('direct', connection.deviceId ?? '', profile?.tool ?? '', workspaceMode), [projectIdentity]);
-  useEffect(() => { setProjectBrowser(false); setNewSession(false); setProjectPath('');setProjectless(false); }, [projectIdentity]);
+  const globalScope = JSON.stringify([scope, connectionGeneration, connection.deviceId, workspaceMode]);
+  useEffect(() => { setNewSession(false); setProjectPath('');setProjectless(false); }, [projectIdentity]);
+  useEffect(() => {
+    if (!globalSelection) return;
+    if (globalSelection.scope !== globalScope) { setGlobalSelection(undefined); return; }
+    if (profile?.id !== globalSelection.agent.id) return;
+    setProjectPath(globalSelection.cwd); setProjectless(globalSelection.projectless === true); setNewSession(true); setError(''); setGlobalSelection(undefined);
+  }, [globalSelection, globalScope, projectIdentity, profile?.id]);
   const apiReady = claudeApiAdmissionReady(profile);
   const canCreate = Boolean(profile?.available && profile.id !== 'claude-desktop' && profile.remoteSendSupported
     && agentSupports(profile, profile.id, 'send') && apiReady);
@@ -674,10 +683,11 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
     setSelected(null);setTimeline(EMPTY_TIMELINE);setLoading(false);setLoadingMore(false);setSending(false);setError('');setUncertainSend(false);
   };
   const conversationBack = useChildBackAction();
+  const globalNewBack = useChildBackAction();
   useBackAction(() => {
     if (connection.status !== 'connected') return false;
     if (managementOpen) { setManagementOpen(false); return true; }
-    if (projectBrowser) { setProjectBrowser(false); return true; }
+    if (globalNew) { if (!globalNewBack.handle()) setGlobalNew(false); return true; }
     if (conversationBack.handle()) return true;
     if (selected) { backToDirectory(); return true; }
     if (newSession) {
@@ -743,7 +753,7 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
   const apiControl = <>{apiSelection.control}{profile && !apiReady ? <Pressable accessibilityRole="button" accessibilityLabel="选择并确认 Claude API" disabled={sending || apiSelection.busy} onPress={apiSelection.open}>
     <Text style={styles.notice}>Claude 远程需要已配置的 API，点此选择并确认</Text>
   </Pressable> : null}</>;
-  if (selected && profile && connection.deviceId) return <DirectConversation key={`${scope}|${selected.sessionKey}`} runtime={workspaceRuntime} deviceId={connection.deviceId} profile={profile} session={selected} timeline={timeline} workspaceMode={workspaceMode}
+  if (!globalNew && selected && profile && connection.deviceId) return <DirectConversation key={`${scope}|${selected.sessionKey}`} runtime={workspaceRuntime} deviceId={connection.deviceId} profile={profile} session={selected} timeline={timeline} workspaceMode={workspaceMode}
     apiControl={apiControl}
     onResolveApi={() => { if (currentAction.current.identity === actionIdentity) apiSelection.open(); }}
     onMobileWorkspaceVisibilityChange={onMobileWorkspaceVisibilityChange} onRegisterBack={conversationBack.register}
@@ -753,12 +763,14 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
     onRecoverMissingDraft={receipt=>{const origin=receipt.targetOrigin;if(receipt.scope!==scope||scope!==directDeliveryScope()||connection.deviceId!==origin.deviceId||profile.id!==origin.agentId||origin.mode!==workspaceMode||origin.apiIdentity!==(profile.api.accountId??'')||!(origin.projectless ? projectlessAllowed : projects.some(project=>project.path===origin.cwd)))return;backToDirectory();setDraftRecovery(receipt);setProjectless(origin.projectless===true);setProjectPath(origin.projectless?'':origin.cwd);setText('');setNewSession(true);}}
     onBack={backToDirectory} onOpenSession={key=>void openByKey(key)} onNew={(_mode, cwd, none)=>{if(!apiReady){apiSelection.open();return;}if(!canCreate)return;if(none||!cwd&&selected.projectless){if(!projectlessAllowed){setError('请更新电脑端，或返回选择项目文件夹');return;}backToDirectory();setProjectless(true);setProjectPath('');setNewSession(true);return;}const exact=cwd||selected.cwd;if(!exact){setError('请选择新会话的开始方式');return;}backToDirectory();setProjectless(false);setProjectPath(exact);setProjects(previous=>previous.some(item=>item.path===exact)?previous:[...previous,{path:exact,name:exact}]);setNewSession(true);}}/>;
 
-  if (projectBrowser && profile && connection.status === 'connected') return <ProjectBrowser key={projectIdentity} scopeKey={projectIdentity} tool={profile.tool} mode={workspaceMode} request={projectRequest}
-    projectlessUnavailable={projectlessAllowed ? undefined : '电脑端尚不支持此方式。可以先选择文件夹，或更新电脑端后再试。'}
-    onProjectless={() => { if (projectOwnerRef.current !== projectOwner || getDirectConnectionState().status !== 'connected') return; setProjectPath('');setProjectless(true);setProjectBrowser(false);setNewSession(true);setError(''); }}
-    onClose={() => { if (projectOwnerRef.current === projectOwner) setProjectBrowser(false); }} onSelect={project => {
-      if (projectOwnerRef.current !== projectOwner) return;
-      setProjects(previous => [...previous.filter(item => item.path !== project.path), project]); setProjectPath(project.path); setProjectless(false); setProjectBrowser(false); setNewSession(true); setError('');
+  if (globalNew && connection.deviceId) return <NewConversationFlow key={globalScope} scopeKey={globalScope} deviceId={connection.deviceId} deviceName={connection.deviceName}
+    transport="direct" agents={agents} mode={workspaceMode} loading={loading} error={error} online={connection.status === 'connected'}
+    explorerAvailable={capabilities.includes('workspace.explorer.v1')} projectlessAvailable={projectlessAllowed} onRegisterBack={globalNewBack.register}
+    onRefresh={() => { void loadProfiles(); }} onClose={() => setGlobalNew(false)} onComplete={selection => {
+      if (directDeliveryScope() !== scope || directConnectionGeneration() !== connectionGeneration || getDirectConnectionState().deviceId !== connection.deviceId || getDirectConnectionState().status !== 'connected') return;
+      backToDirectory(); setDraftRecovery(undefined); setAgentId(selection.agent.id);
+      if (selection.project) setProjects(previous => [...previous.filter(item => item.path !== selection.cwd), selection.project!]);
+      setGlobalSelection({ ...selection, scope: globalScope }); setGlobalNew(false);
     }} />;
   return <KeyboardSafeView testID="direct-new-keyboard-safe" style={styles.panel}>
     <View style={styles.heading}>
@@ -767,8 +779,7 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
         setSelected(null); setTimeline(EMPTY_TIMELINE); setLoading(false); setLoadingMore(false); setSending(false); setError(''); setUncertainSend(false);
       }} style={styles.back}><Icon name="chevronLeft" size={18} color={d.text2} /></Pressable> : null}
       <View style={styles.headingCopy}><AgentDirectoryHeading agentName={profile?.name || 'Agent'} deviceName={connection.deviceName || '电脑直连'} mode={workspaceMode}
-        disabled={loading || apiSelection.busy || sending} onNewProject={!newSession && profile?.available && profile.id !== 'claude-desktop' && agentSupports(profile, profile.id, 'send')
-          ? () => { if(!apiReady){apiSelection.open();return;}if(!canCreate)return;setProjectBrowser(true);setError(''); } : undefined}/></View>
+        disabled={loading || apiSelection.busy || sending}/></View>
       {selected ? <Pressable accessibilityRole="button" accessibilityLabel="刷新会话" onPress={() => void refreshConversation()} style={styles.iconButton}><Icon name="regenerate" size={16} color={d.text2} /></Pressable>
         : <Pressable accessibilityRole="button" accessibilityLabel="关闭直连" onPress={disconnect} style={styles.iconButton}><Icon name="close" size={16} color={d.text2} /></Pressable>}
     </View>

@@ -107,7 +107,7 @@ export function NewThreadIntro({ agent, cwd, projectless = false, workspaceMode 
   return <View style={styles.intro}>
     <Appear><DeskOrb size={72} /></Appear>
     <Text style={styles.introTitle}>{workspaceMode === 'code' ? '要构建什么？' : '要处理什么工作？'}</Text>
-    <Text style={styles.introDetail}>{agent?.name ?? 'Codex'} 会在电脑上已授权的文件夹里工作，进度实时同步到这里。</Text>
+    <Text style={styles.introDetail}>{agent?.name ?? 'Codex'} {projectless ? '会在电脑上处理这次任务' : '会在电脑上已授权的文件夹里工作'}，进度实时同步到这里。</Text>
     <View style={styles.introProject}>
       <Icon name="archive" size={15} color={dk.text2} />
       <Text style={styles.introProjectText} numberOfLines={1}>{projectless ? '不关联文件夹' : cwd ? projectName(cwd) : '请选择新会话的开始方式'}</Text>
