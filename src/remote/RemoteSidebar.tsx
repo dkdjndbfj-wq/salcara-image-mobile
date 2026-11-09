@@ -96,7 +96,7 @@ export interface RemoteSidebarProps {
   onOpenDiffFullscreen?: () => void;
   onClose: () => void;
   onOpenSession: (sessionKey: string) => void;
-  onNew?: (mode?: WorkspaceMode, cwd?: string) => void;
+  onNew?: (mode?: WorkspaceMode, cwd?: string, projectless?: true) => void;
   onOpenCommands?: () => void;
   onOpenModel?: () => void;
   onReference?: (value: ReferencePreview) => void;
@@ -436,7 +436,7 @@ export function RemoteSidebar({ docked = false, dockedWidth, mode = 'navigation'
           <View style={styles.navigationAvatar}><ToolBadge tool={agent.tool} client={agent.id === 'claude-desktop' ? 'Claude Desktop' : undefined} size={24} /></View>
           <View style={styles.navigationIdentity}><Text numberOfLines={1} style={styles.navigationTitle}>{agent.name}</Text><Text numberOfLines={1} style={styles.navigationSubtitle}>{device?.name || '电脑'} · {directoryMode === 'code' ? 'Code' : 'Work'}</Text></View>
           {!native && !readOnly && agent.remoteSendSupported && onNew ? <View><View pointerEvents="none" style={styles.navigationCreateSurface}/><ToolbarButton icon="compose" label={`新建 ${directoryMode === 'code' ? 'Code' : 'Work'} 对话`} disabled={!online || !agent.available}
-            onPress={() => { if (!stillWanted() || !online || !agent.available) return; if (!docked) onClose(); onNew(directoryMode, directory.find(item => item.sessionKey === activeSessionKey)?.cwd); }} /></View> : null}
+            onPress={() => { if (!stillWanted() || !online || !agent.available) return; if (!docked) onClose(); const active = directory.find(item => item.sessionKey === activeSessionKey); onNew(directoryMode, active?.projectless ? '' : active?.cwd, ...(active?.projectless ? [true as const] : [])); }} /></View> : null}
           {!docked ? <ToolbarButton icon="close" label="关闭侧边栏" onPress={onClose}/> : null}
         </View>
         {docked && (onOpenCommands || onOpenModel) ? <View style={styles.dockedActionList}>
@@ -600,7 +600,7 @@ export function RemoteSidebar({ docked = false, dockedWidth, mode = 'navigation'
             {collapsible ? <SidebarChevron collapsed={collapsed} reduced={reduced} color={dk.faint}/> : null}</>;
           const heading = collapsible ? <Pressable accessibilityRole="button" accessibilityLabel={`${collapsed ? '展开' : '折叠'}${section.name}`} accessibilityHint={section.path} accessibilityState={{expanded:!collapsed}} aria-expanded={!collapsed} onPress={toggle} style={({pressed})=>[styles.sectionHead, docked && styles.dockedSectionHead,pressed&&styles.pressed]}>{header}</Pressable>
             : <View accessible accessibilityRole="header" accessibilityLabel={section.key.startsWith('project:')?`项目 ${section.name}`:`${section.name}分组`} accessibilityHint={section.path} style={[styles.sectionHead, docked && styles.dockedSectionHead, mode==='navigation'&&styles.navigationSectionHead]}>{header}</View>;
-          return <View>{heading}{section.path && !native && !readOnly && onNew && agent.remoteSendSupported ? <ToolbarButton icon="compose" label={`在 ${section.name} 中新建会话`} disabled={!online || !agent.available} onPress={() => { if (!stillWanted() || !online || !agent.available) return; if (!docked) onClose(); onNew(directoryMode, section.path); }} /> : null}</View>;
+          return <View>{heading}{(section.path || section.projectless) && !native && !readOnly && onNew && agent.remoteSendSupported ? <ToolbarButton icon="compose" label={`在 ${section.name} 中新建会话`} disabled={!online || !agent.available} onPress={() => { if (!stillWanted() || !online || !agent.available) return; if (!docked) onClose(); onNew(directoryMode, section.path, ...(section.projectless ? [true as const] : [])); }} /> : null}</View>;
         }}
         renderItem={({ item,index }) => {
           const title = titleOf(deviceId, item.sessionKey, item.title || '无标题对话');

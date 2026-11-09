@@ -269,7 +269,7 @@ export function projectName(cwd: string): string {
   return cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '其他';
 }
 
-export interface SessionProjectGroup { key: string; name: string; path: string; updatedAt: number; sessions: SessionInfo[] }
+export interface SessionProjectGroup { key: string; name: string; path: string; projectless?: true; updatedAt: number; sessions: SessionInfo[] }
 /** Groups every thread under its working folder; conversations without one are temporary tasks. */
 export function groupSessionsByProject(sessions: SessionInfo[], options?: { nativeOrder?: boolean; nativeSessionOrder?: string[]; caseSensitivePaths?: boolean }): SessionProjectGroup[] {
   let ordered: SessionInfo[];
@@ -286,10 +286,10 @@ export function groupSessionsByProject(sessions: SessionInfo[], options?: { nati
   const groups = new Map<string, SessionProjectGroup>();
   const normalize = (value: string) => (options?.caseSensitivePaths === false ? value.toLocaleLowerCase() : value);
   for (const session of ordered) {
-    const path = typeof session.cwd === 'string' ? session.cwd.trim().replace(/[\\/]+$/, '') : '';
+    const path = !session.projectless && typeof session.cwd === 'string' ? session.cwd.trim().replace(/[\\/]+$/, '') : '';
     const identity = path && normalize(/^(?:[a-z]:[\\/]|\\\\)/i.test(path)?path.replace(/\//g,'\\'):path);
-    const key = identity ? `project:${identity}` : '__temporary';
-    const group = groups.get(key) ?? { key, name: path ? projectName(path) : '临时任务', path, updatedAt: session.updatedAt, sessions: [] };
+    const key = session.projectless ? '__projectless' : identity ? `project:${identity}` : '__temporary';
+    const group = groups.get(key) ?? { key, name: session.projectless ? '不关联文件夹' : path ? projectName(path) : '临时任务', path, ...(session.projectless ? { projectless: true as const } : {}), updatedAt: session.updatedAt, sessions: [] };
     group.sessions.push(session);
     group.updatedAt = Math.max(group.updatedAt, session.updatedAt);
     groups.set(key, group);

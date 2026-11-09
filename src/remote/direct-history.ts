@@ -35,7 +35,7 @@ export function parseDirectWorkspaceCapabilities(value: unknown): string[] {
   if (!isRecord(value) || value.capabilities === undefined) return [];
   if (!Array.isArray(value.capabilities) || value.capabilities.length > 128
     || value.capabilities.some(item => typeof item !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(item))) throw new Error('电脑工作区能力无效');
-  return [...new Set(value.capabilities as string[])].filter(item => item.startsWith('workspace.'));
+  return [...new Set(value.capabilities as string[])].filter(item => item.startsWith('workspace.') || item === 'session.projectless.v1');
 }
 
 export function parseDirectStartReceipt(value: unknown, tool: ToolId): string {
@@ -54,6 +54,7 @@ export function isDirectSession(value: unknown): value is SessionInfo {
     || !Number.isSafeInteger(value.updatedAt) || (value.updatedAt as number) < 0
     || !['running', 'idle', 'waiting_approval', 'failed', 'unknown'].includes(String(value.status))
     || typeof value.controllable !== 'boolean'
+    || value.projectless !== undefined && value.projectless !== true
     || value.controlSurface !== undefined && value.controlSurface !== 'cli'
     || value.workspaceMode !== undefined && value.workspaceMode !== 'code' && value.workspaceMode !== 'work') return false;
   try { return sessionKeyAgentId(value.sessionKey) === value.tool; } catch { return false; }

@@ -123,3 +123,11 @@ test('Direct preserves all 64 host output images without losing the containing m
   expect(merged.items.find(item => item.kind === 'message')).toMatchObject({text:'Generated images', attachments});
   expect(isDirectEvent({...event, attachments:[...attachments, {id:`att_${'f'.repeat(32)}`, mime:'image/png'}]}, 'pc', session.sessionKey)).toBe(false);
 });
+
+
+test('projectless capability and verified session label survive direct parsing',()=>{
+ expect(parseDirectWorkspaceCapabilities({capabilities:['session.projectless.v1','unrelated.capability']})).toEqual(['session.projectless.v1']);
+ const independent={...session,projectless:true,workspaceMode:'work'};
+ expect(parseDirectSessionPage({sessions:[independent]},'codex').sessions).toEqual([independent]);
+ expect(parseDirectSessionPage({sessions:[{...independent,projectless:'true'}]},'codex').sessions).toEqual([]);
+});

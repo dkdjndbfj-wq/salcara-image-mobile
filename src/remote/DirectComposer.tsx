@@ -119,7 +119,7 @@ export function DirectComposer({services,runtime,deviceId,profile,session,timeli
   const draftSession=useRef<DirectComposerDraft|undefined>(undefined),readyRef=useRef(false),textRef=useRef(text);textRef.current=text;
   const draftSaveTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),latestText=useRef(getLatestText);latestText.current=getLatestText;
   const draftSource=useRef<string|undefined>(undefined);
-  const draftOrigin:ComposerDraftOrigin|undefined=session.cwd?{transport:'direct',deviceId,agentId:profile.id,cwd:session.cwd,mode:workspaceMode,apiIdentity:profile.api.accountId??'',...(session.sessionKey?{sessionKey:session.sessionKey}:{})}:undefined;
+  const draftOrigin:ComposerDraftOrigin|undefined=session.cwd||session.projectless?{transport:'direct',deviceId,agentId:profile.id,cwd:session.cwd,...(session.projectless?{projectless:true as const}:{}),mode:workspaceMode,apiIdentity:profile.api.accountId??'',...(session.sessionKey?{sessionKey:session.sessionKey}:{})}:undefined;
   const draftValue=useRef<DirectDraftInput>({text,options,model,effort,permission,images});draftValue.current={text,options,model,effort,permission,images,missingImages,imageCount:imageCount??images.length,...(draftOrigin?{origin:draftOrigin}:{})};
   const currentRecovery=recoveryReceipt?.scope===runtime.scope&&recoveryReceipt.targetKey===directDraftKey(runtime.scope,deviceId,services.scope)?recoveryReceipt:undefined;
   const recoverySignature=draftSignature(draftValue.current);
@@ -206,10 +206,11 @@ export function DirectComposer({services,runtime,deviceId,profile,session,timeli
   const slashOwner=useRef(slashKey);slashOwner.current=slashKey;
   const sourceCurrent=()=>mounted.current&&sourceEpoch.current.source===source&&sourceEpoch.current.epoch===epoch&&services.isCurrent();
   const featureStateCurrent=featureState?.source===source&&featureState.owner===services&&featureState.request===generation.current;
-  const featureLoading=profile.capabilities?.features===true&&(!featureStateCurrent||featureState.loading);
+  const featureEligible=profile.capabilities?.features===true&&!(session.projectless&&!session.sessionKey);
+  const featureLoading=featureEligible&&(!featureStateCurrent||featureState.loading);
   const featureError=featureStateCurrent?featureState.error:'';
   const features=featureStateCurrent&&!featureState.loading&&!featureState.error?featureState.value:undefined;
-  const featureCatalogCurrent=()=>sourceCurrent()&&profile.capabilities?.features===true&&featureStateCurrent&&featureState.request===generation.current&&!featureState.loading&&!featureState.error&&Boolean(featureState.value);
+  const featureCatalogCurrent=()=>sourceCurrent()&&featureEligible&&featureStateCurrent&&featureState.request===generation.current&&!featureState.loading&&!featureState.error&&Boolean(featureState.value);
   const contextQuery=profile.capabilities?.contextReferences&&text!==dismissed?parseContextQuery(text,inputCaret):undefined;
   const slashActions=composerSlashActions({model:canChooseModel,reasoning:levels.length>0,reasoningLabel:effort?effortLabel(effort):'默认',permissions:permissions.length>0,
     newChat:Boolean(onNew),sideChat:Boolean(session.sessionKey&&profile.capabilities?.sideQuestion&&onSideChat),initialize:Boolean(session.cwd),
@@ -223,7 +224,7 @@ export function DirectComposer({services,runtime,deviceId,profile,session,timeli
   const renderedSlashOwner=slashSelectionOwner.current;
   useEffect(()=>{
     const request=++generation.current;
-    if(!profile.capabilities?.features){setFeatureState(undefined);return;}
+    if(!featureEligible){setFeatureState(undefined);return;}
     let active=true;
     const force=forceFeatureRefresh.current;forceFeatureRefresh.current=false;
     const current=()=>active&&sourceCurrent()&&request===generation.current;
@@ -234,7 +235,7 @@ export function DirectComposer({services,runtime,deviceId,profile,session,timeli
       if(current())setFeatureState({source,owner:services,request,loading:false,error:reason instanceof Error?reason.message:'技能目录读取失败'});
     });
     return()=>{active=false;};
-  },[source,services,featureRevision,profile.capabilities?.features,Boolean(slash)]);
+  },[source,services,featureRevision,featureEligible,Boolean(slash)]);
   const invalidFeatures=Boolean((options.skills?.length||options.collaborationMode)&&!featureCatalogCurrent()||options.skills?.some(skill=>!features?.skills.some(entry=>skillKey(entry)===skillKey(skill)))
     ||options.collaborationMode&&!features?.collaborationModes.includes(options.collaborationMode));
   const reloadFeatures=()=>{
@@ -457,7 +458,7 @@ export function DirectComposer({services,runtime,deviceId,profile,session,timeli
   };
   const recoverMissing=async()=>{
     const owner=draftSession.current,origin=draftOrigin,code=timeline.readErrorCode;
-    if(!owner||!origin?.sessionKey||!code||!onRecoverMissingDraft||locked||submitFlight.current||!services.isCurrent()||!runtime.remote.devices.some(device=>device.deviceId===deviceId&&device.projects.some(project=>project.path===origin.cwd)))return false;
+    if(!owner||!origin?.sessionKey||!code||!onRecoverMissingDraft||locked||submitFlight.current||!services.isCurrent()||!runtime.remote.devices.some(device=>device.deviceId===deviceId&&(origin.projectless?device.capabilities?.includes('session.projectless.v1'):device.projects.some(project=>project.path===origin.cwd))))return false;
     const current=()=>mounted.current&&sourceEpoch.current.epoch===epoch&&sourceEpoch.current.source===source&&draftSession.current===owner&&services.isCurrent();
     submitFlight.current=true;setMissingRecoveryBusy(true);if(draftSaveTimer.current){clearTimeout(draftSaveTimer.current);draftSaveTimer.current=undefined;}
     const value={...draftValue.current,text:latestText.current?.()??draftValue.current.text},signature=draftSignature(value);
@@ -465,7 +466,7 @@ export function DirectComposer({services,runtime,deviceId,profile,session,timeli
     try{
       const saved=await owner.save(value);
       if(!transferCurrent())throw new Error('输入已变化，原草稿已保留，请重新恢复');
-      const result=await copyMissingDirectComposerDraft({pairing:runtime.scope,deviceId,sourceOwner:services.scope,targetOwner:JSON.stringify([runtime.scope,deviceId,null,profile.id,profile.api.accountId??'',origin.cwd,workspaceMode]),
+      const result=await copyMissingDirectComposerDraft({pairing:runtime.scope,deviceId,sourceOwner:services.scope,targetOwner:JSON.stringify([runtime.scope,deviceId,null,profile.id,profile.api.accountId??'',origin.projectless?'':origin.cwd,workspaceMode,...(origin.projectless?['projectless']:[])]),
         origin,evidence:{kind:code,deviceId,sessionKey:origin.sessionKey},expectedRevision:saved.revision,expectedIdentity:saved.identity,
         isCurrent:transferCurrent});
       if(!transferCurrent()){await undoMissingComposerDraft(result.receipt).catch(()=>false);return false;}

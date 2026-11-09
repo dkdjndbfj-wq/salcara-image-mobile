@@ -99,6 +99,7 @@ export interface DeviceStatus {
   capabilities?: string[];
 }
 export interface SessionInfo {
+  projectless?: true;
   latestTurnRevert?: boolean;
 	archived?: boolean;
   sessionKey: string; tool: ToolId; client: string; title: string; cwd: string; updatedAt: number;
@@ -381,7 +382,7 @@ export type Command =
   | { type: 'workspace.terminal.resize'; sessionKey: string; controlSurface: 'cli' | 'desktop'; expectedCwd: string; terminalId: string; cols: number; rows: number }
   | { type: 'workspace.terminal.close'; sessionKey: string; controlSurface: 'cli' | 'desktop'; expectedCwd: string; terminalId: string }
   | { type: 'session.describe'; sessionKey: string; controlSurface: 'read-only'; historyIdentity: string }
-  | { type: 'session.start'; tool: ToolId; cwd: string; prompt: string; controlSurface?: 'cli'; workspaceMode?: WorkspaceMode; model?: string; effort?: Effort; approval?: ApprovalMode; permissionMode?: PermissionMode; collaborationMode?: CollaborationMode; skills?: SkillReference[]; contextReferences?: ContextReference[]; accountId?: string; attachments?: string[]; entrypoint?: 'claude-desktop'; operationId?: string }
+  | { type: 'session.start'; tool: ToolId; cwd: string; projectless?: true; prompt: string; controlSurface?: 'cli'; workspaceMode?: WorkspaceMode; model?: string; effort?: Effort; approval?: ApprovalMode; permissionMode?: PermissionMode; collaborationMode?: CollaborationMode; skills?: SkillReference[]; contextReferences?: ContextReference[]; accountId?: string; attachments?: string[]; entrypoint?: 'claude-desktop'; operationId?: string }
   | { type: 'session.send'; cooperationTicket?: string; sourceSessionKey?: string; sessionKey: string; text: string; model?: string; effort?: Effort; permissionMode?: PermissionMode; collaborationMode?: CollaborationMode; skills?: SkillReference[]; contextReferences?: ContextReference[]; approval?: ApprovalMode; accountId?: string; attachments?: string[]; controlSurface: 'cli' | 'desktop'; operationId?: string }
   | { type: 'attachment.put'; id: string; mime: string; index: number; total: number; data: string; accountId?: string; agent?: AgentId; controlSurface?: 'cli' }
   | { type: 'attachment.read'; id: string; sessionKey: string; offset?: number; length?: number; variant?: 'thumbnail' | 'original' }

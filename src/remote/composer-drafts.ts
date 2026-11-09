@@ -213,6 +213,7 @@ export interface ComposerDraftRecoveryReceipt {
  * retained, including its image ownership, even after a successful copy. */
 export function copyMissingComposerDraft(input: MissingComposerDraftCopy, rewriteText?: (draft: ComposerDraft) => string): Promise<{ receipt: ComposerDraftRecoveryReceipt; draft: ComposerDraft }> {
   const sourceOrigin = { ...input.origin }, { sessionKey: _sourceSession, ...targetOrigin } = sourceOrigin;
+  if (targetOrigin.projectless) targetOrigin.cwd = '';
   const captured = { ...input, origin: sourceOrigin, evidence: { ...input.evidence } };
   const sourceOwner = owners.get(input.sourceKey), targetOwner = owners.get(input.targetKey);
   return withQueueImageTransaction(async transaction => {

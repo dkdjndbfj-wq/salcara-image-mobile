@@ -24,10 +24,10 @@ const device={deviceId:'pc',name:'Fixture',os:'windows',tools:[],projects:[],onl
 const baseInput={tool:'codex' as const,cwd:'C:/fixture',prompt:'synthetic new task',approval:'ask' as const,model:'fixture-model',effort:'low' as const,composerDraft:{key:'private-draft',revision:1}};
 const image={uri:'file://synthetic-image',base64:'AQID',mime:'image/jpeg' as const,width:1,height:1};
 const response=(value:unknown)=>({ok:true,status:200,text:async()=>JSON.stringify(value)});
-let writes:Array<{requestId:string;command:Record<string,unknown>}>, idempotency:boolean, diffCapability = false;
+let writes:Array<{requestId:string;command:Record<string,unknown>}>, idempotency:boolean, diffCapability = false, projectlessCapability = false;
 let handler:(body:typeof writes[number])=>unknown|Promise<unknown>;
 function installTransport(){setHubFetch((async(endpoint,init)=>{
-  if(endpoint.endsWith('/ping'))return response({service:'salcara-hub',protocol:'salcara-remote',protocolVersion:1,authModes:['device-pairing'],capabilities:['device.identity.v1','pair.qr.v1','session.remote.v1','pair.revoke.v1',...(diffCapability?['context.references.diff.v1']:[]),...(idempotency?['commands.idempotency.v1']:[])]});
+  if(endpoint.endsWith('/ping'))return response({service:'salcara-hub',protocol:'salcara-remote',protocolVersion:1,authModes:['device-pairing'],capabilities:['device.identity.v1','pair.qr.v1','session.remote.v1','pair.revoke.v1',...(projectlessCapability?['session.projectless.v1']:[]),...(diffCapability?['context.references.diff.v1']:[]),...(idempotency?['commands.idempotency.v1']:[])]});
   if(endpoint.endsWith('/app/pair/qr'))return response({pair_token:'a'.repeat(64),device});
   if(endpoint.endsWith('/app/devices'))return response({devices:[device]});
   if(endpoint.endsWith('/app/commands')){
@@ -40,7 +40,7 @@ function installTransport(){setHubFetch((async(endpoint,init)=>{
 async function pair(){await bootRemote([]);await connectStation(origin);await pairRemoteQr(parseRemoteQr(JSON.stringify({type:'salcara-remote-pair',version:1,hubUrl,deviceId:'pc',deviceName:'Fixture',ticket:'b'.repeat(64),expiresAt:Date.now()+120_000})));await loadAgentProfiles('pc');}
 beforeEach(()=>{
   resetRemoteForTests();mockSettings.clear();mockSecrets.clear();mockUuid=0;mockFailReceipt=false;mockFailCleanup=false;
-  writes=[];idempotency=true;diffCapability=false;handler=body=>({ok:true,result:body.command.type==='session.start'?{sessionKey:'codex:created'}:{}});
+  writes=[];idempotency=true;diffCapability=false;projectlessCapability=false;handler=body=>({ok:true,result:body.command.type==='session.start'?{sessionKey:'codex:created'}:{}});
   (AppState as unknown as {currentState:string}).currentState='active';
   (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({exists:true,isDirectory:false});
   (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue('AQID');
@@ -270,4 +270,33 @@ test('new task sends feature selections as native fields and freezes skills befo
   expect(getRemoteState().timelines[timelineKey('pc','codex:created')].items[0]).toMatchObject({
     clientId:accepted!.requestId,skills:[{name:'review',path:'C:/fixture/SKILL.md'}],
   });
+});
+
+
+test('explicit projectless first send freezes the flag, empty cwd and operation id across restart recovery',async()=>{
+ projectlessCapability=true; await pair();getRemoteState().devices[0].capabilities=['session.projectless.v1'];
+ let first=true;handler=body=>{if(body.command.type==='session.start'&&first){first=false;throw new Error('connection lost');}return {ok:true,result:{sessionKey:'codex:created'}};};
+ await expect(startSession('pc',{...baseInput,cwd:'',projectless:true,workspaceMode:'work'})).rejects.toThrow();
+ const original=writes.find(row=>row.command.type==='session.start')!;
+ expect(original.command).toMatchObject({projectless:true,cwd:'',controlSurface:'cli',workspaceMode:'work'});
+ const saved=JSON.parse(mockSettings.get('remote_pending_delivery_v1')!)[0];
+ expect(decodeNewTask(saved.text)).toMatchObject({cwd:'',projectless:true,workspaceMode:'work'});
+ resetDeliveryForTests();
+ expect(await retryNewSession('pc','codex',false,original.requestId)).toBe('codex:created');
+ const starts=writes.filter(row=>row.command.type==='session.start');expect(starts).toHaveLength(2);expect(starts[1]).toEqual(starts[0]);
+});
+test.each(['bridge','hub','missing-choice'] as const)('projectless %s refuses before dispatch and does not substitute any directory',async missing=>{
+ projectlessCapability=missing!=='hub';await pair();if(missing!=='bridge')getRemoteState().devices[0].capabilities=['session.projectless.v1'];
+ await expect(startSession('pc',{...baseInput,cwd:'',...(missing!=='missing-choice'?{projectless:true as const}:{}),workspaceMode:'code'})).rejects.toThrow();
+ expect(writes).toEqual([]);
+});
+test.each([{projectless:false},{projectless:'true'},{projectless:true,cwd:'C:/other'},{projectless:true,desktop:true}])('projectless persisted records reject invalid combinations %p',fields=>{
+ const encoded=encodeNewTask({version:1,tool:'codex',cwd:'',projectless:true,prompt:'hello',workspaceMode:'code',approval:'ask',images:[]});
+ expect(()=>decodeNewTask(JSON.stringify({...JSON.parse(encoded),...fields}))).toThrow();
+});
+
+
+test.each([false,'true',null])('nonliteral projectless option %p cannot be coerced into a new start',async flag=>{
+ projectlessCapability=true;await pair();getRemoteState().devices[0].capabilities=['session.projectless.v1'];
+ await expect(startSession('pc',{...baseInput,cwd:'',projectless:flag} as never)).rejects.toThrow();expect(writes).toEqual([]);
 });

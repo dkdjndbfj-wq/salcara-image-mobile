@@ -71,7 +71,7 @@ export async function copyMissingDirectComposerDraft(input:{
   let source:unknown,target:unknown;
   try{source=JSON.parse(sourceOwner);target=JSON.parse(targetOwner);}catch{throw new Error('直连草稿来源无法确认');}
   const expectedSource=[pairing,deviceId,origin.sessionKey,origin.agentId,origin.apiIdentity,origin.cwd];
-  const expectedTarget=[pairing,deviceId,null,origin.agentId,origin.apiIdentity,origin.cwd,origin.mode];
+  const expectedTarget=[pairing,deviceId,null,origin.agentId,origin.apiIdentity,origin.projectless?'':origin.cwd,origin.mode,...(origin.projectless?['projectless']:[])];
   if(origin.transport!=='direct'||origin.deviceId!==deviceId||JSON.stringify(source)!==JSON.stringify(expectedSource)||JSON.stringify(target)!==JSON.stringify(expectedTarget))throw new Error('直连草稿的电脑、项目或模式不匹配');
   const result=await copyMissingComposerDraft({scope:pairing,sourceKey:directDraftKey(pairing,deviceId,sourceOwner),targetKey:directDraftKey(pairing,deviceId,targetOwner),
     origin,evidence:input.evidence,expectedRevision:input.expectedRevision,expectedIdentity:input.expectedIdentity,isCurrent:input.isCurrent},row=>{

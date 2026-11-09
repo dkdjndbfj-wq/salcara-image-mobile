@@ -9,7 +9,7 @@ import { remoteDeviceConnected } from './connection-state';
 import { relTime } from './parts';
 import { ProgrammingAction, useProgrammingStyles } from './ProgrammingUi';
 import { agentSessions, agentSupports, desktopLiveFor, groupSessionsByProject, matchesSearch, originTag, sessionKeyAgentId, sessionWorkspaceMode, type SessionProjectGroup } from './projection';
-import { hubSupportsSessionActions, loadMoreSessions, loadNativeSessions, loadSessions, loadClaudeDesktopHistory, remoteDeliveryScope, selectSessionDirectory, timelineKey, useRemote } from './store';
+import { hubSupportsProjectless, hubSupportsSessionActions, loadMoreSessions, loadNativeSessions, loadSessions, loadClaudeDesktopHistory, remoteDeliveryScope, selectSessionDirectory, timelineKey, useRemote } from './store';
 import { useDemandSync } from './useDemandSync';
 import { useThreadTitles } from './thread-titles';
 import { SkeletonGroup, SkeletonRows } from '../components/Skeleton';
@@ -33,7 +33,7 @@ type ProjectSection = SessionProjectGroup & { data: SessionInfo[] };
 export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'code', onWorkspaceModeChange = () => undefined, onOpen, onNew, onSettings }: {
   visible: boolean; deviceId: string; agent: AgentProfile;
   workspaceMode?: WorkspaceMode; onWorkspaceModeChange?: (mode: WorkspaceMode) => void;
-  onOpen: (key: string) => void; onNew: (mode: WorkspaceMode, cwd: string) => void; onSettings: () => void;
+  onOpen: (key: string) => void; onNew: (mode: WorkspaceMode, cwd: string, projectless?: true) => void; onSettings: () => void;
 }) {
   const p = useProgrammingStyles();
   const dk = useDesk();
@@ -187,6 +187,8 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
   </View>;
 
   if (projectBrowser && visible) return <ProjectBrowser key={scope} scopeKey={scope} tool={agent.tool} mode={workspaceMode} request={projectRequest}
+    projectlessUnavailable={agent.id === 'claude-desktop' ? '此桌面入口需要项目文件夹。也可以返回选择 Claude Code，再开始独立会话。' : typeof hubSupportsProjectless !== 'function' || !hubSupportsProjectless() || !device?.capabilities?.includes('session.projectless.v1') ? '电脑或中转站尚不支持此方式。可以先选择文件夹，或更新电脑端和中转站后再试。' : undefined}
+    onProjectless={() => { if (canOperate() && active.current.online) { setProjectBrowser(false); onNew(workspaceMode, '', true); } }}
     onClose={() => { if (canOperate()) setProjectBrowser(false); }} onSelect={project => { if (canOperate() && active.current.online) { setProjectBrowser(false); onNew(workspaceMode, project.path); } }} />;
   return <View style={styles.screen} testID="remote-workspace">
     {directoryView === 'archived' && archivesAllowed ? <View style={styles.archivedPage}>
@@ -218,7 +220,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
           <Icon name={section.key === '__temporary' ? 'chat' : 'folder'} size={17} color={dk.muted} /><View style={styles.projectBody}>
             <Text style={styles.projectName} numberOfLines={1}>{section.name}</Text>{section.path&&groups.some(other=>other.key!==section.key&&other.name===section.name) ? <Text style={styles.projectPath} numberOfLines={1}>{section.path}</Text> : null}
           </View><Text style={styles.projectCount}>{section.sessions.length}</Text>
-        </Pressable>{section.path && !native && !readOnly && agent.remoteSendSupported ? <Pressable accessibilityRole="button" accessibilityLabel={`在 ${section.name} 中新建 ${workspaceMode === 'code' ? 'Code' : 'Work'} 对话`} disabled={!online} onPress={() => { if (canOperate() && active.current.online) onNew(workspaceMode, section.path); }} style={styles.more}><Text style={styles.link}>新建会话</Text></Pressable> : null}</View>;
+        </Pressable>{(section.path || section.projectless) && !native && !readOnly && agent.remoteSendSupported ? <Pressable accessibilityRole="button" accessibilityLabel={`在 ${section.name} 中新建 ${workspaceMode === 'code' ? 'Code' : 'Work'} 对话`} disabled={!online} onPress={() => { if (canOperate() && active.current.online) onNew(workspaceMode, section.path, ...(section.projectless ? [true as const] : [])); }} style={styles.more}><Text style={styles.link}>新建会话</Text></Pressable> : null}</View>;
       }}
       renderSectionFooter={({ section }) => !searching && section.sessions.length > PER_PROJECT
         ? <Pressable accessibilityRole="button" accessibilityLabel={`${expanded[section.key] ? '收起' : '显示全部'} ${section.name} 的对话`}

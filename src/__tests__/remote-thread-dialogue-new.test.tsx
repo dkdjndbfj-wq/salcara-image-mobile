@@ -1,6 +1,6 @@
 import React from 'react';
 import {resetWorkspaceLayoutMemoryForTests} from '../remote/workspace-layout';
-import { act, fireEvent, render, within } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
 import { Animated, AppState, Dimensions } from 'react-native';
 import { SCRUB_STEP } from '../remote/EffortScrub';
 import { hapticEffort, hapticModelCommit } from '../remote/haptics';
@@ -5000,4 +5000,18 @@ test('edit recovery preserves whitespace typed while the restored snapshot is sa
  await act(async()=>finish());
  expect(mockSkillComposerProps.mock.calls.at(-1)![0].value).toBe('原草稿  \n');expect(mockEditBackupConsume).not.toHaveBeenCalled();
  expect(mockComposerSave).toHaveBeenLastCalledWith(expect.any(String),mockDeliveryScope,expect.objectContaining({text:'原草稿  \n',lastRestoredEdit:''}));await view.unmount();
+});
+
+
+test('explicit projectless editor restores its own draft and sends without choosing the first directory',async()=>{
+ mockRemote.devices[0].projects=[{path:'C:/Other',name:'Other'}];
+ mockStart.mockResolvedValue('codex:created');const created=jest.fn();
+ const view=await render(<ThreadView visible deviceId="pc" sessionKey={null} newProjectless agent={originalAgent} onClose={jest.fn()} onCreated={created}/>);
+ await act(async()=>{});
+ expect(mockComposerRestore).toHaveBeenCalledWith(expect.stringContaining('new:codex:code:projectless'));
+ expect(view.getByText('不关联文件夹')).toBeTruthy();
+ await fireEvent.changeText(view.getByLabelText('给电脑上的 Agent 发消息'),'独立会话的第一条消息');
+ await fireEvent.press(view.getByLabelText('发送'));
+ await waitFor(()=>expect(mockStart).toHaveBeenCalledWith('pc',expect.objectContaining({cwd:'',projectless:true,prompt:'独立会话的第一条消息'})));
+ expect(created).toHaveBeenCalledWith('codex:created');await view.unmount();
 });

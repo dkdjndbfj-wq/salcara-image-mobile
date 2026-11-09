@@ -11,7 +11,8 @@ jest.mock('expo-crypto',()=>({randomUUID:()=>require('node:crypto').randomUUID()
 jest.mock('../remote/direct-pairing',()=>({getDirectConnectionState:()=>mockConnection,subscribeDirectConnection:()=>()=>{},directDeliveryScope:()=> 'pairing',directConnectionGeneration:()=>1}));
 jest.mock('../remote/direct-api',()=>({requestDirect:(...args:unknown[])=>mockRequest(...args),subscribeDirectEvents:()=>()=>{}}));
 jest.mock('../remote/direct-workspace',()=>({createDirectWorkspaceRuntime:()=>({scope:'pairing'})}));
-jest.mock('../remote/DirectNewComposer',()=>({DirectNewComposer:()=>null}));
+let mockNewComposer:any;
+jest.mock('../remote/DirectNewComposer',()=>({DirectNewComposer:(props:any)=>{mockNewComposer=props;return null;}}));
 jest.mock('../remote/DirectConversation',()=>({DirectConversation:(props:any)=>{mockConversation=props;const React=require('react'),{Text}=require('react-native');return React.createElement(Text,{testID:'direct-draft'},props.text);}}));
 const session={sessionKey:'codex:thread',tool:'codex',client:'Codex CLI',title:'Original',cwd:'C:/project',updatedAt:1,status:'idle',controllable:true,controlSurface:'cli'};
 const api={name:'API',model:'model',protocol:'responses',configured:true,pending:false,source:'computer',accountId:'api_00112233'};
@@ -265,4 +266,27 @@ test('unmounting during the durable pending write prevents dispatch and clears t
  await act(async()=>{finish();expect(await flight).toBe(false);});
  expect(mockRequest.mock.calls.some(([command])=>command.type==='session.send')).toBe(false);
  expect(mockSettings.get('direct_pending_operations_v1')).toBe('{}');
+});
+
+
+test('direct projectless start works with no granted projects and preserves explicit ownership',async()=>{
+ const fresh={...session,sessionKey:'codex:fresh',cwd:'C:/managed/opaque',projectless:true,workspaceMode:'code'};
+ mockRequest.mockImplementation(async(command:any)=>{
+  if(command.type==='agents.status')return {agents:[{id:'codex',tool:'codex',name:'Codex',available:true,remoteSendSupported:true,capabilities:{list:true,read:true,send:true},api}]};
+  if(command.type==='projects.list')return {projects:[],capabilities:['session.projectless.v1']};
+  if(command.type==='workspace.projects')return {tool:'codex',workspaceMode:'code',cwd:'',path:'',roots:[]};
+  if(command.type==='sessions.list')return {sessions:[fresh]};
+  if(command.type==='session.start')return {sessionKey:fresh.sessionKey};
+  if(command.type==='session.open')return {session:fresh,events:[]};
+  throw new Error(`Unexpected ${command.type}`);
+ });
+ const view=await render(<DirectExperience/>);
+ await fireEvent.press(await view.findByRole('button',{name:'新建会话'}));
+ await fireEvent.press(await view.findByRole('button',{name:'不关联文件夹，直接开始'}));
+ await waitFor(()=>expect(mockNewComposer.projectless).toBe(true));
+ expect(mockNewComposer.cwd).toBe('');expect(mockRequest.mock.calls.some(([c])=>c.type==='session.start'||c.action==='mkdir')).toBe(false);
+ let accepted=false;
+ await act(async()=>{accepted=await mockNewComposer.onSend('independent',{owner:JSON.stringify(['pairing','pc',null,'codex','api_00112233','','code','projectless'])});});
+ expect(accepted).toBe(true);expect(mockRequest).toHaveBeenCalledWith(expect.objectContaining({type:'session.start',projectless:true,cwd:'',workspaceMode:'code'}),expect.anything());
+ await view.unmount();
 });

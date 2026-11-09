@@ -11,7 +11,7 @@ export function newSessionReceiptKey(tool: ToolId, desktop = false): string {
 }
 
 export interface NewTaskSnapshot extends TurnFeatures {
-  version: 1; tool: ToolId; cwd: string; prompt: string; approval: ApprovalMode; workspaceMode?: WorkspaceMode;
+  version: 1; tool: ToolId; cwd: string; projectless?: true; prompt: string; approval: ApprovalMode; workspaceMode?: WorkspaceMode;
   accountId?: string; model?: string; effort?: Effort; permissionMode?: PermissionMode; desktop?: true;
   images: Array<{ mime: string; width: number; height: number; digest: string }>;
   composerDraft?: { key: string; revision: number; identity?: string };
@@ -19,7 +19,8 @@ export interface NewTaskSnapshot extends TurnFeatures {
 
 /** Exact canonical metadata only: no key, image bytes or temporary file URI. */
 export function encodeNewTask(value: NewTaskSnapshot): string {
-  const encoded = JSON.stringify({ version: 1, tool: value.tool, cwd: value.cwd, prompt: value.prompt, approval: value.approval, ...(value.workspaceMode ? { workspaceMode: value.workspaceMode } : {}),
+  if (value.projectless !== undefined && value.projectless !== true) throw new Error('新会话的开始方式无效，未发送');
+  const encoded = JSON.stringify({ version: 1, tool: value.tool, cwd: value.cwd, ...(value.projectless ? { projectless: true } : {}), prompt: value.prompt, approval: value.approval, ...(value.workspaceMode ? { workspaceMode: value.workspaceMode } : {}),
     ...(value.accountId ? { accountId: value.accountId } : {}), ...(value.model ? { model: value.model } : {}),
     ...(value.effort ? { effort: value.effort } : {}), ...(value.permissionMode !== undefined ? { permissionMode: value.permissionMode } : {}), ...(value.desktop ? { desktop: true } : {}),
     ...(value.composerDraft ? { composerDraft: { key: value.composerDraft.key, revision: value.composerDraft.revision,
@@ -42,9 +43,9 @@ export function decodeNewTask(encoded: string): NewTaskSnapshot {
   if (JSON.stringify(raw) !== encoded) throw invalid();
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw invalid();
   const item = raw as Record<string, unknown>;
-  const fields = new Set(['version', 'tool', 'cwd', 'prompt', 'approval', 'workspaceMode', 'accountId', 'model', 'effort', 'permissionMode', 'collaborationMode', 'skills', 'contextReferences', 'desktop', 'images', 'composerDraft']);
+  const fields = new Set(['version', 'tool', 'cwd', 'projectless', 'prompt', 'approval', 'workspaceMode', 'accountId', 'model', 'effort', 'permissionMode', 'collaborationMode', 'skills', 'contextReferences', 'desktop', 'images', 'composerDraft']);
   if (Object.keys(item).some(key => !fields.has(key)) || item.version !== 1 || !validAgentId(item.tool)
-      || typeof item.cwd !== 'string' || !item.cwd || item.cwd.length > 4096 || /[\r\n\x00]/.test(item.cwd)
+      || typeof item.cwd !== 'string' || (!item.cwd && item.projectless !== true) || (item.projectless !== undefined && (item.projectless !== true || item.cwd !== '' || item.desktop !== undefined || !['code','work'].includes(item.workspaceMode as string))) || item.cwd.length > 4096 || /[\r\n\x00]/.test(item.cwd)
       || typeof item.prompt !== 'string' || item.prompt.length > 100_000
       || item.workspaceMode !== undefined && item.workspaceMode !== 'code' && item.workspaceMode !== 'work'
       || !['ask', 'auto_edits', 'auto_all'].includes(item.approval as string)

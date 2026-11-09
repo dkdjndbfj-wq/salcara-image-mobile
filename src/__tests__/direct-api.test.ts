@@ -265,3 +265,14 @@ test('caller cancellation releases pending work', async () => {
   await rejected;
   expect(() => deliver({ type: 'response', requestId: sentFrames()[0].requestId, result: 'late' })).not.toThrow();
 });
+
+
+test('direct projectless command retains the explicit flag and empty cwd',async()=>{
+ const command={type:'session.start' as const,tool:'codex',cwd:'',projectless:true as const,prompt:'new',workspaceMode:'work' as const,controlSurface:'cli' as const,operationId:'00000000-0000-4000-8000-000000000009'};
+ const request=requestDirect(command),frame=sentFrames().at(-1)!;
+ expect(frame.command).toEqual(command);deliver({type:'response',requestId:frame.requestId,result:{sessionKey:'codex:new'}});await expect(request).resolves.toEqual({sessionKey:'codex:new'});
+});
+test.each([{projectless:false},{projectless:'true'},{projectless:null},{cwd:'C:/Other'},{workspaceMode:undefined},{operationId:'../escape'},{entrypoint:'claude-desktop'},{type:'session.send'}])('direct projectless invalid combination is rejected before socket write: %p',async extra=>{
+ const cmd={type:'session.start',tool:'codex',cwd:'',projectless:true,prompt:'new',workspaceMode:'code',controlSurface:'cli',operationId:'00000000-0000-4000-8000-000000000009',...extra};
+ await expect(requestDirect(cmd as Command)).rejects.toMatchObject({code:'protocol'});expect(mockSendDirectPayload).not.toHaveBeenCalled();
+});

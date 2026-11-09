@@ -122,11 +122,11 @@ export function captureDirectSessionServices(deviceId:string,session:SessionInfo
 }
 export type DirectSessionServices=Omit<ReturnType<typeof captureDirectSessionServices>,'sessionCommands'> & {sessionCommands?:SessionCommandTransport};
 
-/** The first turn has a saved project, but no thread identity yet. */
-export function captureDirectProjectServices(deviceId:string,cwd:string,agent:AgentProfile,isSelectionCurrent:()=>boolean,workspaceMode:'code'|'work'='code'):DirectSessionServices {
+/** The first turn has an explicit location choice, but no thread identity yet. */
+export function captureDirectProjectServices(deviceId:string,cwd:string,agent:AgentProfile,isSelectionCurrent:()=>boolean,workspaceMode:'code'|'work'='code',projectless=false):DirectSessionServices {
   const pairing=directDeliveryScope(),generation=directConnectionGeneration(),cache=new AgentFeatureCache();
-  const scope=JSON.stringify([pairing,deviceId,null,agent.id,agent.api.accountId??'',cwd,workspaceMode]);
-  const current=()=>isSelectionCurrent()&&Boolean(pairing&&directDeliveryScope()===pairing&&directConnectionGeneration()===generation
+  const scope=JSON.stringify([pairing,deviceId,null,agent.id,agent.api.accountId??'',cwd,workspaceMode,...(projectless?['projectless']:[])]);
+  const current=()=>(projectless ? cwd === '' : Boolean(cwd))&&isSelectionCurrent()&&Boolean(pairing&&directDeliveryScope()===pairing&&directConnectionGeneration()===generation
     &&getDirectConnectionState().status==='connected'&&getDirectConnectionState().deviceId===deviceId);
   const guard=()=>{if(!current())throw new Error('电脑、项目或 API 已变化，请重新选择');};
   const need=(name:keyof NonNullable<AgentProfile['capabilities']>)=>{guard();if(agent.capabilities?.[name]!==true)throw new Error('当前 Agent 尚未开放这个操作');};
@@ -135,7 +135,7 @@ export function captureDirectProjectServices(deviceId:string,cwd:string,agent:Ag
   return {scope,isCurrent:current,guard,sideQuestions:{isCurrent:()=>false,read:unavailable,ask:unavailable,remove:unavailable},temporarySideChat:{isCurrent:()=>false,read:unavailable,ask:unavailable},context:{scope:()=>scope,read:unavailable,compact:unavailable},
     sessionCommands:{scope:()=>scope,isCurrent:()=>false,readActions:unavailable,applyAction:unavailable,readWorkflows:unavailable,applyReview:unavailable},
     models:async(refresh=false)=>{guard();if(!agent.capabilities?.modelOverride)need('startModelOverride');return parseDirectModelCatalog(await send({type:'models.list',tool:agent.tool,controlSurface:'cli',refresh,...(agent.api.accountId?{accountId:agent.api.accountId}:{})}));},
-    features:async(force=false)=>{need('features');return cache.read({pairing,device:deviceId,agent:agent.id,source:'direct',account:agent.api.accountId??'',cwd,session:''},
+    features:async(force=false)=>{need('features');if(projectless)throw new Error('创建会话后即可读取工作目录中的技能');return cache.read({pairing,device:deviceId,agent:agent.id,source:'direct',account:agent.api.accountId??'',cwd,session:''},
       options=>send({type:'features.list',tool:agent.tool,cwd,controlSurface:'cli',...(agent.api.accountId?{accountId:agent.api.accountId}:{}),...options}),force);},
     uploadImages:async(images:RemoteImage[])=>{
       need('imageInput');if(images.length>4)throw new Error('最多发送 4 张图片');const ids:string[]=[];

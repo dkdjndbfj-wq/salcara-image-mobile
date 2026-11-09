@@ -95,3 +95,25 @@ test('Direct recovery rewrites the owner while preserving model, effort, permiss
   expect(await first.restore()).toMatchObject({ text: 'continue work', origin: directOrigin });
   expect(await undoMissingComposerDraft(result.receipt)).toBe(true); expect(await target.restore()).toBeUndefined();
 });
+
+
+test('missing projectless session recovery keeps the draft but never reuses its managed cwd',async()=>{
+ const independent={...origin,projectless:true as const,cwd:'C:/managed/original'},writer=createComposerDraftSession(sourceKey,scope);await writer.restore();
+ const saved=await writer.save({text:'keep this',images:[],origin:independent});
+ const target=`${scope}|pc|new:agent:code:projectless`;
+ const result=await copyMissingComposerDraft({scope,sourceKey,targetKey:target,origin:independent,evidence,expectedRevision:saved.revision,expectedIdentity:saved.identity});
+ expect(result.draft.origin).toEqual({...independent,cwd:'',sessionKey:undefined});
+ expect(JSON.parse(mockSettings.get(setting)!)[sourceKey].origin.cwd).toBe('C:/managed/original');
+ expect(await undoMissingComposerDraft(result.receipt)).toBe(true);
+});
+
+
+test('direct projectless recovery rewrites its owner and preserves the original managed session draft',async()=>{
+ const independent={...origin,transport:'direct' as const,projectless:true as const,cwd:'C:/managed/original'},sourceOwner=JSON.stringify([scope,'pc',origin.sessionKey,origin.agentId,origin.apiIdentity,independent.cwd]);
+ const targetOwner=JSON.stringify([scope,'pc',null,origin.agentId,origin.apiIdentity,'',origin.mode,'projectless']);
+ const writer=createDirectComposerDraft(scope,'pc',sourceOwner);await writer.restore();const saved=await writer.save({text:'direct keep',images:[],origin:independent,options:{},model:'',effort:'',permission:''});
+ const result=await copyMissingDirectComposerDraft({pairing:scope,deviceId:'pc',sourceOwner,targetOwner,origin:independent,evidence,expectedRevision:saved.revision,expectedIdentity:saved.identity});
+ expect(result.draft).toMatchObject({text:'direct keep',origin:{projectless:true,cwd:''}});
+ expect(await createDirectComposerDraft(scope,'pc',targetOwner).restore()).toMatchObject({text:'direct keep',origin:{projectless:true,cwd:''}});
+ expect(await createDirectComposerDraft(scope,'pc',sourceOwner).restore()).toMatchObject({origin:{cwd:independent.cwd}});
+});

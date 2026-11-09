@@ -13,8 +13,8 @@ import {WorkspaceRuntimeContext,type WorkspaceRuntime} from './WorkspaceRuntimeC
 import type {ComposerDraftRecoveryReceipt} from './composer-drafts';
 import type {RegisterBackAction} from './useBackAction';
 
-export function DirectNewComposer({deviceId,profile,cwd,workspaceMode,runtime,sending,uncertain,onSend,recoveryReceipt,onRecoveryUndone,onRegisterBack}:{
-  deviceId:string;profile:AgentProfile;cwd:string;workspaceMode:WorkspaceMode;runtime:WorkspaceRuntime;sending:boolean;uncertain:boolean;
+export function DirectNewComposer({deviceId,profile,cwd,projectless=false,workspaceMode,runtime,sending,uncertain,onSend,recoveryReceipt,onRecoveryUndone,onRegisterBack}:{
+  deviceId:string;profile:AgentProfile;cwd:string;projectless?:boolean;workspaceMode:WorkspaceMode;runtime:WorkspaceRuntime;sending:boolean;uncertain:boolean;
   onSend:(text:string,options:DirectComposerSubmission)=>Promise<boolean|undefined>;
   recoveryReceipt?:ComposerDraftRecoveryReceipt;onRecoveryUndone?:()=>void;
   onRegisterBack?:RegisterBackAction;
@@ -23,11 +23,11 @@ export function DirectNewComposer({deviceId,profile,cwd,workspaceMode,runtime,se
   const [text,setText]=useState(''),mounted=useRef(true),remote=useRef(runtime.remote);remote.current=runtime.remote;
   const tablet=useWindowDimensions().width>=900;
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
-  const source=JSON.stringify([runtime.scope,directConnectionGeneration(),deviceId,profile.id,profile.api.accountId,cwd,workspaceMode]);
+  const source=JSON.stringify([runtime.scope,directConnectionGeneration(),deviceId,profile.id,profile.api.accountId,cwd,workspaceMode,...(projectless?['projectless']:[])]);
   const sourceRef=useRef(source);sourceRef.current=source;
   const services=useMemo(()=>captureDirectProjectServices(deviceId,cwd,profile,()=>mounted.current&&sourceRef.current===source
-    &&remote.current.devices.some(device=>device.deviceId===deviceId&&device.projects.some(project=>project.path===cwd)),workspaceMode),[source]);
-  return <WorkspaceRuntimeContext.Provider value={runtime}><ConversationDropZone scopeKey={source} enabled={!sending&&!uncertain&&services.isCurrent()} importRef={filePicker} onFiles={files=>services.isCurrent()&&filesAppender.current?filesAppender.current(files):Promise.resolve(false)}><DirectComposer onRegisterBack={onRegisterBack} filesAppenderRef={filesAppender} onPickFiles={()=>filePicker.current?.pick()} key={services.scope} services={services} runtime={runtime} deviceId={deviceId} profile={profile} session={{cwd}} workspaceMode={workspaceMode} recoveryReceipt={recoveryReceipt} onRecoveryUndone={onRecoveryUndone}
+    &&remote.current.devices.some(device=>device.deviceId===deviceId&&(projectless?device.capabilities?.includes('session.projectless.v1'):device.projects.some(project=>project.path===cwd))),workspaceMode,projectless),[source]);
+  return <WorkspaceRuntimeContext.Provider value={runtime}><ConversationDropZone scopeKey={source} enabled={!sending&&!uncertain&&services.isCurrent()} importRef={filePicker} onFiles={files=>services.isCurrent()&&filesAppender.current?filesAppender.current(files):Promise.resolve(false)}><DirectComposer onRegisterBack={onRegisterBack} filesAppenderRef={filesAppender} onPickFiles={()=>filePicker.current?.pick()} key={services.scope} services={services} runtime={runtime} deviceId={deviceId} profile={profile} session={{cwd,...(projectless?{projectless:true as const}:{})}} workspaceMode={workspaceMode} recoveryReceipt={recoveryReceipt} onRecoveryUndone={onRecoveryUndone}
     timeline={EMPTY_TIMELINE} tablet={tablet} text={text} onText={setText} sending={sending} canSend={profile.available&&profile.remoteSendSupported&&agentSupports(profile,profile.id,'send')&&claudeApiAdmissionReady(profile)&&services.isCurrent()}
     uncertain={uncertain} onSend={options=>onSend(text,options)} onStop={()=>{}} onReferenceConsumed={()=>{}}/></ConversationDropZone></WorkspaceRuntimeContext.Provider>;
 }

@@ -11,7 +11,7 @@ const mockLoadMore = jest.fn<Promise<void>, [string, string]>(async () => undefi
 const mockLoadNative = jest.fn<Promise<void>, [string, boolean?, { preservePages?: boolean }?]>(async () => undefined);
 const mockLoadHistory = jest.fn<Promise<void>, [string, string, boolean?, { preservePages?: boolean }?]>(async () => undefined);
 const mockDemandSync = jest.fn();
-jest.mock('../remote/store', () => ({ useRemote: () => mockRemote, timelineKey: (deviceId: string, sessionKey: string) => `${deviceId}|${sessionKey}`, remoteDeliveryScope: () => mockPairingScope, loadClaudeDesktopHistory: (id: string, scope: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadHistory(id, scope, more, options) : mockLoadHistory(id, scope, more), loadSessions: (id: string, agentId?: string, options?: { preservePages?: boolean }) => options ? mockLoadSessions(id, agentId, options) : mockLoadSessions(id, agentId), loadMoreSessions: (id: string, agentId: string) => mockLoadMore(id, agentId), loadNativeSessions: (id: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadNative(id, more, options) : more ? mockLoadNative(id, more) : mockLoadNative(id), selectSessionDirectory: (id: string, surface: 'desktop' | 'all') => { mockRemote.sessions[id].directorySurface = surface; } }));
+jest.mock('../remote/store', () => ({ useRemote: () => mockRemote, hubSupportsProjectless: () => true, timelineKey: (deviceId: string, sessionKey: string) => `${deviceId}|${sessionKey}`, remoteDeliveryScope: () => mockPairingScope, loadClaudeDesktopHistory: (id: string, scope: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadHistory(id, scope, more, options) : mockLoadHistory(id, scope, more), loadSessions: (id: string, agentId?: string, options?: { preservePages?: boolean }) => options ? mockLoadSessions(id, agentId, options) : mockLoadSessions(id, agentId), loadMoreSessions: (id: string, agentId: string) => mockLoadMore(id, agentId), loadNativeSessions: (id: string, more?: boolean, options?: { preservePages?: boolean }) => options ? mockLoadNative(id, more, options) : more ? mockLoadNative(id, more) : mockLoadNative(id), selectSessionDirectory: (id: string, surface: 'desktop' | 'all') => { mockRemote.sessions[id].directorySurface = surface; } }));
 jest.mock('../remote/useDemandSync', () => ({ useDemandSync: (...args: unknown[]) => mockDemandSync(...args) }));
 jest.mock('../remote/SessionQuickActionsSheet', () => {
   const React = require('react'), { View, Text } = require('react-native');
@@ -389,7 +389,7 @@ test('header keeps Agent, computer and static mode compact with a separate new-p
   const { view, props } = await mount({ workspaceMode: 'work' });
   expect(view.getByRole('header', { name: 'Codex' })).toBeTruthy();
   expect(view.getByText('工作电脑')).toBeTruthy(); expect(view.getByText('Work 会话')).toBeTruthy();
-  expect(view.getByLabelText('新建项目')).toBeTruthy(); expect(view.queryByTestId('agent-directory-new')).toBeNull();
+  expect(view.getByLabelText('新建会话')).toBeTruthy(); expect(view.queryByTestId('agent-directory-new')).toBeNull();
   expect(view.queryByLabelText('在 shop 中新建 Code 对话')).toBeNull();
   await fireEvent.press(view.getByLabelText('在 shop 中新建 Work 对话')); expect(props.onNew).toHaveBeenCalledWith('work', 'C:\\code\\shop');
 });
@@ -543,4 +543,19 @@ test('stale and offline pagination never request a next page', async () => {
   await act(async () => loadMore()); expect(mockLoadMore).not.toHaveBeenCalled();
   mockRemote.devices[0].online = false; await view.rerender(<RemoteWorkspace {...props} />);
   await fireEvent.press(view.getByLabelText('更多对话')); expect(mockLoadMore).not.toHaveBeenCalled();
+});
+
+
+test.each(['code','work'] as const)('projectless %s picker works with no project grants and does not start a task',async workspaceMode=>{
+ mockRemote.devices[0].capabilities=['session.projectless.v1'];
+ const {view,props}=await mount({workspaceMode});
+ await fireEvent.press(view.getByLabelText('新建会话'));
+ await fireEvent.press(view.getByLabelText('不关联文件夹，直接开始'));
+ expect(props.onNew).toHaveBeenCalledWith(workspaceMode,'',true);expect(props.onOpen).not.toHaveBeenCalled();await view.unmount();
+});
+test('projectless group creates another independent conversation instead of inheriting a managed cwd',async()=>{
+ mockRemote=ready([session('codex:independent',{projectless:true,cwd:'C:/managed/opaque'})]);
+ const {view,props}=await mount();
+ await fireEvent.press(view.getByLabelText('在 不关联文件夹 中新建 Code 对话'));
+ expect(props.onNew).toHaveBeenCalledWith('code','',true);await view.unmount();
 });

@@ -58,6 +58,7 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
   const [capabilities, setCapabilities] = useState<string[]>([]);
   const [directoryLoaded, setDirectoryLoaded] = useState(false);
   const [projectPath, setProjectPath] = useState('');
+  const [projectless, setProjectless] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [nextCursor, setNextCursor] = useState<string | undefined>();
@@ -115,7 +116,7 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
     busy.current = false; selectedKey.current = null; snapshotLoading.current = false; pendingEvents.current = [];
     if(!restore){setAgents([]);setApis([]);setAutoAll(false);setAgentId(null);setSessions([]);setNextCursor(undefined);setSelected(null);setTimeline(EMPTY_TIMELINE);setDirectoryLoaded(false);setText('');}
     else selectedKey.current=restore.sessionKey;
-    setCapabilities([]);setProjects([]);setProjectPath('');setNewSession(false);setDraftRecovery(undefined);setSending(false);setLoadingMore(false);
+    setCapabilities([]);setProjects([]);setProjectPath('');setProjectless(false);setNewSession(false);setDraftRecovery(undefined);setSending(false);setLoadingMore(false);
     setError(''); setLoading(true);
     try {
       const raw = await requestDirect({ type: 'agents.status' });
@@ -137,7 +138,7 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
         setCapabilities(advertised);
         // Selecting a computer must never silently choose its first project.
       } catch (reason) {
-        if (revision === owner.current) { setProjects([]); setProjectPath(''); setError(reason instanceof Error ? reason.message : '读取电脑项目失败'); }
+        if (revision === owner.current) { setProjects([]); setProjectPath('');setProjectless(false); setError(reason instanceof Error ? reason.message : '读取电脑项目失败'); }
       }
     } catch (reason) {
       if (revision === owner.current) setError(reason instanceof Error ? reason.message : '读取电脑 Agent 失败');
@@ -282,15 +283,16 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
   const projectOwner = useMemo(() => ({ identity: projectIdentity }), [projectIdentity]);
   const projectOwnerRef = useRef(projectOwner); projectOwnerRef.current = projectOwner;
   const projectRequest = useMemo(() => projectBrowserRequest('direct', connection.deviceId ?? '', profile?.tool ?? '', workspaceMode), [projectIdentity]);
-  useEffect(() => { setProjectBrowser(false); setNewSession(false); setProjectPath(''); }, [projectIdentity]);
+  useEffect(() => { setProjectBrowser(false); setNewSession(false); setProjectPath('');setProjectless(false); }, [projectIdentity]);
   const apiReady = claudeApiAdmissionReady(profile);
   const canCreate = Boolean(profile?.available && profile.id !== 'claude-desktop' && profile.remoteSendSupported
     && agentSupports(profile, profile.id, 'send') && apiReady);
-  const startAdmission = useRef({ canCreate, apiReady }); startAdmission.current = { canCreate, apiReady };
-  const startIdentity=JSON.stringify([scope,connectionGeneration,connection.deviceId,profile?.id,profile?.api.accountId,projectPath,workspaceMode]);
+  const projectlessAllowed = capabilities.includes('session.projectless.v1');
+  const startAdmission = useRef({ canCreate, apiReady, projectlessAllowed }); startAdmission.current = { canCreate, apiReady, projectlessAllowed };
+  const startIdentity=JSON.stringify([scope,connectionGeneration,connection.deviceId,profile?.id,profile?.api.accountId,projectPath,workspaceMode,...(projectless?['projectless']:[])]);
   const currentStart=useRef(startIdentity);currentStart.current=startIdentity;
-  const startStore=useMemo(()=>connection.deviceId&&profile&&projectPath?createDirectPendingOperation({pairing:scope,deviceId:connection.deviceId,
-    owner:JSON.stringify([scope,connection.deviceId,null,profile.id,profile.api.accountId??'',projectPath,workspaceMode]),
+  const startStore=useMemo(()=>connection.deviceId&&profile&&(projectPath||projectless)?createDirectPendingOperation({pairing:scope,deviceId:connection.deviceId,
+    owner:JSON.stringify([scope,connection.deviceId,null,profile.id,profile.api.accountId??'',projectPath,workspaceMode,...(projectless?['projectless']:[])]),
     isCurrent:()=>currentStart.current===startIdentity&&directDeliveryScope()===scope&&directConnectionGeneration()===connectionGeneration}):undefined,[startIdentity]);
   const [startReady,setStartReady]=useState(''),[pendingStart,setPendingStart]=useState<DirectPendingOperation>();
   useEffect(()=>{
@@ -501,12 +503,13 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
   const createSession = async (promptText:string,submission:DirectComposerSubmission) => {
     const deviceId = connection.deviceId, profile = agents.find(item => item.id === agentId);
     const project = projects.find(item => item.path === projectPath), prompt = promptText.trim();
-    if (!deviceId || connection.status !== 'connected' || !profile || !project || !prompt&&!submission.attachments?.length || busy.current || apiSelection.locked || uncertainStart || pendingStart || startReady!==startIdentity) return false;
+    if (!deviceId || connection.status !== 'connected' || !profile || (!project && !projectless) || !prompt&&!submission.attachments?.length || busy.current || apiSelection.locked || uncertainStart || pendingStart || startReady!==startIdentity) return false;
+    if (projectless && !startAdmission.current.projectlessAllowed) { setError('电脑端尚不支持不关联文件夹，请更新或选择项目文件夹'); return false; }
     if (!startAdmission.current.canCreate) {
       if (!startAdmission.current.apiReady) setError('请先选择并确认 Claude API，草稿已保留');
       return false;
     }
-    if(submission.owner!==JSON.stringify([scope,deviceId,null,profile.id,profile.api.accountId??'',project.path,workspaceMode])){setError('电脑、项目或 API 已变化，请重新确认任务');return false;}
+    if(submission.owner!==JSON.stringify([scope,deviceId,null,profile.id,profile.api.accountId??'',projectPath,workspaceMode,...(projectless?['projectless']:[])])){setError('电脑、项目或 API 已变化，请重新确认任务');return false;}
     const {owner:_,inputText:__,draftReceipt,...options}=submission;
     busy.current = true;
     const revision = ++owner.current, operationId = randomUUID();
@@ -516,10 +519,10 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
       let receipt: unknown;
       if(!startStore)throw new Error('创建记录尚未准备好');
       await startStore.begin({id:operationId,kind:'start',...(draftReceipt?{draftReceipt}: {})});marker=true;
-      if(currentStart.current!==startIdentity||!startAdmission.current.canCreate)throw new Error('电脑、项目或 API 已变化');
+      if(currentStart.current!==startIdentity||!startAdmission.current.canCreate||projectless&&!startAdmission.current.projectlessAllowed)throw new Error('电脑、项目或 API 已变化');
       try {
         dispatched=true;
-        receipt = await requestDirect({ type: 'session.start', tool: profile.tool, cwd: project.path, prompt,
+        receipt = await requestDirect({ type: 'session.start', tool: profile.tool, cwd: projectless ? '' : project!.path, ...(projectless ? { projectless: true as const } : {}), prompt,
           controlSurface: 'cli', workspaceMode, operationId,...options,...(profile.api.accountId?{accountId:profile.api.accountId}:{}) }, { timeoutMs: 105_000 });
       } catch (reason) {
         if (directActionUncertain(reason)) throw Object.assign(reason instanceof Error ? reason : new Error('电脑直连断开'), { deliveryUnknown: true });
@@ -573,13 +576,13 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
       const raw=await requestDirect({type:'sessions.list',tool:profile.tool,client:profile.id==='claude'?'code':undefined,controlSurface:'cli',limit:PAGE_SIZE});
       if(!current())return;
       const page=parseDirectSessionPage(raw,profile.tool);
-      const candidates=agentSessions(page.sessions,profile).filter(item=>item.cwd===projectPath&&sessionWorkspaceMode(item)===workspaceMode);
+      const candidates=agentSessions(page.sessions,profile).filter(item=>(projectless?item.projectless===true:item.cwd===projectPath&&!item.projectless)&&sessionWorkspaceMode(item)===workspaceMode);
       for(const candidate of candidates){
         const history=parseDirectHistoryPage(await requestDirect({type:'session.open',sessionKey:candidate.sessionKey,controlSurface:'cli',limit:400,messageLimit:HISTORY_PAGE_MESSAGES}),deviceId,candidate);
         if(!current())return;
         if(!history.events.some(event=>event.type==='message'&&event.role==='user'&&!event.messageOrigin&&event.clientId===operation.id))continue;
         if(operation.draftReceipt){
-          const draftOwner=JSON.stringify([scope,deviceId,null,profile.id,profile.api.accountId??'',projectPath,workspaceMode]);
+          const draftOwner=JSON.stringify([scope,deviceId,null,profile.id,profile.api.accountId??'',projectPath,workspaceMode,...(projectless?['projectless']:[])]);
           await consumeAcceptedComposerDraft(directDraftKey(scope,deviceId,draftOwner),scope,operation.draftReceipt.revision,operation.draftReceipt.identity);
           if(!current())return;
         }
@@ -747,13 +750,15 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
     text={text} onText={setText} loading={loading} loadingMore={loadingMore} sending={sending} canSend={canSend} uncertain={uncertainSend} stopPending={Boolean(stopping)} error={error}
     onSend={send} onRevert={revertLatest} onStop={()=>void stop()} onRespond={(id,decision,answers)=>void respond(id,decision,answers)} onEarlier={()=>void loadEarlier()} onRefresh={()=>void refreshConversation()}
     onContinue={submission=>continueTask(submission)} onRetry={()=>void retryFailed()} onRecoverDelivery={pendingAction?acknowledgeDelivery:undefined}
-    onRecoverMissingDraft={receipt=>{const origin=receipt.targetOrigin;if(receipt.scope!==scope||scope!==directDeliveryScope()||connection.deviceId!==origin.deviceId||profile.id!==origin.agentId||origin.mode!==workspaceMode||origin.apiIdentity!==(profile.api.accountId??'')||!projects.some(project=>project.path===origin.cwd))return;backToDirectory();setDraftRecovery(receipt);setProjectPath(origin.cwd);setText('');setNewSession(true);}}
-    onBack={backToDirectory} onOpenSession={key=>void openByKey(key)} onNew={(_mode, cwd)=>{if(!apiReady){apiSelection.open();return;}if(!canCreate)return;const exact=cwd||selected.cwd;if(!exact){setError('当前会话没有项目目录，请返回新建项目');return;}backToDirectory();setProjectPath(exact);setProjects(previous=>previous.some(item=>item.path===exact)?previous:[...previous,{path:exact,name:exact}]);setNewSession(true);}}/>;
+    onRecoverMissingDraft={receipt=>{const origin=receipt.targetOrigin;if(receipt.scope!==scope||scope!==directDeliveryScope()||connection.deviceId!==origin.deviceId||profile.id!==origin.agentId||origin.mode!==workspaceMode||origin.apiIdentity!==(profile.api.accountId??'')||!(origin.projectless ? projectlessAllowed : projects.some(project=>project.path===origin.cwd)))return;backToDirectory();setDraftRecovery(receipt);setProjectless(origin.projectless===true);setProjectPath(origin.projectless?'':origin.cwd);setText('');setNewSession(true);}}
+    onBack={backToDirectory} onOpenSession={key=>void openByKey(key)} onNew={(_mode, cwd, none)=>{if(!apiReady){apiSelection.open();return;}if(!canCreate)return;if(none||!cwd&&selected.projectless){if(!projectlessAllowed){setError('请更新电脑端，或返回选择项目文件夹');return;}backToDirectory();setProjectless(true);setProjectPath('');setNewSession(true);return;}const exact=cwd||selected.cwd;if(!exact){setError('请选择新会话的开始方式');return;}backToDirectory();setProjectless(false);setProjectPath(exact);setProjects(previous=>previous.some(item=>item.path===exact)?previous:[...previous,{path:exact,name:exact}]);setNewSession(true);}}/>;
 
   if (projectBrowser && profile && connection.status === 'connected') return <ProjectBrowser key={projectIdentity} scopeKey={projectIdentity} tool={profile.tool} mode={workspaceMode} request={projectRequest}
+    projectlessUnavailable={projectlessAllowed ? undefined : '电脑端尚不支持此方式。可以先选择文件夹，或更新电脑端后再试。'}
+    onProjectless={() => { if (projectOwnerRef.current !== projectOwner || getDirectConnectionState().status !== 'connected') return; setProjectPath('');setProjectless(true);setProjectBrowser(false);setNewSession(true);setError(''); }}
     onClose={() => { if (projectOwnerRef.current === projectOwner) setProjectBrowser(false); }} onSelect={project => {
       if (projectOwnerRef.current !== projectOwner) return;
-      setProjects(previous => [...previous.filter(item => item.path !== project.path), project]); setProjectPath(project.path); setProjectBrowser(false); setNewSession(true); setError('');
+      setProjects(previous => [...previous.filter(item => item.path !== project.path), project]); setProjectPath(project.path); setProjectless(false); setProjectBrowser(false); setNewSession(true); setError('');
     }} />;
   return <KeyboardSafeView testID="direct-new-keyboard-safe" style={styles.panel}>
     <View style={styles.heading}>
@@ -780,9 +785,9 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
       {newSession ? <View style={styles.newTask}>
         <View style={styles.newTaskHeader}><Text style={styles.newTaskTitle}>新建直连会话</Text><Pressable accessibilityRole="button" accessibilityLabel="取消新建会话" disabled={sending} onPress={() => { setNewSession(false); setError(''); }} style={styles.cancelNew}><Icon name="close" size={15} color={d.muted} /></Pressable></View>
         {uncertainStart?<Pressable accessibilityRole="button" accessibilityLabel="核对新建结果" disabled={loading||sending} onPress={()=>void recoverStart()} style={styles.uncertain}><Text style={styles.uncertainText}>原创建结果待确认，核对后打开已有会话</Text></Pressable>:null}
-        <Text style={styles.projectLabel}>当前项目</Text><Text selectable style={styles.projectName}>{projectPath || '项目不可用，请返回目录新建项目'}</Text>
+        <Text style={styles.projectLabel}>{projectless ? '开始方式' : '当前项目'}</Text><Text selectable style={styles.projectName}>{projectless ? '不关联文件夹' : projectPath || '请选择新会话的开始方式'}</Text>
         <View style={{flex:1}}/>
-        {profile&&connection.deviceId&&projects.some(item=>item.path===projectPath)?<DirectNewComposer onRegisterBack={conversationBack.register} key={JSON.stringify([scope,agentId,profile.api.accountId,projectPath,workspaceMode])} deviceId={connection.deviceId} profile={profile} cwd={projectPath} workspaceMode={workspaceMode} runtime={workspaceRuntime}
+        {profile&&connection.deviceId&&(projectless||projects.some(item=>item.path===projectPath))?<DirectNewComposer onRegisterBack={conversationBack.register} key={JSON.stringify([scope,agentId,profile.api.accountId,projectPath,workspaceMode,...(projectless?['projectless']:[])])} deviceId={connection.deviceId} profile={profile} cwd={projectPath} projectless={projectless} workspaceMode={workspaceMode} runtime={workspaceRuntime}
           sending={sending || apiSelection.busy} uncertain={apiSelection.locked||uncertainStart||startReady!==startIdentity} onSend={createSession} recoveryReceipt={draftRecovery} onRecoveryUndone={()=>setDraftRecovery(undefined)}/>:null}
       </View> : <>
       {uncertainStart ? <Pressable accessibilityRole="button" accessibilityLabel="核对新建结果" disabled={loading||sending} onPress={() => void recoverStart()} style={styles.uncertain}><Text style={styles.uncertainText}>核对新建结果</Text></Pressable> : null}
@@ -791,7 +796,7 @@ export function DirectExperience({ workspaceMode = 'code', onMobileWorkspaceVisi
         {!loading && !sessions.length ? <Text style={styles.empty}>{profile ? '还没有可用会话' : '没有可直连的 Agent'}</Text> : null}
         {profile ? <DirectProjectDirectory scopeKey={JSON.stringify([scope, connectionGeneration, connection.deviceId])} readScope={conversationReadScope(scope,connection.deviceId??'',profile,workspaceMode)}
           agent={profile} workspaceMode={workspaceMode} sessions={sessions} disabled={loading || sending || apiSelection.busy}
-          onOpen={item => void openConversation(item)} onNew={canCreate ? cwd => { if(projectOwnerRef.current!==projectOwner)return;setProjectPath(cwd);setProjects(previous=>previous.some(item=>item.path===cwd)?previous:[...previous,{path:cwd,name:cwd}]);setNewSession(true);setError(''); } : undefined}/> : null}
+          onOpen={item => void openConversation(item)} onNew={canCreate ? (cwd, none) => { if(projectOwnerRef.current!==projectOwner)return;if(none){if(!projectlessAllowed){setError('请更新电脑端，或选择项目文件夹');return;}setProjectPath('');setProjectless(true);setNewSession(true);setError('');return;}setProjectless(false);setProjectPath(cwd);setProjects(previous=>previous.some(item=>item.path===cwd)?previous:[...previous,{path:cwd,name:cwd}]);setNewSession(true);setError(''); } : undefined}/> : null}
         {nextCursor ? <Pressable disabled={loadingMore} onPress={() => void readDirectory(true)} style={styles.more}>{loadingMore ? <ActivityIndicator size="small" color={d.accentText} /> : <Text style={styles.moreText}>加载更多</Text>}</Pressable> : null}
       </ScrollView>
       </>}

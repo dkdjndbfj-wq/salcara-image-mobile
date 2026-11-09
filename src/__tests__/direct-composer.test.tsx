@@ -632,3 +632,12 @@ test.each(['send button','keyboard'] as const)('captured slash %s cannot navigat
     expect(onNew).toHaveBeenCalledTimes(1);expect(input().props.value).toBe('');
   }finally{AppState.currentState=originalState;await view.unmount();}
 });
+
+
+test('projectless new composer saves a scoped draft and sends before directory-dependent features exist',async()=>{
+ const view=await render(<Harness currentSettings={{sessionKey:undefined,cwd:'',projectless:true}}/>);
+ await act(async()=>{});expect(features).not.toHaveBeenCalled();
+ await fireEvent.changeText(view.getByLabelText('给电脑上的 Agent 发消息'),'a new independent task');
+ await fireEvent.press(view.getByLabelText('发送'));
+ expect(send).toHaveBeenCalled();expect(mockDraftSave).toHaveBeenCalledWith(expect.objectContaining({origin:expect.objectContaining({projectless:true,cwd:''})}));await view.unmount();
+});

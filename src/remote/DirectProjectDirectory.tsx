@@ -17,7 +17,7 @@ interface DirectProjectDirectoryProps {
   sessions: SessionInfo[];
   disabled?: boolean;
   onOpen: (session: SessionInfo) => void;
-  onNew?: (cwd: string) => void;
+  onNew?: (cwd: string, projectless?: true) => void;
 }
 
 /** A project is only a folder in the directory; opening it never opens a conversation. */
@@ -52,7 +52,7 @@ export function DirectProjectDirectory({ scopeKey, readScope, agent, workspaceMo
             });
           }} style={styles.folder}>
           <Icon name={closed ? 'chevronRight' : 'chevronDown'} size={14} color={d.muted}/>
-          <Icon name={group.key === '__temporary' ? 'chat' : 'folder'} size={17} color={d.muted}/>
+          <Icon name={group.key === '__temporary' || group.projectless ? 'chat' : 'folder'} size={17} color={d.muted}/>
           <View style={styles.copy}>
             <Text numberOfLines={1} style={[styles.name, { color: d.text }]}>{group.name}</Text>
             {group.path && groups.some(other => other.key !== group.key && other.name === group.name)
@@ -60,7 +60,7 @@ export function DirectProjectDirectory({ scopeKey, readScope, agent, workspaceMo
           </View>
           <Text style={[styles.count, { color: d.muted }]}>{group.sessions.length}</Text>
         </Pressable>
-        {group.path && onNew ? <Pressable accessibilityRole="button" accessibilityLabel={`在 ${group.name} 中新建 ${workspaceMode === 'code' ? 'Code' : 'Work'} 对话`} disabled={disabled} onPress={() => { if (!disabled && active.current === owner && owner.active) onNew(group.path); }} style={styles.session}><Text style={{color:d.accentText}}>新建会话</Text></Pressable> : null}
+        {(group.path || group.projectless) && onNew ? <Pressable accessibilityRole="button" accessibilityLabel={`在 ${group.name} 中新建 ${workspaceMode === 'code' ? 'Code' : 'Work'} 对话`} disabled={disabled} onPress={() => { if (!disabled && active.current === owner && owner.active) onNew(group.path, ...(group.projectless ? [true as const] : [])); }} style={styles.session}><Text style={{color:d.accentText}}>新建会话</Text></Pressable> : null}
         {!closed ? <View style={[styles.children, { borderLeftColor: d.line }]}>
           {group.sessions.map(session => <Pressable key={session.sessionKey} accessibilityRole="button"
             accessibilityLabel={`打开对话 ${session.title || '无标题对话'}`} disabled={disabled}

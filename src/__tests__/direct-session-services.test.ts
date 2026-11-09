@@ -98,3 +98,12 @@ test('Direct tool-sidechat validates private state and rejects changed connectio
   request.mockResolvedValue({sessionKey:'codex:foreign'});await expect(owner.temporarySideChat.tools!(reading,command)).rejects.toThrow('未确认');
   const calls=request.mock.calls.length;mockGeneration++;await expect(owner.temporarySideChat.tools!(reading,command)).rejects.toMatchObject({name:'SideQuestionNotDispatchedError'});expect(request).toHaveBeenCalledTimes(calls);
 });
+
+
+test('explicit projectless services have a distinct owner and never request cwd-dependent features before a session exists',async()=>{
+ const explicit=captureDirectProjectServices('pc','',agent,()=>mockCurrent,'work',true),missing=captureDirectProjectServices('pc','',agent,()=>mockCurrent,'work');
+ expect(explicit.scope).not.toBe(missing.scope);expect(explicit.isCurrent()).toBe(true);expect(missing.isCurrent()).toBe(false);
+ await expect(explicit.features()).rejects.toThrow('创建会话后');expect(request).not.toHaveBeenCalled();
+ request.mockResolvedValue({models:['model-a']});await expect(explicit.models()).resolves.toMatchObject({models:['model-a']});
+ mockGeneration++;expect(explicit.isCurrent()).toBe(false);
+});

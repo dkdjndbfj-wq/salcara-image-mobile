@@ -2590,6 +2590,8 @@ export async function lastAgent(): Promise<AgentId> {
 }
 export async function rememberAgent(agent: AgentId): Promise<void> { if (validAgentId(agent)) await setSetting(LAST_AGENT, agent).catch(() => undefined); }
 
+/** Explicit no-folder starts require the forwarding/receipt schema on the station too. */
+export function hubSupportsProjectless(): boolean { return hubCapabilities.has('session.projectless.v1'); }
 /** True when the station can hold an empty events read open (live updates without a permanent stream). */
 export function hubSupportsWait(): boolean { return hubCapabilities.has('events.wait.v1'); }
 /** The active station can persist a bounded command receipt for an A→B handover. */
@@ -3202,12 +3204,13 @@ export function attachMaterializedUri(deviceId: string, sessionKey: string, expe
   return matched;
 }
 
-export async function startSession(deviceId: string, input: TurnFeatures & { tool: ToolId; cwd: string; prompt: string; workspaceMode?: WorkspaceMode; model?: string; effort?: Effort; permissionMode?: PermissionMode; approval: ApprovalMode; accountId?: string; images?: RemoteImage[]; desktop?: boolean; composerDraft?: NewTaskSnapshot['composerDraft'] }): Promise<string> {
+export async function startSession(deviceId: string, input: TurnFeatures & { tool: ToolId; cwd: string; projectless?: true; prompt: string; workspaceMode?: WorkspaceMode; model?: string; effort?: Effort; permissionMode?: PermissionMode; approval: ApprovalMode; accountId?: string; images?: RemoteImage[]; desktop?: boolean; composerDraft?: NewTaskSnapshot['composerDraft'] }): Promise<string> {
   // Own the complete submission before the first SQLite/network await. A
   // picker/caller may otherwise mutate the same object while it is queued.
   const frozen = { ...input, ...copyTurnFeatures(input), ...(input.composerDraft ? { composerDraft: { ...input.composerDraft } } : {}),
     ...(input.images ? { images: input.images.map(image => ({ ...image })) } : {}),
     accountId: input.accountId ?? selectedAgentAccount(deviceId, input.desktop ? 'claude-desktop' : input.tool) };
+  if (frozen.projectless !== undefined && frozen.projectless !== true) throw new Error('新会话的开始方式无效，未发送');
   validateContextPrompt(frozen.prompt, frozen.contextReferences, frozen.skills?.length);
   return startSessionLocked(deviceId, frozen);
 }
@@ -3240,14 +3243,14 @@ export async function retryNewSession(deviceId: string, tool: ToolId, desktop: b
   return startSessionLocked(deviceId, input, requestId);
 }
 
-async function startSessionLocked(deviceId: string, input: TurnFeatures & { tool: ToolId; cwd: string; prompt: string; workspaceMode?: WorkspaceMode; model?: string; effort?: Effort; permissionMode?: PermissionMode; approval: ApprovalMode; accountId?: string; images?: RemoteImage[]; desktop?: boolean; composerDraft?: NewTaskSnapshot['composerDraft'] }, retryRequestId?: string): Promise<string> {
+async function startSessionLocked(deviceId: string, input: TurnFeatures & { tool: ToolId; cwd: string; projectless?: true; prompt: string; workspaceMode?: WorkspaceMode; model?: string; effort?: Effort; permissionMode?: PermissionMode; approval: ApprovalMode; accountId?: string; images?: RemoteImage[]; desktop?: boolean; composerDraft?: NewTaskSnapshot['composerDraft'] }, retryRequestId?: string): Promise<string> {
   const owner = need();
   const scope = remoteDeliveryScope(), receiptKey = newSessionReceiptKey(input.tool, Boolean(input.desktop));
   const previous = await pendingDelivery(scope, deviceId, receiptKey);
   if (previous && !retryRequestId || retryRequestId && (!previous || previous.requestId !== retryRequestId)) throw new DeliveryPendingError('上一项任务尚未确认，请先核对原任务；新内容仍保留', false);
   if (apiWriteBusy(owner, deviceId)) throw new Error('API 正在切换，请稍候');
   const selectedAccountId = input.accountId ?? selectedAgentAccount(deviceId, input.desktop ? 'claude-desktop' : input.tool);
-  const snapshot: NewTaskSnapshot = previous ? decodeNewTask(previous.text) : { version: 1, tool: input.tool, cwd: input.cwd, prompt: input.prompt, approval: input.approval, workspaceMode: input.workspaceMode ?? 'code',
+  const snapshot: NewTaskSnapshot = previous ? decodeNewTask(previous.text) : { version: 1, tool: input.tool, cwd: input.cwd, ...(input.projectless ? { projectless: true as const } : {}), prompt: input.prompt, approval: input.approval, workspaceMode: input.workspaceMode ?? 'code',
     ...(selectedAccountId ? { accountId: selectedAccountId } : {}), ...(input.model?.trim() ? { model: input.model.trim() } : {}), ...(input.effort ? { effort: input.effort } : {}),
     ...copyTurnFeatures(input), ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
     ...(input.desktop ? { desktop: true } : {}), ...(input.composerDraft ? { composerDraft: input.composerDraft } : {}), images: (input.images ?? []).map(image => ({ mime: image.mime, width: image.width, height: image.height, digest: attachmentSourceDigest(image.base64) })) };
@@ -3257,6 +3260,7 @@ async function startSessionLocked(deviceId: string, input: TurnFeatures & { tool
     if (owner !== hub || scope !== remoteDeliveryScope()) throw new HubError('连接已切换，尚未发送任务', 200, 'request_scope_changed');
     if (apiWriteBusy(owner, deviceId)) throw new HubError('API 正在切换，请稍候', 429, 'api_switching');
     if (!previous?.acceptedSessionKey) {
+      if (snapshot.projectless && (!hubSupportsProjectless() || !state.devices.find(device => device.deviceId === deviceId)?.capabilities?.includes('session.projectless.v1'))) throw new Error('电脑或中转站尚不支持不关联文件夹的会话，请更新后重试，或返回选择项目文件夹');
       if (AppState.currentState === 'background' || AppState.currentState === 'inactive') throw new HubError('手机已进入后台，原任务尚未发送', 200, 'new_task_not_dispatched');
       const currentAccount = selectedAgentAccount(deviceId, snapshot.desktop ? 'claude-desktop' : snapshot.tool);
       // Explicit callers may have selected a key before a cold status read.
@@ -3326,7 +3330,7 @@ async function startSessionLocked(deviceId: string, input: TurnFeatures & { tool
           return { sessionKey, ...(snapshot.composerDraft ? { retain: true as const } : {}) };
         }
         const execution = requireExecution(deviceId, snapshot.desktop ? 'claude-desktop' : snapshot.tool, snapshot.tool, Boolean(snapshot.desktop));
-        const result = await runCommand<{ sessionKey?: string }>(owner, deviceId, { type: 'session.start', tool: execution.tool, cwd: snapshot.cwd, prompt: snapshot.prompt, ...(snapshot.workspaceMode ? { workspaceMode: snapshot.workspaceMode } : {}), approval: snapshot.approval,
+        const result = await runCommand<{ sessionKey?: string }>(owner, deviceId, { type: 'session.start', tool: execution.tool, cwd: snapshot.cwd, ...(snapshot.projectless ? { projectless: true as const, controlSurface: 'cli' as const } : {}), prompt: snapshot.prompt, ...(snapshot.workspaceMode ? { workspaceMode: snapshot.workspaceMode } : {}), approval: snapshot.approval,
           ...(snapshot.accountId ? { accountId: snapshot.accountId } : {}), ...(snapshot.model ? { model: snapshot.model } : {}), ...(snapshot.effort ? { effort: snapshot.effort } : {}),
           ...copyTurnFeatures(snapshot), ...(snapshot.permissionMode !== undefined ? { permissionMode: snapshot.permissionMode } : {}),
           ...(receipt.attachments?.length ? { attachments: receipt.attachments } : {}), ...(execution.entrypoint ? { entrypoint: execution.entrypoint } : {}), operationId: receipt.requestId }, receipt.requestId);

@@ -84,7 +84,7 @@ const commandSchemas: Record<DirectCommand['type'], CommandSchema> = {
   'workspace.terminal.resize': { keys: ['type', 'sessionKey', 'controlSurface', 'expectedCwd', 'terminalId', 'cols', 'rows'], required: ['type', 'sessionKey', 'controlSurface', 'expectedCwd', 'terminalId', 'cols', 'rows'] },
   'workspace.terminal.close': { keys: ['type', 'sessionKey', 'controlSurface', 'expectedCwd', 'terminalId'], required: ['type', 'sessionKey', 'controlSurface', 'expectedCwd', 'terminalId'] },
   'session.describe': { keys: ['type', 'sessionKey', 'controlSurface', 'historyIdentity'], required: ['type', 'sessionKey', 'controlSurface', 'historyIdentity'] },
-  'session.start': { keys: ['type', 'tool', 'cwd', 'prompt', 'controlSurface', 'workspaceMode', 'model', 'effort', 'approval', 'permissionMode', 'collaborationMode', 'skills', 'contextReferences', 'accountId', 'attachments', 'entrypoint', 'operationId'], required: ['type', 'tool', 'cwd', 'prompt', 'controlSurface'] },
+  'session.start': { keys: ['type', 'tool', 'cwd', 'projectless', 'prompt', 'controlSurface', 'workspaceMode', 'model', 'effort', 'approval', 'permissionMode', 'collaborationMode', 'skills', 'contextReferences', 'accountId', 'attachments', 'entrypoint', 'operationId'], required: ['type', 'tool', 'cwd', 'prompt', 'controlSurface'] },
   'session.send': { keys: ['type', 'cooperationTicket', 'sourceSessionKey', 'sessionKey', 'text', 'model', 'effort', 'permissionMode', 'collaborationMode', 'skills', 'contextReferences', 'approval', 'accountId', 'attachments', 'controlSurface', 'operationId'], required: ['type', 'sessionKey', 'text', 'controlSurface'] },
   'attachment.put': { keys: ['type', 'id', 'mime', 'index', 'total', 'data', 'accountId', 'agent', 'controlSurface'], required: ['type', 'id', 'mime', 'index', 'total', 'data'] },
   'attachment.read': { keys: ['type', 'id', 'sessionKey', 'offset', 'length'], required: ['type', 'id', 'sessionKey'] },
@@ -199,6 +199,7 @@ function validCommand(value: unknown): value is DirectCommand {
     if (!schema || value.type === 'remote.station.switch' || value.type === 'remote.station.receipt'
       || !schema.required.every(key => Object.hasOwn(value, key))
       || !Object.keys(value).every(key => schema.keys.includes(key))) return false;
+    if (Object.hasOwn(value, 'projectless') && (value.type !== 'session.start' || value.projectless !== true || value.cwd !== '' || value.controlSurface !== 'cli' || value.entrypoint !== undefined || !['code','work'].includes(value.workspaceMode as string) || typeof value.operationId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value.operationId))) return false;
     return Object.entries(value).every(([key, field]) => {
       if (field === undefined) return !schema.required.includes(key);
       if (typeof value.type === 'string' && value.type.startsWith('computer.')) {
@@ -208,6 +209,7 @@ function validCommand(value: unknown): value is DirectCommand {
         if (key === 'models') return Array.isArray(field) && field.length <= 100 && field.every(model => typeof model === 'string' && model.length <= 200);
         if (['baseUrl', 'key', 'wire', 'authMode'].includes(key)) return typeof field === 'string';
       }
+      if (key === 'projectless') return field === true;
       if (key === 'permission') return field === 'workspace-write';
       if (key === 'cursor' && (value.type === 'workspace.terminal.read' || value.type === 'workspace.project.preview')) return Number.isSafeInteger(field) && (field as number) >= 0;
       if (value.type === 'workspace.project.preview' && projectPreviewStrings.has(key)) return typeof field === 'string';

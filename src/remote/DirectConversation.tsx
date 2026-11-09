@@ -75,7 +75,7 @@ function DirectConversationContent({ runtime, deviceId, profile, session, timeli
   text: string; onText: (value: string) => void; loading: boolean; loadingMore: boolean; sending: boolean; canSend: boolean; uncertain: boolean; stopPending?:boolean; error: string;
   onSend: (options:DirectComposerSubmission,observe?:(outcome:DirectSendOutcome)=>void) => Promise<boolean|undefined>; onStop: () => void; onRespond: (id: string, decision: Decision, answers?: QuestionAnswers) => void;
   onRevert?:(message:import('./sent-message-revision').SentUserMessage,operationId:string)=>Promise<void>;
-  onEarlier: () => void; onRefresh: () => void; onBack: () => void; onOpenSession: (key: string) => void; onNew: (mode?: WorkspaceMode, cwd?: string) => void;
+  onEarlier: () => void; onRefresh: () => void; onBack: () => void; onOpenSession: (key: string) => void; onNew: (mode?: WorkspaceMode, cwd?: string, projectless?: true) => void;
   onMobileWorkspaceVisibilityChange?: (visible: boolean) => void;
   onRegisterBack?: RegisterBackAction;
   onContinue?:(options:DirectComposerSubmission)=>Promise<boolean|undefined>;onRetry?:()=>void;
@@ -269,7 +269,7 @@ function DirectConversationContent({ runtime, deviceId, profile, session, timeli
     {!tablet?<ToolbarButton icon="panelRight" label="打开工作区" onPress={reveal}/>:null}
     <ToolbarButton icon="more" label="更多" anchorRef={menuAnchor} onPress={()=>setMenu(true)}/>
   </View>;
-  const navigation = <View style={{flex:1}}><View style={local.header}><ToolbarButton icon="arrowLeft" label="返回会话目录" onPress={onBack}/><Text style={{color:d.text,fontWeight:'600'}}>对话</Text><View style={{flex:1}}/><ToolbarButton icon="compose" label="新建对话" onPress={() => onNew(workspaceMode, session.cwd)}/></View>
+  const navigation = <View style={{flex:1}}><View style={local.header}><ToolbarButton icon="arrowLeft" label="返回会话目录" onPress={onBack}/><Text style={{color:d.text,fontWeight:'600'}}>对话</Text><View style={{flex:1}}/><ToolbarButton icon="compose" label="新建对话" onPress={() => onNew(workspaceMode, session.projectless ? '' : session.cwd, ...(session.projectless ? [true as const] : []))}/></View>
     <RemoteSidebar visible docked side="left" mode="navigation" deviceId={deviceId} agent={profile} activeSessionKey={session.sessionKey} controlSurface="cli" workspaceMode={workspaceMode} onClose={()=>{}} onOpenSession={onOpenSession} onNew={onNew}/></View>;
   const workspace = <ArtifactAnnotationProvider value={(value,images)=>services.isCurrent()&&imageAnnotationAppender.current?imageAnnotationAppender.current(value,images):Promise.resolve(false)}><RemoteSidebar visible={workspaceVisible} docked dockedWidth="100%" mode="tools" deviceId={deviceId} agent={profile} activeSessionKey={session.sessionKey} controlSurface="cli" workspaceMode={workspaceMode}
     artifactScope={outputScope} artifactTarget={currentArtifactRequest}

@@ -120,3 +120,10 @@ test('new project conversation keeps the exact path and rejects handlers from a 
   await act(async()=>stale());expect(onNew).not.toHaveBeenCalled();expect(open).not.toHaveBeenCalled();
   await view.unmount();
 });
+
+
+test('projectless sessions share a readable group without exposing managed directory names',()=>{
+ const {groupSessionsByProject}=require('../remote/projection');
+ const groups=groupSessionsByProject([{sessionKey:'codex:a',cwd:'C:/managed/a',projectless:true,updatedAt:1},{sessionKey:'codex:b',cwd:'C:/managed/b',projectless:true,updatedAt:2},{sessionKey:'codex:c',cwd:'C:/real',updatedAt:3}]);
+ const standalone=groups.find((group:any)=>group.projectless);expect(standalone).toMatchObject({name:'不关联文件夹',path:'',projectless:true});expect(standalone.sessions).toHaveLength(2);
+});

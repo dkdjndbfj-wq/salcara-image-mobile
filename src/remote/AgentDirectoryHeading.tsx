@@ -18,7 +18,7 @@ export function AgentDirectoryHeading({ agentName, deviceName, mode, onNew, onNe
         <Text style={[styles.mode,{color:d.muted}]}>{label} 会话</Text>
       </View>
     </View>
-    {onNewProject ? <Pressable accessibilityRole="button" accessibilityLabel="新建项目" disabled={disabled} onPress={onNewProject} style={styles.newButton}><Icon name="folder" size={19} color={d.text2}/><Text style={{color:d.muted,fontSize:10}}>新项目</Text></Pressable> : null}
+    {onNewProject ? <Pressable accessibilityRole="button" accessibilityLabel="新建会话" disabled={disabled} onPress={onNewProject} style={styles.newButton}><Icon name="compose" size={20} color={d.text2}/><Text style={{color:d.muted,fontSize:10}}>新会话</Text></Pressable> : null}
     {onNew ? <Pressable testID="agent-directory-new" accessibilityRole="button" accessibilityLabel={`新建 ${label} 对话`}
       accessibilityState={{disabled:Boolean(disabled)}} disabled={disabled} onPress={onNew}
       style={({pressed})=>[styles.newButton,{opacity:disabled ? 0.4 : 1,backgroundColor:pressed?d.surface2:'transparent'}]}>
