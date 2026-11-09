@@ -107,3 +107,16 @@ test.each(['code', 'work'] as const)('%s keeps child activity on the parent row 
   await view.rerender(<DirectProjectDirectory scopeKey="computer-a" agent={agent} workspaceMode={workspaceMode} sessions={[parent, { ...child, status: 'idle' }]} onOpen={open}/>);
   expect(view.queryByRole('progressbar')).toBeNull(); expect(view.queryByText('待回复')).toBeNull();
 });
+test('new project conversation keeps the exact path and rejects handlers from a previous visit', async () => {
+  const onNew=jest.fn(),open=jest.fn();
+  const sessions=[session('one','C:/one/shop'),session('two','D:/two/shop')];
+  const p={scopeKey:'computer-a',agent,workspaceMode:'code' as const,sessions,onOpen:open,onNew};
+  const view=await render(<DirectProjectDirectory {...p}/>);
+  const buttons=view.getAllByRole('button',{name:'在 shop 中新建 Code 对话'});
+  const stale=buttons[0].props.onPress;
+  await fireEvent.press(buttons[1]);expect(onNew).toHaveBeenCalledWith('D:/two/shop');onNew.mockClear();
+  await view.rerender(<DirectProjectDirectory {...p} scopeKey="computer-b"/>);
+  await view.rerender(<DirectProjectDirectory {...p}/>);
+  await act(async()=>stale());expect(onNew).not.toHaveBeenCalled();expect(open).not.toHaveBeenCalled();
+  await view.unmount();
+});

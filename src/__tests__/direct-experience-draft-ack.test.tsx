@@ -91,7 +91,7 @@ test('system Back returns to the Direct directory and preserves the selected con
 test('system Back closes new Direct conversation before leaving its directory',async()=>{
   setupTurns();const back:{current:(()=>boolean)|null}={current:null};
   const view=await render(<DirectExperience onRegisterBack={handler=>{back.current=handler;}}/>);
-  await fireEvent.press(await view.findByRole('button', {name:'新建 Code 对话'}));
+  await fireEvent.press(await view.findByRole('button', {name:'在 project 中新建 Code 对话'}));
   expect(view.getByText('新建直连会话')).toBeTruthy();
   await act(async()=>{expect(back.current?.()).toBe(true);});
   expect(view.queryByText('新建直连会话')).toBeNull();

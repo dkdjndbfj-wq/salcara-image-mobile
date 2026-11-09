@@ -63,7 +63,7 @@ test.each([false, true])('navigation omits search and a redundant tab while keep
   await fireEvent.press(view.getByLabelText('另一个对话'));
   expect(open).toHaveBeenCalledWith('codex:next');
   await fireEvent.press(view.getByLabelText('新建 Code 对话'));
-  expect(create).toHaveBeenCalledWith('code');
+  expect(create).toHaveBeenCalledWith('code', '/fixture');
   await view.unmount();
 });
 
@@ -159,7 +159,7 @@ test('docked tablet inner page cannot switch the home-selected workspace mode', 
   expect(view.queryByLabelText('侧边栏 Code')).toBeNull();
   expect(switchMode).not.toHaveBeenCalled();
   await fireEvent.press(view.getByLabelText('新建 Code 对话'));
-  expect(create).toHaveBeenCalledWith('code');
+  expect(create).toHaveBeenCalledWith('code', undefined);
 });
 
 test('docked tablet work area keeps all HTML tool tabs reachable', async () => {
@@ -185,7 +185,7 @@ test('conversation drawer follows its entry mode without an in-thread mode switc
   expect(view.getByText('工作项目')).toBeTruthy(); expect(view.queryByText('代码项目')).toBeNull();
   expect(view.getByLabelText('新建 Work 对话')).toBeTruthy();
   await fireEvent.press(view.getByLabelText('新建 Work 对话'));
-  expect(create).toHaveBeenCalledWith('work');
+  expect(create).toHaveBeenCalledWith('work', '');
 });
 
 test('an unrelated cached native directory never replaces a CLI conversation sidebar', async () => {

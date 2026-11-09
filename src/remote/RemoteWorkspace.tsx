@@ -23,6 +23,9 @@ import { AgentDirectoryHeading } from './AgentDirectoryHeading';
 import { sidebarSessionStatus } from './sidebar-session-status';
 import { conversationFontFamily } from './conversation-typography';
 
+import { ProjectBrowser } from './ProjectBrowser';
+import { projectBrowserRequest } from './project-browser';
+
 const PER_PROJECT = 6;
 type ProjectSection = SessionProjectGroup & { data: SessionInfo[] };
 
@@ -30,7 +33,7 @@ type ProjectSection = SessionProjectGroup & { data: SessionInfo[] };
 export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'code', onWorkspaceModeChange = () => undefined, onOpen, onNew, onSettings }: {
   visible: boolean; deviceId: string; agent: AgentProfile;
   workspaceMode?: WorkspaceMode; onWorkspaceModeChange?: (mode: WorkspaceMode) => void;
-  onOpen: (key: string) => void; onNew: (mode: WorkspaceMode) => void; onSettings: () => void;
+  onOpen: (key: string) => void; onNew: (mode: WorkspaceMode, cwd: string) => void; onSettings: () => void;
 }) {
   const p = useProgrammingStyles();
   const dk = useDesk();
@@ -72,6 +75,8 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
     };
     check(); return () => clearTimeout(timer);
   }, [visible, native, agent.desktopLive?.expiresAt]);
+  const [projectBrowser, setProjectBrowser] = useState(false);
+  const projectRequest = useMemo(() => projectBrowserRequest('remote', deviceId, agent.tool, workspaceMode), [scope]);
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
@@ -116,7 +121,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
     if (entranceRead.current === rendered || entry?.loading || page?.loading) return;
     entranceRead.current = rendered; refresh();
   }, [visible, scope, agent.id, online, desktopValid, historyValid, entry?.loading, page?.loading]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { setQuery(''); setExpanded({}); setCollapsedProjects({}); setDirectoryView('sessions'); setActionSession(null); }, [scope, agent.id]);
+  useEffect(() => { setProjectBrowser(false); setQuery(''); setExpanded({}); setCollapsedProjects({}); setDirectoryView('sessions'); setActionSession(null); }, [scope, agent.id]);
   useEffect(() => { setManualRefreshing(false); }, [visible, scope]);
 
   const pending = useMemo(() => new Set(Object.values(remote.approvals).filter(item => item.deviceId === deviceId).map(item => item.sessionKey)), [remote.approvals, deviceId]);
@@ -148,7 +153,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
 
   const directoryHeader = <View>
     <AgentDirectoryHeading agentName={agent.name} deviceName={device?.name} mode={workspaceMode} disabled={!online}
-      onNew={directoryView !== 'archived' && !native && !readOnly && agent.remoteSendSupported ? () => { if (canOperate() && active.current.online) onNew(workspaceMode); } : undefined} />
+      onNewProject={directoryView !== 'archived' && !native && !readOnly && agent.remoteSendSupported ? () => { if (canOperate() && active.current.online) setProjectBrowser(true); } : undefined} />
     {archivesAllowed ? <View style={styles.modeTabs} accessibilityRole="tablist">
       {([{ id: 'sessions', label: '对话' }, { id: 'archived', label: '已归档' }] as const).map(item => <Pressable key={item.id}
         accessibilityRole="tab" accessibilityLabel={item.label} accessibilityState={{ selected: directoryView === item.id }}
@@ -181,6 +186,8 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
     </> : null}
   </View>;
 
+  if (projectBrowser && visible) return <ProjectBrowser key={scope} scopeKey={scope} tool={agent.tool} mode={workspaceMode} request={projectRequest}
+    onClose={() => { if (canOperate()) setProjectBrowser(false); }} onSelect={project => { if (canOperate() && active.current.online) { setProjectBrowser(false); onNew(workspaceMode, project.path); } }} />;
   return <View style={styles.screen} testID="remote-workspace">
     {directoryView === 'archived' && archivesAllowed ? <View style={styles.archivedPage}>
       <View style={styles.archivedHeader}>{directoryHeader}</View>
@@ -202,7 +209,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
       </View> : null}
       renderSectionHeader={({ section }) => {
         const collapsed = !searching && collapsedProjects[section.key] === true;
-        return <Pressable accessibilityRole="button" accessibilityLabel={`${collapsed ? '展开' : '折叠'} ${section.name} 对话`}
+        return <View><Pressable accessibilityRole="button" accessibilityLabel={`${collapsed ? '展开' : '折叠'} ${section.name} 对话`}
           accessibilityState={{ expanded: !collapsed }} onPress={() => {
             if (!canOperate() || searching) return;
             setCollapsedProjects(current => ({ ...current, [section.key]: !current[section.key] }));
@@ -211,7 +218,7 @@ export function RemoteWorkspace({ visible, deviceId, agent, workspaceMode = 'cod
           <Icon name={section.key === '__temporary' ? 'chat' : 'folder'} size={17} color={dk.muted} /><View style={styles.projectBody}>
             <Text style={styles.projectName} numberOfLines={1}>{section.name}</Text>{section.path&&groups.some(other=>other.key!==section.key&&other.name===section.name) ? <Text style={styles.projectPath} numberOfLines={1}>{section.path}</Text> : null}
           </View><Text style={styles.projectCount}>{section.sessions.length}</Text>
-        </Pressable>;
+        </Pressable>{section.path && !native && !readOnly && agent.remoteSendSupported ? <Pressable accessibilityRole="button" accessibilityLabel={`在 ${section.name} 中新建 ${workspaceMode === 'code' ? 'Code' : 'Work'} 对话`} disabled={!online} onPress={() => { if (canOperate() && active.current.online) onNew(workspaceMode, section.path); }} style={styles.more}><Text style={styles.link}>新建会话</Text></Pressable> : null}</View>;
       }}
       renderSectionFooter={({ section }) => !searching && section.sessions.length > PER_PROJECT
         ? <Pressable accessibilityRole="button" accessibilityLabel={`${expanded[section.key] ? '收起' : '显示全部'} ${section.name} 的对话`}

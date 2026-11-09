@@ -37,7 +37,7 @@ import { MessageContent } from '../components/MessageContent';
 import { Appear, AppDialog, IconButton, MotionPressable, Sheet, showToast, useReducedMotion } from '../components/ui';
 import { colors, prettyModel, radius, shadow, desk, themed, useDesk } from '../theme';
 import { buildBlocks, conversationBlocks, fileEdits, planSteps, subagentStatus, type Block, type ConversationBlock, type FileEdit } from './blocks';
-import { HubError, type AgentProfile, type ApprovalMode, type AttachmentRef, type Decision, type Effort, type MessageOrigin, type ModelCatalog, type PermissionMode, type Project, type QuestionAnswers, type ToolId, type ToolKind, type WorkspaceMode } from './client';
+import { HubError, type AgentProfile, type ApprovalMode, type AttachmentRef, type Decision, type Effort, type MessageOrigin, type ModelCatalog, type PermissionMode, type QuestionAnswers, type ToolId, type ToolKind, type WorkspaceMode } from './client';
 import type { Space } from '../state/AppContext';
 import { apiProblem, modelCapabilityProblem, modelCatalogProblem, type ApiProblem } from './api-errors';
 import { QuestionDock } from './QuestionDock';
@@ -95,7 +95,7 @@ import { OptionSheet, type Option } from './OptionSheet';
 import { ComposerOptionMenu } from './ComposerPopover';
 import { loadThreadPrefs, saveThreadPrefs } from './thread-prefs';
 import { DiffView, EmptyState, mono, PulseDot, toolName } from './parts';
-import { agentSupports, desktopLiveFor, desktopApprovalFor, projectName, resolveAgentExecution } from './projection';
+import { agentSupports, desktopLiveFor, desktopApprovalFor, resolveAgentExecution } from './projection';
 import { claudeSessionAdmissionBlocked, turnControlTarget } from './turn-control';
 import {
   EMPTY_TIMELINE, cachedModels, cachedAgentFeatures, agentFeaturesGeneration, canOpenOnDesktop, hydrateCachedThread, listAgentFeatures, cancelPendingRemoteMessage, pausePendingRemoteMessage, continueSession, openOnDesktop, getPendingRemoteMessage, hubSupportsWait, hubSupportsSteer, interruptSession, listModels, listProjects, loadEarlierHistory, materializeAttachment, materializeAttachmentThumbnail, attachMaterializedUri, openSession,
@@ -237,7 +237,7 @@ export function ThreadView(props:Parameters<typeof ThreadViewContent>[0]) {
   const tablet=useWindowDimensions().width>=1000;
   return <WorkbenchPresentationProvider presentation={tablet?'tablet':'phone'}><ThreadViewContent {...props}/></WorkbenchPresentationProvider>;
 }
-function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode = 'code', onWorkspaceModeChange, activeSpace = 'remote', onSwitchSpace, onClose, onCreated, onNew, onAgentSettings, agentSettingsOpen = false, verifying = false, onContinue, seed, voice }: {
+function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode = 'code', onWorkspaceModeChange, activeSpace = 'remote', onSwitchSpace, onClose, onCreated, onNew, onAgentSettings, agentSettingsOpen = false, verifying = false, onContinue, seed, newProjectPath, voice }: {
   visible: boolean; deviceId: string | null; sessionKey: string | null; agent: AgentProfile | null;
   workspaceMode?: WorkspaceMode;
   onWorkspaceModeChange?: (mode: WorkspaceMode) => void;
@@ -245,7 +245,8 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   onSwitchSpace?: (space: Space) => void;
   onClose: () => void; onCreated: (sessionKey: string) => void;
   /** Opens a fresh CLI task editor without dispatching until the user submits. */
-  onNew?: (mode?: WorkspaceMode) => void;
+  onNew?: (mode?: WorkspaceMode, cwd?: string) => void;
+  newProjectPath?: string;
   onAgentSettings?: () => void;
   agentSettingsOpen?: boolean;
   /** Opened instantly before the computer confirmed this Agent/API: readable, not sendable yet. */
@@ -264,11 +265,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   const isNew = !sessionKey;
   const timelineId = deviceId && sessionKey ? timelineKey(deviceId, sessionKey) : '';
   const operationScope = remoteDeliveryScope();
-  const projectOwner = JSON.stringify([operationScope, deviceId, agent?.id, workspaceMode]);
-  const [projectSelection, setProjectSelection] = useState({ owner: '', path: '' });
-  const cwd = projectSelection.owner === projectOwner ? projectSelection.path : '';
-  const setCwd = (value: React.SetStateAction<string>) => setProjectSelection(previous => ({ owner: projectOwner,
-    path: typeof value === 'function' ? value(previous.owner === projectOwner ? previous.path : '') : value }));
+  const cwd = newProjectPath || seed?.cwd || '';
   // Private content belongs to this exact credential generation, not just
   // the saved station ID. Model preferences retain their public key below.
   const draftKey = `${operationScope}|${deviceId ?? ''}|${sessionKey ?? `new:${agent?.id ?? ''}:${workspaceMode}:${encodeURIComponent(cwd)}`}`;
@@ -394,8 +391,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   const [slashFocus, setSlashFocus] = useState({ key: '', index: 0 });
   const [planPreview, setPlanPreview] = useState<{ id: string; epoch: number } | null>(null);
   const [permissionChoice, setPermissionChoice] = useState<PermissionMode>();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [picker, setPicker] = useState<'model' | 'effort' | 'project' | 'mode' | 'permission' | null>(null);
+  const [picker, setPicker] = useState<'model' | 'effort' | 'mode' | 'permission' | null>(null);
   // Agent configuration owns API changes. Pause dispatch while that surface is open.
   const apiSwitching = agentSettingsOpen;
   const apiSwitchingRef = useRef(apiSwitching); apiSwitchingRef.current = apiSwitching;
@@ -786,7 +782,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
         await undoMissingComposerDraft(result.receipt).catch(() => false); return false;
       }
       setDraftRecovery({ receipt: result.receipt, text: result.draft.text, images: imageSignature(result.draft), features: JSON.stringify(result.draft.featureIntent ?? null) });
-      setCwd(origin.cwd); onNew(origin.mode); return true;
+      onNew(origin.mode, origin.cwd); return true;
     } finally { owner.busy = false; if (ownerCurrent()) setSending(false); }
   };
   const undoDraftRecovery = async () => {
@@ -1040,23 +1036,6 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
     }, 400);
     return () => clearTimeout(timer);
   }, [text, images, draftKey, visible, foreground, composerReady, sending, JSON.stringify(featureDraftIntent)]);
-
-  // New thread: pick a project folder from the computer (allowed folders and recent workspaces).
-  useEffect(() => {
-    if (!visible || !isNew || !deviceId) return;
-    let alive = true;
-    const local = device?.projects ?? [];
-    setProjects(local);
-    // Continuing a Claude Desktop conversation starts in its original folder when the computer allows it.
-    const preferred = (list: readonly { path: string }[]) => seed?.cwd && list.some((item) => item.path === seed.cwd) ? seed.cwd : undefined;
-    setCwd((current) => current || preferred(local) || local[0]?.path || '');
-    void listProjects(deviceId).then((list) => {
-      if (!alive || !list.length) return;
-      setProjects(list);
-      setCwd((current) => preferred(list) ?? (list.some((item) => item.path === current) ? current : list[0].path));
-    }).catch(() => undefined);
-    return () => { alive = false; };
-  }, [visible, isNew, deviceId, projectOwner]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A disconnected expired question must not hide the next actionable request.
   useEffect(() => {
@@ -1600,7 +1579,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
     composer.busy = true;
     setSending(true);
     try {
-      if (isNew && !cwd) { showToast('先选择一个项目文件夹', 'alert'); return; }
+      if (isNew && !cwd) { showToast('请返回项目目录，选择项目后新建会话', 'alert'); return; }
       // Persist before transferring ownership to the outbox/computer. A
       // slow metadata/file read cannot send through a subsequently changed
       // Key, model, Agent, desktop lease or pairing.
@@ -2362,7 +2341,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
     if(sending||apiSwitching||pendingDelivery||hostWorkActive){showToast('请先等待当前任务结束或核对待确认消息','alert');return;}
     if(action==='api')openApi();
     if(action==='model')openModels();
-    if(action==='new'){if(onNew)onNew(workspaceMode);else showToast('请返回项目目录新建对话，原草稿已保留','code');}
+    if(action==='new'){if(onNew)onNew(workspaceMode, session?.cwd || cwd);else showToast('请返回项目目录新建对话，原草稿已保留','code');}
   };
   const threadUi = useMemo(() => ({ editDraftScope:operationScope,editDraftDeviceId:deviceId??undefined,latestEditableMessageId:!readOnly&&!desktopLive&&typeof hubSupportsLatestTurnRevert==='function'&&hubSupportsLatestTurnRevert()&&currentAgent?.capabilities?.latestTurnRevert===true&&session?.latestTurnRevert===true?latestEditable?.id:undefined,onEditMessage:editLatest,editMessageDisabledReason:running?'请先停止当前任务，再编辑最新消息':sending||pendingDelivery||!online?'请先等待操作完成并核对连接':queuedItems.length?'请先处理排队消息':editBackup.blocked?'请先核对上次编辑保留的内容':undefined,onResolveFailure:resolveFailure,openPlan, openDiff, openChanges, openBrowser, undoChanges: undoUnavailable ? undefined : undoChanges, undoUnavailable, openDiffInToolPanel: true, openImage:openConversationImage, artifactScope:outputScope, onOpenArtifact:openArtifact, onArtifactCompose:appendArtifactToComposer, requestAttachment, getAttachmentThumbnail, openAttachment, openLink: openConversationLink, openAnnotation: navigateAnnotation,
     childTitle: (key: string) => {
@@ -2442,7 +2421,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
     childSessionKeys={childSessionKeys} parentSessionKey={session?.parentSessionKey} focusSessionKey={sidebarFocus} onClose={() => setNavigationOpen(false)}
     onOpenCommands={featureEligible && Boolean(featureCwd) ? openSkillsMenu : undefined} onOpenModel={openModels}
     onOpenSession={key => { if (!interactionCurrent()) return; setNavigationOpen(false); if (key !== sessionKey) { if (desktopLive) desktopTarget.current = `${operationScope}|${deviceId}|${key}`; onCreated(key); } }}
-    onNew={onNew ? mode => { if (!interactionCurrent()) return; setNavigationOpen(false); onNew(workspaceMode); } : undefined} /> : null;
+    onNew={onNew ? (mode, projectCwd) => { if (!interactionCurrent()) return; setNavigationOpen(false); onNew(workspaceMode, projectCwd || session?.cwd || cwd); } : undefined} /> : null;
   const closeToolWorkspace = () => { setSidebarOpen(false); setSidebarFocus(null); setSidebarFile(null); setPreviewTarget(null); setDiffFile(null); };
   const toolWorkspace = deviceId && agent && !isNew ? <ArtifactAnnotationProvider value={appendImageNotes}><RemoteSidebar
     artifactScope={outputScope} artifactTarget={currentArtifactRequest}
@@ -2463,7 +2442,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
       setSidebarOpen(false); setSidebarFocus(null); setSidebarFile(null); setPreviewTarget(null); setDiffFile(null);
       if (key !== sessionKey) { if (desktopLive) desktopTarget.current = `${operationScope}|${deviceId}|${key}`; onCreated(key); }
     }}
-    onNew={onNew ? mode => { if (!interactionCurrent()) return; setSidebarOpen(false); setSidebarFocus(null); setSidebarFile(null); setPreviewTarget(null); setDiffFile(null); onNew(workspaceMode); } : undefined}
+    onNew={onNew ? (mode, projectCwd) => { if (!interactionCurrent()) return; setSidebarOpen(false); setSidebarFocus(null); setSidebarFile(null); setPreviewTarget(null); setDiffFile(null); onNew(workspaceMode, projectCwd || session?.cwd || cwd); } : undefined}
   /></ArtifactAnnotationProvider> : null;
   const tabletHeader = <View style={styles.tabletHeaderContent}>
     <View style={styles.tabletHeaderBody}>
@@ -2506,7 +2485,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
         onNext={() => { if (hits.length) setSearchPos((value) => (value + 1) % hits.length); }}
         onClose={() => { setSearchOpen(false); setSearchQuery(''); setSearchPos(0); }} /> : null}
       {searchOpen&&!isNew?<Text style={{paddingHorizontal:20,paddingBottom:6,color:dk.muted,fontSize:12}}>搜索已加载的消息{timeline.nextCursor?' · 加载更早记录可继续查找':''}</Text>:null}
-      {isNew ? <NewThreadIntro agent={agent} cwd={cwd} workspaceMode={workspaceMode} onPickProject={() => setPicker('project')} />
+      {isNew ? <NewThreadIntro agent={agent} cwd={cwd} workspaceMode={workspaceMode} onReturnToProjects={onClose} />
         : <View style={{ flex: 1 }}><FlatList
           testID="remote-conversation"
           key={readingScope}
@@ -2741,7 +2720,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
       workspaceMode={workspaceMode} onWorkspaceModeChange={onWorkspaceModeChange} activeSpace={activeSpace} onSwitchSpace={onSwitchSpace} activeSessionKey={sessionKey} controlSurface={readOnly ? 'read-only' : desktopLive ? 'desktop' : 'cli'}
       childSessionKeys={childSessionKeys} parentSessionKey={session?.parentSessionKey} focusSessionKey={sidebarFocus} onClose={() => setNavigationOpen(false)}
       onOpenSession={key => { if (!interactionCurrent()) return; setNavigationOpen(false); if (key !== sessionKey) { if (desktopLive) desktopTarget.current = `${operationScope}|${deviceId}|${key}`; onCreated(key); } }}
-      onNew={onNew ? mode => { if (!interactionCurrent()) return; setNavigationOpen(false); onNew(workspaceMode); } : undefined} /> : null}
+      onNew={onNew ? (mode, projectCwd) => { if (!interactionCurrent()) return; setNavigationOpen(false); onNew(workspaceMode, projectCwd || session?.cwd || cwd); } : undefined} /> : null}
 
     <PlanPreview item={previewPlan} onClose={() => setPlanPreview(current => current === planPreview ? null : current)} onOpenLink={previewPlan ? target => openConversationLink(target, !previewPlan.parentId) : undefined} />
     <ModelPopover visible={picker === 'model' && (desktopLive || modelEditable)} anchor={null} anchorRef={modelAnchor} value={model} fallback={defaultModel} models={desktopLive && !nativeModelEditable ? [] : models.models}
@@ -2785,9 +2764,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
         if (value === 'auto_all' && !autoAllowed) { showToast('电脑上还没允许手机使用「全部自动」', 'lock'); return; }
         setMode(value); setPicker(null);
       }} />
-    <OptionSheet visible={picker === 'project'} title="项目" subtitle="在电脑的这个文件夹里工作" value={cwd} onClose={() => setPicker(null)} onSelect={(value) => { setCwd(value); setPicker(null); }}
-      options={projects.map((item) => ({ value: item.path, label: item.name || projectName(item.path), detail: item.path }))}
-      empty="电脑上还没有项目。请在电脑端 Salcara Bridge 的「手机远程」里添加项目文件夹。" />
+
 
     <ToolbarMenu visible={menu} anchorRef={menuAnchor} label="对话菜单" testID="conversation-actions-menu" onClose={() => setMenu(false)} actions={[
       ...(pendingDelivery?.retryable && pendingDelivery.requestId ? [{ label: '重试原消息', icon:'retry' as const, tone: 'secondary' as const, onPress: () => {

@@ -50,6 +50,7 @@ type PendingRequest = {
 // and full per-command validation; the phone never forwards arbitrary frames.
 type CommandSchema = { keys: readonly string[]; required: readonly string[] };
 const commandSchemas: Record<DirectCommand['type'], CommandSchema> = {
+  'workspace.projects': { keys: ['type', 'controlSurface', 'tool', 'workspaceMode', 'action', 'cwd', 'path', 'cursor', 'name'], required: ['type', 'controlSurface', 'tool', 'workspaceMode', 'action', 'cwd', 'path'] },
   'computer.management.status': { keys: ['type', 'controlSurface'], required: ['type', 'controlSurface'] },
   'computer.api.create': { keys: ['type', 'controlSurface', 'requestId', 'name', 'baseUrl', 'key', 'wire', 'authMode', 'models'], required: ['type', 'controlSurface', 'requestId', 'name', 'baseUrl', 'key', 'wire', 'authMode', 'models'] },
   'computer.agent.install': { keys: ['type', 'controlSurface', 'requestId', 'tool', 'confirmed'], required: ['type', 'controlSurface', 'requestId', 'tool', 'confirmed'] },

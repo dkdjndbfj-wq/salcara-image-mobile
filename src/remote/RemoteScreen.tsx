@@ -115,6 +115,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
   const [demoMobileWorkspace, setDemoMobileWorkspace] = useState(false);
   const [threadKey, setThreadKey] = useState<string | null>(null);
   const [newThread, setNewThread] = useState(false);
+  const [newProjectPath, setNewProjectPath] = useState('');
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('code');
   const [newWorkspaceMode, setNewWorkspaceMode] = useState<WorkspaceMode>('code');
   const [seed, setSeed] = useState<ContinueSeed | null>(null);
@@ -586,7 +587,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
             : step === 'workspace' && deviceId && agent
               ? <RemoteWorkspace visible={visible && !threadKey && !newThread && !apiLibrary && !menu} deviceId={deviceId} agent={agent} workspaceMode={workspaceMode} onWorkspaceModeChange={setWorkspaceMode}
                 onOpen={(key) => { if (stillHere('workspace', revision, scope)) setThreadKey(key); }}
-                onNew={(mode) => { if (stillHere('workspace', revision, scope)) { setNewWorkspaceMode(mode); setNewThread(true); } }}
+                onNew={(mode, cwd) => { if (stillHere('workspace', revision, scope) && cwd) { setNewProjectPath(cwd); setNewWorkspaceMode(mode); setNewThread(true); } }}
                 onSettings={() => { if (stillHere('workspace', revision, scope)) setApiLibrary(true); }} />
               : <View style={styles.page}><EmptyState icon="laptop" title="请选择电脑" detail="返回首页选择已绑定的电脑和 Agent。" /></View>}
     </Appear>
@@ -595,14 +596,14 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
       onAgentSettings={() => setApiLibrary(true)} agentSettingsOpen={apiLibrary}
       voice={voice}
       verifying={!(deviceId && remote.agents[deviceId]?.loaded && !remote.agents[deviceId]?.error && remote.agents[deviceId]?.list.some((item) => item.id === agentId))}
-      seed={newThread ? seed : null}
+      seed={newThread ? seed : null} newProjectPath={newThread ? newProjectPath : undefined}
       onContinue={(next) => {
         const claude = deviceId ? remote.agents[deviceId]?.list.find((item) => item.id === 'claude') : undefined;
         if (!claude?.available) { showToast('电脑上需要先安装 Claude Code，才能在手机上继续这个对话', 'alert'); return; }
-        chooseAgent('claude'); setWorkspaceMode('code'); setNewWorkspaceMode('code'); setSeed(next); setThreadKey(null); setNewThread(true);
+        chooseAgent('claude'); setWorkspaceMode('code'); setNewWorkspaceMode('code'); setSeed(next); setNewProjectPath(next.cwd ?? ''); setThreadKey(null); setNewThread(true);
       }}
       onClose={closeThread}
-      onNew={(mode) => { setSeed(null); setNewWorkspaceMode(mode ?? workspaceMode); setThreadKey(null); setNewThread(true); }}
+      onNew={(mode, cwd) => { if (!cwd) { showToast('当前会话没有项目目录，请返回目录使用新建项目', 'alert'); return; } setSeed(null); setNewProjectPath(cwd); setNewWorkspaceMode(mode ?? workspaceMode); setThreadKey(null); setNewThread(true); }}
       onCreated={(key) => { setSeed(null); setNewThread(false); setThreadKey(key); }} />
     <ProgrammingPanel visible={visible && menu} placement="menu" onClose={closeMenu}>
       <View style={styles.menuList}>

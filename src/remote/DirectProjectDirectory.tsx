@@ -17,15 +17,17 @@ interface DirectProjectDirectoryProps {
   sessions: SessionInfo[];
   disabled?: boolean;
   onOpen: (session: SessionInfo) => void;
+  onNew?: (cwd: string) => void;
 }
 
 /** A project is only a folder in the directory; opening it never opens a conversation. */
-export function DirectProjectDirectory({ scopeKey, readScope, agent, workspaceMode, sessions, disabled, onOpen }: DirectProjectDirectoryProps) {
+export function DirectProjectDirectory({ scopeKey, readScope, agent, workspaceMode, sessions, disabled, onOpen, onNew }: DirectProjectDirectoryProps) {
   const d = useDesk();
   const reduced = useReducedMotion();
   const identity = JSON.stringify([scopeKey, agent.id, workspaceMode]);
-  const active = useRef(identity); active.current = identity;
-  useEffect(() => { active.current = identity; return () => { active.current = ''; }; }, [identity]);
+  const owner = useMemo(() => ({ identity, active: true }), [identity]);
+  const active = useRef(owner); active.current = owner;
+  useEffect(() => { owner.active = true; return () => { owner.active = false; }; }, [owner]);
   const [folders, setFolders] = useState<{ identity: string; collapsed: Record<string, boolean> }>({ identity, collapsed: {} });
   useEffect(() => { setFolders({ identity, collapsed: {} }); }, [identity]);
   const collapsed = folders.identity === identity ? folders.collapsed : {};
@@ -43,7 +45,7 @@ export function DirectProjectDirectory({ scopeKey, readScope, agent, workspaceMo
         <Pressable accessibilityRole="button" accessibilityLabel={`${closed ? '展开' : '折叠'} ${group.name} 对话`}
           accessibilityState={{ expanded: !closed, disabled: Boolean(disabled) }} disabled={disabled}
           onPress={() => {
-            if (disabled || active.current !== identity) return;
+            if (disabled || active.current !== owner || !owner.active) return;
             setFolders(current => {
               const values = current.identity === identity ? current.collapsed : {};
               return { identity, collapsed: { ...values, [group.key]: !values[group.key] } };
@@ -58,11 +60,12 @@ export function DirectProjectDirectory({ scopeKey, readScope, agent, workspaceMo
           </View>
           <Text style={[styles.count, { color: d.muted }]}>{group.sessions.length}</Text>
         </Pressable>
+        {group.path && onNew ? <Pressable accessibilityRole="button" accessibilityLabel={`在 ${group.name} 中新建 ${workspaceMode === 'code' ? 'Code' : 'Work'} 对话`} disabled={disabled} onPress={() => { if (!disabled && active.current === owner && owner.active) onNew(group.path); }} style={styles.session}><Text style={{color:d.accentText}}>新建会话</Text></Pressable> : null}
         {!closed ? <View style={[styles.children, { borderLeftColor: d.line }]}>
           {group.sessions.map(session => <Pressable key={session.sessionKey} accessibilityRole="button"
             accessibilityLabel={`打开对话 ${session.title || '无标题对话'}`} disabled={disabled}
             accessibilityState={{ disabled: Boolean(disabled) }} onPress={() => {
-              if (!disabled && active.current === identity) onOpen(session);
+              if (!disabled && active.current === owner && owner.active) onOpen(session);
             }} style={({ pressed }) => [styles.session, pressed && { backgroundColor: d.surface2 }]}>
             <Text numberOfLines={1} style={[styles.sessionTitle, { color: d.text2 }]}>{session.title || '无标题对话'}</Text>
             <DirectorySessionStatus activity={activities.get(session.sessionKey) ?? {status:session.status,includesChildren:false}} title={session.title || '无标题对话'} active={!disabled} reduced={reduced} result={readScope?{scope:readScope,session,active:!disabled}:undefined}/>

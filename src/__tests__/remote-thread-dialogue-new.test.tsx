@@ -1110,7 +1110,7 @@ test('a model choice in a new conversation follows default thinking and copies t
   mockRemote.devices[0].projects = [{ path: 'C:\\fixture', name: 'fixture' }];
   mockListModels.mockResolvedValue(reportedCatalog([id]));
   const created = jest.fn();
-  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
+  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} newProjectPath={originalSession.cwd} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
   await openModels(view);
   await fireEvent(view.getByRole('radio', { name: 'sonnet-5-5-preview' }), 'pressIn');
   await fireEvent.press(view.getByRole('radio', { name: 'sonnet-5-5-preview' })); await closeModels(view);
@@ -1162,7 +1162,7 @@ test('a new thread sends XHigh and copies the choice to the created thread prefe
   useReportedModels();
   mockRemote.devices[0].projects = [{ path: 'C:\\fixture', name: 'fixture' }];
   const created = jest.fn();
-  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
+  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} newProjectPath={originalSession.cwd} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
   await scrubEffort(view, 5);
   expect(mockSavePrefs).toHaveBeenLastCalledWith('paired|pc|new:codex', expect.objectContaining({ effort: 'xhigh' }));
   await fireEvent.press(view.getByLabelText('发送'));
@@ -1690,7 +1690,7 @@ test('duplicate captured send callbacks cannot dispatch twice while image snapsh
 test('successful new task navigates once even if accepted draft cleanup fails', async () => {
   mockRemote.devices[0].projects = [{ path: 'C:\\fixture', name: 'fixture' }];
   mockComposerConsume.mockRejectedValueOnce(new Error('synthetic accepted cleanup failure')); const created = jest.fn();
-  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
+  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} newProjectPath={originalSession.cwd} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
   await fireEvent.press(view.getByLabelText('发送'));
   expect(mockStart).toHaveBeenCalledTimes(1); expect(created).toHaveBeenCalledWith('codex:new');
   expect(view.getByLabelText('给电脑上的 Agent 发消息').props.value).toBe('');
@@ -1699,7 +1699,7 @@ test('successful new task navigates once even if accepted draft cleanup fails', 
 test('new Claude Desktop composers do not look up or replay Claude Code new-task drafts or queue entries', async () => {
   const desktopAgent: AgentProfile = { ...originalAgent, id: 'claude-desktop', name: 'Claude Desktop', tool: 'claude', api: { ...originalAgent.api, source: 'tool' } };
   mockRemote.agents.pc.list = [desktopAgent];
-  await render(<ThreadView visible deviceId="pc" sessionKey={null} agent={desktopAgent} onClose={jest.fn()} onCreated={jest.fn()} />);
+  await render(<ThreadView visible deviceId="pc" sessionKey={null} newProjectPath={originalSession.cwd} agent={desktopAgent} onClose={jest.fn()} onCreated={jest.fn()} />);
   expect(mockComposerRestore.mock.calls.every(([key]) => key.startsWith(`${mockDeliveryScope}|pc|new:claude-desktop:code:`))).toBe(true);
   expect(mockLoadQueued.mock.calls.every(([key]) => String(key).startsWith(`${mockDeliveryScope}|pc|new:claude-desktop:code:`))).toBe(true);
   expect(mockLoadQueued).not.toHaveBeenCalledWith(`${mockDeliveryScope}|pc|new:claude`);
@@ -2102,7 +2102,7 @@ test('the sidebar new action opens a fresh editor without sending, restarting or
   await fireEvent.press(view.getByLabelText('打开会话导航'));
   expect(view.queryByLabelText('侧边栏 Work')).toBeNull();
   await fireEvent.press(view.getByLabelText('新建 Code 对话'));
-  expect(create).toHaveBeenCalledWith('code'); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled();
+  expect(create).toHaveBeenCalledWith('code', originalSession.cwd); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled();
 });
 
 test('a native capacity failure offers the computer action, not an unsupported phone model override', async () => {
@@ -2628,7 +2628,7 @@ test('a new conversation checks its unchanged Key group before starting any task
   mockRemote.devices[0].projects = [{ name: '项目', path: 'C:\\fixture' }];
   mockListModels.mockResolvedValue({ models: ['claude-sonnet-new'] });
   const created = jest.fn();
-  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
+  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} newProjectPath={originalSession.cwd} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
   expect(mockListModels).toHaveBeenLastCalledWith('pc', 'codex', true);
   expect(view.getByLabelText('发送').props.accessibilityState.disabled).toBe(true);
   expect(mockStart).not.toHaveBeenCalled();
@@ -3087,7 +3087,7 @@ test('a queued old send callback after closing cannot dispatch', async () => {
 test('a late new-thread acknowledgement cannot clear or navigate a newly selected conversation', async () => {
   let finish!: (key: string) => void; mockStart.mockReturnValue(new Promise(resolve => { finish = resolve; }));
   mockRemote.devices[0].projects = [{ path: 'C:\\fixture', name: 'fixture' }]; const created = jest.fn();
-  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
+  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} newProjectPath={originalSession.cwd} agent={originalAgent} onClose={jest.fn()} onCreated={created} />);
   await act(async () => { fireEvent.press(view.getByLabelText('发送')); }); expect(mockStart).toHaveBeenCalledTimes(1);
   await view.rerender(viewThread()); await fireEvent.changeText(view.getByLabelText('给电脑上的 Agent 发消息'), '新会话草稿');
   await act(async () => { finish('codex:created-earlier'); });
@@ -3345,7 +3345,7 @@ const newTaskView = (created = jest.fn(), visible = true, agent = originalAgent)
   // These receipt scenarios own the fixture project. The empty-directory
   // scenario below uses ThreadView directly and must not restore a draft.
   if (!mockRemote.devices[0].projects?.length) mockRemote.devices[0].projects = [{ path: originalSession.cwd, name: 'fixture' }];
-  return <ThreadView visible={visible} deviceId="pc" sessionKey={null} agent={agent} onClose={jest.fn()} onCreated={created} />;
+  return <ThreadView visible={visible} deviceId="pc" sessionKey={null} newProjectPath={originalSession.cwd} agent={agent} onClose={jest.fn()} onCreated={created} />;
 };
 const openNewTaskMenu = async (view: Awaited<ReturnType<typeof render>>) => {
   await act(async () => { jest.advanceTimersByTime(REMOTE_STATUS_NOTICE_DELAY_MS); });
@@ -3726,18 +3726,13 @@ test.each([false, true])('conversation title keeps Agent context without repeati
   expect(mockRemote.timelines['pc|codex:original'].session?.cwd).toBe(originalSession.cwd);
 });
 
-test('new conversation selects its project only in the intro and sends the selected cwd', async () => {
-  mockRemote.devices[0].projects = [{ path: 'C:\\Projects\\Studio', name: 'Studio' }, { path: 'C:\\Projects\\Website', name: '网站项目' }];
+test('new conversation retains the exact inherited cwd even when another project is listed first', async () => {
+  mockRemote.devices[0].projects = [{ path: 'C:/Projects/Other', name: 'Other' }, { path: originalSession.cwd, name: 'fixture' }];
   const view = await render(newTaskView());
-  expect(view.getAllByText('Studio')).toHaveLength(1);
-  expect(view.getByText('C:\\Projects\\Studio')).toBeTruthy();
-  await fireEvent.press(view.getByText('Studio'));
-  await fireEvent.press(view.getByText('网站项目'));
-  expect(view.queryByText('Studio')).toBeNull();
-  expect(view.getAllByText('Website')).toHaveLength(1);
-  expect(view.getByText('C:\\Projects\\Website')).toBeTruthy();
+  expect(view.getByText(originalSession.cwd!)).toBeTruthy();
+  expect(view.queryByText('Other')).toBeNull();
   await fireEvent.press(view.getByLabelText('发送'));
-  expect(mockStart).toHaveBeenCalledWith('pc', expect.objectContaining({ tool: 'codex', cwd: 'C:\\Projects\\Website', prompt: '原草稿' }));
+  expect(mockStart).toHaveBeenCalledWith('pc', expect.objectContaining({ tool: 'codex', cwd: originalSession.cwd, prompt: '原草稿' }));
 });
 
 test('changing the applied native source resets to Follow computer without inheriting the CLI default', async () => {
@@ -4309,7 +4304,7 @@ test('slash new action navigates once with the current workspace and rejects the
   await editFeatureComposer(view, '后来输入的草稿'); await act(async () => { choose(); });
   expect(onNew).not.toHaveBeenCalled(); expect(featureComposerText(view)).toBe('后来输入的草稿');
   await editFeatureComposer(view, '/new'); await fireEvent.press(view.getByLabelText('选择新聊天，/new'));
-  expect(onNew).toHaveBeenCalledTimes(1); expect(onNew).toHaveBeenCalledWith('work');
+  expect(onNew).toHaveBeenCalledTimes(1); expect(onNew).toHaveBeenCalledWith('work', originalSession.cwd);
   expect(featureComposerText(view)).toBe(''); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled(); await view.unmount();
 });
 
@@ -4810,7 +4805,7 @@ test('confirmed missing session restores the same project and mode only after pe
   expect(mockCopyMissing).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: `${mockDeliveryScope}|pc|codex:original`,
     targetKey: `${mockDeliveryScope}|pc|new:codex:work:${encodeURIComponent(originalSession.cwd)}`,
     origin: expect.objectContaining({ deviceId: 'pc', agentId: 'codex', cwd: originalSession.cwd, mode: 'work', sessionKey: 'codex:original' }) }));
-  expect(onNew).toHaveBeenCalledWith('work'); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled();
+  expect(onNew).toHaveBeenCalledWith('work', originalSession.cwd); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled();
 });
 test('a connection failure never offers to move the draft to a different session', async () => {
   mockRemote.timelines['pc|codex:original'].error = '电脑离线';
@@ -4835,9 +4830,9 @@ test.each([false, true])('restored Hub draft keeps undo until a later user edit 
   const props = { visible: true, deviceId: 'pc', agent: originalAgent, onClose: jest.fn(), onCreated: jest.fn(), onNew };
   const view = await render(<ThreadView {...props} sessionKey="codex:original" />);
   await fireEvent.press(view.getByLabelText('恢复草稿到新对话'));
-  expect(onNew).toHaveBeenCalledWith('code');
+  expect(onNew).toHaveBeenCalledWith('code', originalSession.cwd);
   mockComposerRestore.mockResolvedValue({ scope: mockDeliveryScope, text: '原草稿', images: [], imageCount: 0, revision: 1, identity: 'restored' });
-  await view.rerender(<ThreadView {...props} sessionKey={null} />);
+  await view.rerender(<ThreadView {...props} sessionKey={null} newProjectPath={originalSession.cwd} />);
   mockComposerSave.mockClear();
   await act(async () => { jest.advanceTimersByTime(1000); });
   expect(mockComposerSave).not.toHaveBeenCalled();
@@ -4867,11 +4862,15 @@ test('approval expands full selectable details without deciding, and resets for 
   expect(view.getByLabelText('查看完整审批详情')).toBeTruthy(); expect(mockRespond).not.toHaveBeenCalled();
 });
 
-test('a new task without a project never restores an unscoped draft or enables sending', async () => {
-  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} agent={originalAgent} onClose={jest.fn()} onCreated={jest.fn()} />);
+test('a new task without a project never chooses the first folder, restores an unscoped draft or enables sending', async () => {
+  mockRemote.devices[0].projects = [{ path: 'C:/Projects/Other', name: 'Other' }];
+  const onClose = jest.fn();
+  const view = await render(<ThreadView visible deviceId="pc" sessionKey={null} agent={originalAgent} onClose={onClose} onCreated={jest.fn()} />);
   expect(mockComposerRestore).not.toHaveBeenCalled(); expect(mockPendingNew).not.toHaveBeenCalled();
   expect(view.getByLabelText('发送').props.accessibilityState.disabled).toBe(true);
   expect(view.getByLabelText('给电脑上的 Agent 发消息').props.value).toBe('');
+  await fireEvent.press(view.getByLabelText('返回项目目录'));
+  expect(onClose).toHaveBeenCalledTimes(1); expect(mockStart).not.toHaveBeenCalled();
 });
 
 test.each(['save', 'copy'] as const)('switching API during missing-draft %s cancels navigation and rolls back only a completed copy', async stage => {

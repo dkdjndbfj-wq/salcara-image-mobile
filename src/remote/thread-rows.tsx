@@ -101,19 +101,19 @@ export function ComposerChip({ icon, label, onPress, danger, disabled }: { icon:
   </MotionPressable>;
 }
 
-export function NewThreadIntro({ agent, cwd, workspaceMode = 'code', onPickProject }: { agent: AgentProfile | null; cwd: string; workspaceMode?: 'code' | 'work'; onPickProject: () => void }) {
+export function NewThreadIntro({ agent, cwd, workspaceMode = 'code', onReturnToProjects }: { agent: AgentProfile | null; cwd: string; workspaceMode?: 'code' | 'work'; onReturnToProjects?: () => void }) {
   const styles = useThreadStyles();
   const dk = useDesk();
   return <View style={styles.intro}>
     <Appear><DeskOrb size={72} /></Appear>
     <Text style={styles.introTitle}>{workspaceMode === 'code' ? '要构建什么？' : '要处理什么工作？'}</Text>
     <Text style={styles.introDetail}>{agent?.name ?? 'Codex'} 会在电脑上已授权的文件夹里工作，进度实时同步到这里。</Text>
-    <Pressable accessibilityRole="button" onPress={onPickProject} style={styles.introProject}>
+    <View style={styles.introProject}>
       <Icon name="archive" size={15} color={dk.text2} />
-      <Text style={styles.introProjectText} numberOfLines={1}>{cwd ? projectName(cwd) : '选择项目文件夹'}</Text>
-      <Icon name="chevronDown" size={13} color={dk.faint} />
-    </Pressable>
+      <Text style={styles.introProjectText} numberOfLines={1}>{cwd ? projectName(cwd) : '当前项目不可用，请返回目录新建项目'}</Text>
+    </View>
     {cwd ? <Text style={styles.introPath} numberOfLines={1}>{cwd}</Text> : null}
+    {!cwd && onReturnToProjects ? <Pressable accessibilityRole="button" accessibilityLabel="返回项目目录" onPress={onReturnToProjects} style={styles.introProject}><Text style={{color:dk.accentText}}>返回项目目录</Text></Pressable> : null}
   </View>;
 }
 
