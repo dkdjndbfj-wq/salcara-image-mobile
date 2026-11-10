@@ -4,7 +4,19 @@
 
 Salcara 不提供模型账号或内置 API Key，不要求使用指定中转站。对话、图片和语音可以分别选择服务商；普通手机功能不需要部署服务器。
 
-[下载 Android 安装包](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.2/salcara-image-android-v1.8.2.apk) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [远程编程教程](docs/REMOTE-PROGRAMMING.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-image-mobile/issues)
+[下载 Android 安装包](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.3/salcara-image-android-v1.8.3.apk) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [远程编程教程](docs/REMOTE-PROGRAMMING.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-image-mobile/issues)
+
+## 界面预览
+
+手机上对话、继续编程任务与创作图片。
+
+![Salcara AI 1.8.3 手机界面，依次展示对话、远程编程和图片创作](docs/images/mobile-overview.webp)
+
+平板横屏并排呈现项目导航与编程会话。
+
+![Salcara AI 1.8.3 平板横屏编程会话与项目导航](docs/images/mobile-tablet.webp)
+
+以上使用 1.8.3 实际组件的 Web 预览和演示数据；实体 Android 设备上的字体、系统栏与键盘布局可能有所不同。图中山水插画为演示素材，不代表模型输出质量。
 
 ## 可以做什么
 
@@ -21,8 +33,8 @@ Salcara 不提供模型账号或内置 API Key，不要求使用指定中转站�
 
 当前正式提供 **Android APK**，支持 ARM64 与 ARMv7。下载文件是：
 
-- salcara-image-android-v1.8.2.apk：手机安装包。
-- [对应的 SHA-256 校验文件](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.2/salcara-image-android-v1.8.2.apk.sha256)：用于核对下载完整性。
+- [salcara-image-android-v1.8.3.apk](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.3/salcara-image-android-v1.8.3.apk)：手机安装包。
+- [对应的 SHA-256 校验文件](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.3/salcara-image-android-v1.8.3.apk.sha256)：用于核对下载完整性。
 
 在 Android 手机打开安装包，只为实际使用的下载来源授权“安装未知应用”，按系统提示安装。已经安装正式版时直接覆盖更新，不要先卸载；应用数据会继续沿用。不要用测试包或不同签名的包覆盖正式版。
 
