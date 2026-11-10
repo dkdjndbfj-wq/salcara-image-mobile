@@ -1,15 +1,15 @@
 {
-  "version": "1.8.3",
-  "tagName": "v1.8.3",
-  "title": "Salcara Android v1.8.3",
-  "notes": "# Salcara Android 1.8.3\r\n\r\n本版将手机和平板的远程工作区、电脑 Agent 管理和 Hub 用户授权配套交付。建议同时使用 **Salcara Desktop 1.6.5** 与 **Salcara Hub 0.5.3**。\r\n\r\n- 重做亮色会话界面、紧凑输入框和弹窗；Code 与 Work 按电脑、Agent 和项目分别组织，切换电脑时同步切换 API、草稿及会话。\r\n- 支持独立网页标签、代码预览、终端、审阅、临时工具和主对话中的产物预览；Agent 打开的网页保留在后台，用户主动打开时进入对应标签。\r\n- 完善排队消息编辑、最新输入恢复、图片重试、已完成消息提醒、模型能力与权限约束，保留正在编辑的新草稿。\r\n- 接入 DeepSeek Harness 与 Hermes 的能力展示；扫码配对后复用绑定，补齐断线重连、历史恢复、通知状态和设备/API 管理。\r\n- 补齐系统权限按需申请、后台监听恢复和被 Hub 暂停用户后的配对保留。\r\n\r\n正式 Android 包名保持 `top.salcara.image`，版本为 1.8.3（versionCode 24）。沿用既有正式签名；发布流程检查与 1.8.2 的签名一致及版本递增，不使用独立测试包替代。\r\n\r\n## 使用边界\r\n\r\n功能随电脑上 Agent 的实际能力开放。Hermes 既有会话固定启动时的 API/模型，换来源后通常需要新会话；DeepSeek/Hermes 的 Bridge 历史视图目前最多最近 400 个事件。Claude 的 Bridge 重启后不会自动接管原进程会话。不能把本版描述为与 Codex 所有能力完全相同。\r\n\r\n本轮包含源码自动回归和浏览器/原生构建检查。实体手机、公网、真实收费模型、后台推送送达与 iOS 签名分发不属于本次已完成的端到端验收；后台恢复仍受系统和厂商省电规则限制。GitHub 发布不等于已部署用户服务器。\r\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.3",
-  "publishedAt": "2026-11-08T13:45:47Z",
+  "version": "1.8.4",
+  "tagName": "v1.8.4",
+  "title": "Salcara Android v1.8.4",
+  "notes": "# Salcara Android 1.8.4\n\n本版完善手机端连接电脑和新建会话流程，配套 **Salcara Desktop 1.6.6** 与 **Salcara Hub 0.5.4**。\n\n- 全局“新会话”先选 Agent，再浏览电脑的本地磁盘和文件夹；选定父位置并命名新文件夹后进入编辑器，也可以选择“不关联文件夹”。新页面沿用手机编程主页的 Agent 卡片、浅灰画布和分组样式。\n- 项目内“新建会话”直接继承当前 Agent、Code/Work 和精确项目路径。浏览目录不会启动任务，首次发送消息才创建会话；取消或切换电脑后，迟到的目录结果不会打开错误的项目。\n- 电脑新建目录遇到同名、权限不足或结果未确认时明确提示，不覆盖已有目录、不自动重复创建。新建目录的授权仅限该目录，重启后仍会核对目录身份与授权状态。\n- 将手机配对与模型 API 凭证分开；完善带路径的 Hub 地址发现和签名身份校验。站点来源权限或电脑身份错误不再一律当作手机配对失效，避免误删有效连接与待恢复任务。\n- 直连与 Hub 中继使用一致的新会话语义，保留无文件夹会话的明确标记、草稿归属和发送回执；修复直连新会话页面重复导航栏。\n\n正式包名仍为 `top.salcara.image`，版本 1.8.4（Android versionCode 25；iOS 源码 buildNumber 25）。正式 Android 构建沿用现有发布签名，并核验与 1.8.3 的覆盖升级兼容性。已安装正式版时无需先卸载。\n\n## 使用边界\n\n全盘浏览和无文件夹会话需要配套电脑端及相应 Hub 能力；旧版缺少能力时会给出更新提示。只浏览电脑上实际可用的本地磁盘，目录访问受电脑系统权限限制，不会自动提权；网络盘不作为本地磁盘使用。\n\n各 Agent 的发送、模型、历史和工具能力依其实际支持情况开放。Android 后台恢复和推送仍受系统、省电策略及站点配置影响，不能保证进程被强制停止后即时送达。本版不提供新的正式 iPhone 安装渠道。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.4",
+  "publishedAt": "2026-11-10T03:10:51Z",
   "apk": {
-    "name": "salcara-image-android-v1.8.3.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.3/salcara-image-android-v1.8.3.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/723924494",
-    "size": 117227282,
-    "digest": "sha256:52ad02df9a45f3e66aa1d626c9be1a0557acf924ec11a948ec6b7f3507328465"
+    "name": "salcara-image-android-v1.8.4.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.4/salcara-image-android-v1.8.4.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/729908995",
+    "size": 117277758,
+    "digest": "sha256:15557d56cde7eebe4ba1a4752a7d4f4ad648fa4fa089ecc464600c2848acd905"
   }
 }
