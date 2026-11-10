@@ -63,17 +63,17 @@ test('reconnecting the same pairing restores the selected conversation and unsen
   expect(mockConversation.text).toBe('retained draft');await view.unmount();
 });
 test('a lost start receipt survives remount and blocks a second operation ID for the same project draft',async()=>{
-  let view=await render(<DirectExperience/>);await fireEvent.press(await view.findByRole('button',{name:'新建 Code 对话'}));
+  let view=await render(<DirectExperience/>);await fireEvent.press(await view.findByRole('button',{name:'在 project 中新建 Code 对话'}));
   await waitFor(()=>expect(mockNewComposer).toBeDefined());
   await act(async()=>{await mockNewComposer.onSend('create original task',{owner:startOwner,attachments:['att_00112233445566778899aabbccddeeff']});});
   await view.unmount();mockNewComposer=undefined;
-  view=await render(<DirectExperience/>);await fireEvent.press(await view.findByRole('button',{name:'新建 Code 对话'}));await waitFor(()=>expect(mockNewComposer).toBeDefined());
+  view=await render(<DirectExperience/>);await fireEvent.press(await view.findByRole('button',{name:'在 project 中新建 Code 对话'}));await waitFor(()=>expect(mockNewComposer).toBeDefined());
   await act(async()=>{await mockNewComposer.onSend('create original task',{owner:startOwner,attachments:['att_00112233445566778899aabbccddeeff']});});
   expect(mockRequest.mock.calls.filter(([command])=>command.type==='session.start')).toHaveLength(1);
   expect(mockNewComposer.uncertain).toBe(true);await view.unmount();
 });
 test('only the exact original start echo unlocks creation and consumes its original draft revision',async()=>{
-  const view=await render(<DirectExperience/>);await fireEvent.press(await view.findByRole('button',{name:'新建 Code 对话'}));
+  const view=await render(<DirectExperience/>);await fireEvent.press(await view.findByRole('button',{name:'在 project 中新建 Code 对话'}));
   await waitFor(()=>expect(mockNewComposer.uncertain).toBe(false));
   const draftReceipt={revision:3,identity:'12345678-1234-4123-8123-123456789abc'};
   await act(async()=>{await mockNewComposer.onSend('original prompt',{owner:startOwner,draftReceipt});});

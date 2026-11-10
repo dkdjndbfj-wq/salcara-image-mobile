@@ -76,7 +76,7 @@ beforeEach(() => {
     { sessionKey: 'codex:cli', tool: 'codex', client: 'Codex CLI', title: '终端里开的对话', cwd: 'C:\\code\\api', updatedAt: 2, status: 'idle', controllable: true, controlSurface: 'cli' },
     { sessionKey: 'claude:one', tool: 'claude', client: 'Claude Code', title: 'Claude 的对话', cwd: 'C:\\code\\api', updatedAt: 1, status: 'idle', controllable: true, controlSurface: 'cli' },
   ];
-  sessions.push({ sessionKey: 'codex:work', tool: 'codex', client: 'Codex CLI', title: '整理本周工作计划', cwd: '', updatedAt: 4, status: 'idle', controllable: true, controlSurface: 'cli', workspaceMode: 'work' });
+  sessions.push({ sessionKey: 'codex:work', tool: 'codex', client: 'Codex CLI', title: '整理本周工作计划', cwd: 'C:\\work\\plans', updatedAt: 4, status: 'idle', controllable: true, controlSurface: 'cli', workspaceMode: 'work' });
   mockRemote = { phase: 'ready', serviceId: null, connectionId: 'paired', selectedHubUrl: 'https://station.example/salcara-hub/v1',
     connections: [{ id: 'paired', deviceId: 'pc-1', deviceName: '工作电脑', hubUrl: 'https://station.example/salcara-hub/v1', pairedAt: 1 }],
     probes: {}, connection: 'open', devices: [device], devicesLoaded: true,
@@ -90,7 +90,8 @@ test('a homepage Agent opens its current computer directory directly, grouped by
   await fireEvent.press(view.getByLabelText('打开 Codex'));
   expect(view.queryByText('准备连接')).toBeNull();
   expect(view.queryByText('连接')).toBeNull();
-  expect(view.getByLabelText('新建 Code 对话')).toBeTruthy();
+  expect(view.getByLabelText('在 shop 中新建 Code 对话')).toBeTruthy();
+  expect(view.getByLabelText('在 api 中新建 Code 对话')).toBeTruthy();
   // Codex App and CLI threads share one list, like the Codex sidebar; Claude sessions stay out.
   expect(view.getByText('桌面上开的对话')).toBeTruthy();
   expect(view.getByText('终端里开的对话')).toBeTruthy();
@@ -117,14 +118,15 @@ test('a missing Agent is unavailable on the homepage and cannot open a directory
   const unavailable = view.getByLabelText('打开 Codex');
   expect(unavailable.props.accessibilityState.disabled).toBe(true);
   await fireEvent.press(unavailable);
-  expect(view.queryByLabelText('新建 Code 对话')).toBeNull();
+  expect(view.queryByLabelText('在 shop 中新建 Code 对话')).toBeNull();
 });
 
 test('new thread opens the composer for the connected agent', async () => {
   const view = await render(<RemoteScreen visible />);
   await fireEvent.press(view.getByLabelText('打开 Codex'));
-  await fireEvent.press(view.getByLabelText('新建 Code 对话'));
-  expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: null, deviceId: 'pc-1' });
+  await fireEvent.press(view.getByLabelText('在 shop 中新建 Code 对话'));
+  expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: null, deviceId: 'pc-1', newProjectPath: 'C:\\code\\shop', workspaceMode: 'code' });
+  expect(mockThreadProps.agent?.id).toBe('codex');
 });
 
 test('the homepage API management changes an Agent API using only its opaque handle', async () => {
@@ -146,7 +148,7 @@ test('the Work homepage opens only that Agent Work sessions without a second con
   expect(view.queryByText('终端里开的对话')).toBeNull();
   expect(view.queryByText('Claude 的对话')).toBeNull();
   expect(view.queryByText('准备连接')).toBeNull();
-  expect(view.getByLabelText('新建 Work 对话')).toBeTruthy();
+  expect(view.getByLabelText('在 plans 中新建 Work 对话')).toBeTruthy();
   await fireEvent.press(view.getByText('整理本周工作计划'));
   expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'codex:work', deviceId: 'pc-1' });
   expect(mockThreadProps.agent?.id).toBe('codex');

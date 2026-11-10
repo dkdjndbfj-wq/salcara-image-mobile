@@ -1398,7 +1398,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
       if (entry.action === 'model') openModels();
       else if (entry.action === 'reasoning') setPicker('effort');
       else if (entry.action === 'permissions') setPicker(tool === 'codex' ? 'permission' : 'mode');
-      else if (entry.action === 'new') onNew?.(workspaceMode);
+      else if (entry.action === 'new') onNew?.(workspaceMode, session?.projectless || projectless ? '' : session?.cwd || cwd, ...(session?.projectless || projectless ? [true as const] : []));
       else if (entry.action === 'side') { Keyboard.dismiss(); setSlashSideChat({ scope: contextScope, nonce: ++annotationEditSequence.current }); setSidebarOpen(true); }
       else if (entry.action === 'fork' || entry.action === 'archive' || entry.action === 'review') setSlashSessionCommand({ scope: contextScope, command: entry.action });
       else if (entry.action === 'init') composerInput.current?.focus();

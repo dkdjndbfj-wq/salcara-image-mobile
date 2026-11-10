@@ -17,7 +17,7 @@ export function AgentGrid({ items, onSelect }: { items: AgentGridItem[]; onSelec
   const size = width ? Math.min(132, (width - 8 * (columns - 1)) / columns) : 108;
   return <View style={styles.grid} onLayout={event => setWidth(event.nativeEvent.layout.width)}>{items.map(item =>
     <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={item.accessibilityLabel}
-      accessibilityState={{ disabled: Boolean(item.disabled) }} disabled={item.disabled} onPress={() => onSelect(item.id)}
+      accessibilityState={{ disabled: Boolean(item.disabled) }} disabled={item.disabled} onPress={() => { if (!item.disabled) onSelect(item.id); }}
       style={({ pressed }) => [styles.card, { width: size }, item.disabled && styles.disabled, pressed && styles.pressed]}>
       <ToolBadge tool={item.tool} client={item.client} size={24} />
       <Text style={styles.name} numberOfLines={2}>{item.name}</Text>

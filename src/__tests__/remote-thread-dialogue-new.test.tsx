@@ -764,11 +764,11 @@ test.each([['hermes', 'Hermes Agent', true], ['deepseek-harness', 'DeepSeek Harn
   mockRemote.timelines = { [`pc|${session.sessionKey}`]: { items: [], session, loading: false } };
   mockRemote.devices[0].projects = [{ path: 'C:\\fixture', name: 'fixture' }];
   mockListModels.mockResolvedValue({ models: ['model-a', 'model-b'] }); mockStart.mockResolvedValue(`${id}:new`);
-  const view = await render(<ThreadView visible deviceId="pc" sessionKey={creating ? null : session.sessionKey} agent={profile} onClose={jest.fn()} onCreated={jest.fn()} />);
+  const view = await render(<ThreadView visible deviceId="pc" sessionKey={creating ? null : session.sessionKey} newProjectPath={creating ? 'C:\\fixture' : undefined} agent={profile} onClose={jest.fn()} onCreated={jest.fn()} />);
   await openModels(view); await fireEvent.press(view.getByRole('radio', { name: 'model-b' })); await closeModels(view);
   expect(view.getByLabelText('模型：model-b')).toBeEnabled(); expect(view.queryByTestId('remote-effort-chip')).toBeNull();
   await fireEvent.press(view.getByLabelText('发送'));
-  if (creating) expect(mockStart).toHaveBeenCalledWith('pc', expect.objectContaining({ tool: id, model: 'model-b', effort: undefined }));
+  if (creating) expect(mockStart).toHaveBeenCalledWith('pc', expect.objectContaining({ tool: id, cwd: 'C:\\fixture', model: 'model-b', effort: undefined }));
   else expect(mockSend).toHaveBeenCalledWith('pc', session.sessionKey, '原草稿', expect.objectContaining({ model: 'model-b', effort: undefined }));
   await view.unmount();
 });
@@ -4295,8 +4295,10 @@ test.each([['/model', '选择模型，/model'], ['/init', '选择初始化，/in
   await view.unmount();
 });
 
-test('slash new action navigates once with the current workspace and rejects the old callback', async () => {
+test.each([false, true])('slash new action preserves the current workspace (projectless: %s) and rejects the old callback', async projectless => {
   enableFeatures(); const onNew = jest.fn();
+  const session = projectless ? { ...originalSession, cwd: '', projectless: true as const } : originalSession;
+  mockRemote.sessions.pc.list = [session]; setItems([], session);
   const props = { visible: true, deviceId: 'pc', sessionKey: 'codex:original', agent: originalAgent, workspaceMode: 'work' as const, onClose: jest.fn(), onCreated: jest.fn(), onNew };
   const view = await render(<ThreadView {...props} />);
   await editFeatureComposer(view, '/new');
@@ -4304,7 +4306,8 @@ test('slash new action navigates once with the current workspace and rejects the
   await editFeatureComposer(view, '后来输入的草稿'); await act(async () => { choose(); });
   expect(onNew).not.toHaveBeenCalled(); expect(featureComposerText(view)).toBe('后来输入的草稿');
   await editFeatureComposer(view, '/new'); await fireEvent.press(view.getByLabelText('选择新聊天，/new'));
-  expect(onNew).toHaveBeenCalledTimes(1); expect(onNew).toHaveBeenCalledWith('work', originalSession.cwd);
+  expect(onNew).toHaveBeenCalledTimes(1);
+  expect(onNew.mock.calls[0]).toEqual(projectless ? ['work', '', true] : ['work', originalSession.cwd]);
   expect(featureComposerText(view)).toBe(''); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled(); await view.unmount();
 });
 

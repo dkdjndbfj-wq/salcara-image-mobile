@@ -1,7 +1,7 @@
 import { openStream, parseFeatureChange, sessionEventsPage, setHubFetch, type FetchLike } from '../remote/client';
 import { AgentFeatureCache } from '../remote/agent-feature-cache';
 import { agentFeaturesGeneration, bootRemote, cachedAgentFeatures, connectStation, getRemoteState, listAgentFeatures,
-  loadAgentProfiles, onRemoteEvent, openSession, pairRemoteQr, parseRemoteQr, resetRemoteForTests, sessionCursor, syncSessionEvents, timelineKey } from '../remote/store';
+  loadAgentProfiles, onRemoteEvent, openSession, pairRemoteQr, parseRemoteQr, refreshDevices, resetRemoteForTests, sessionCursor, syncSessionEvents, timelineKey } from '../remote/store';
 
 const mockSettings = new Map<string, string>(), mockSecrets = new Map<string, string>();
 let mockUuid = 0;
@@ -178,8 +178,10 @@ test('connection changes fence late snapshots and allow lower seq in a new conne
   eventHandler = () => page({ featureChanges: [change(100)] }); await syncSessionEvents('pc', sessionKey);
   const pending = deferred<unknown>(), started = deferred<void>(); eventHandler = () => (started.resolve(), pending.promise);
   const old = syncSessionEvents('pc', sessionKey); await started.promise;
+  const connectionId = getRemoteState().connectionId;
   await connectStation(origin);
-  await pairRemoteQr(parseRemoteQr(JSON.stringify({ type: 'salcara-remote-pair', version: 1, hubUrl, deviceId: 'pc', deviceName: 'Fixture', ticket: 'c'.repeat(64), expiresAt: Date.now() + 120000 })));
+  expect(getRemoteState()).toMatchObject({ phase: 'ready', connectionId });
+  await refreshDevices();
   await loadAgentProfiles('pc'); const current = agentFeaturesGeneration('pc', 'codex');
   pending.resolve(page({ featureChanges: [change(1000)] })); await old;
   expect(agentFeaturesGeneration('pc', 'codex')).toBe(current);

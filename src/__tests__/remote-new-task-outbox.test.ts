@@ -1,7 +1,7 @@
 import { AppState } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { setHubFetch, type FetchLike } from '../remote/client';
-import { acknowledgeNewSession, bootRemote, cachedAgentFeatures, connectStation, getPendingNewSession, getRemoteState, listAgentFeatures, loadAgentProfiles, newSessionReceiptKey, pairRemoteQr, parseRemoteQr, remoteDeliveryScope, resetRemoteForTests, retryNewSession, sendToSession, startSession, timelineKey } from '../remote/store';
+import { acknowledgeNewSession, bootRemote, cachedAgentFeatures, connectStation, getPendingNewSession, getRemoteState, listAgentFeatures, loadAgentProfiles, newSessionReceiptKey, pairRemoteQr, parseRemoteQr, refreshDevices, remoteDeliveryScope, resetRemoteForTests, retryNewSession, sendToSession, startSession, timelineKey } from '../remote/store';
 import { resetDeliveryForTests } from '../remote/delivery';
 import { decodeNewTask, encodeNewTask } from '../remote/new-task';
 import { diffSelectionReference, parseDiffForAnnotations } from '../remote/diff-annotations';
@@ -38,6 +38,12 @@ function installTransport(){setHubFetch((async(endpoint,init)=>{
   throw new Error('unexpected synthetic route');
 }) as FetchLike);}
 async function pair(){await bootRemote([]);await connectStation(origin);await pairRemoteQr(parseRemoteQr(JSON.stringify({type:'salcara-remote-pair',version:1,hubUrl,deviceId:'pc',deviceName:'Fixture',ticket:'b'.repeat(64),expiresAt:Date.now()+120_000})));await loadAgentProfiles('pc');}
+async function restoreConnection() {
+  await bootRemote([]);
+  expect(getRemoteState()).toMatchObject({ phase: 'ready', selectedHubUrl: hubUrl });
+  expect(getRemoteState().connectionId).toBeTruthy();
+  await refreshDevices(); await loadAgentProfiles('pc');
+}
 beforeEach(()=>{
   resetRemoteForTests();mockSettings.clear();mockSecrets.clear();mockUuid=0;mockFailReceipt=false;mockFailCleanup=false;
   writes=[];idempotency=true;diffCapability=false;projectlessCapability=false;handler=body=>({ok:true,result:body.command.type==='session.start'?{sessionKey:'codex:created'}:{}});
@@ -142,7 +148,7 @@ test('lost acceptance survives restart; only explicit original UUID retry can re
   await pair();handler=()=>{throw new Error('synthetic lost acknowledgement');};
   await expect(startSession('pc',baseInput)).rejects.toMatchObject({name:'DeliveryPendingError',retryable:true});
   const original=writes[0], before=await getPendingNewSession('pc','codex');expect(before?.composerDraft).toEqual(baseInput.composerDraft);
-  resetRemoteForTests();resetDeliveryForTests();await pair();
+  resetRemoteForTests();resetDeliveryForTests();await restoreConnection();
   await expect(startSession('pc',{...baseInput,prompt:'a different task'})).rejects.toMatchObject({name:'DeliveryPendingError'});
   await expect(retryNewSession('pc','codex',false,'00000000-1111-4222-8333-444444444444')).rejects.toMatchObject({name:'DeliveryPendingError'});
   handler=()=>({ok:true,result:{sessionKey:'codex:created'}});
@@ -182,7 +188,7 @@ test.each(['background','missing-image','old-hub','foreign-result','corrupt-rece
     mockSettings.set('remote_pending_delivery_v1','{future:corrupt');resetDeliveryForTests();
     await expect(startSession('pc',baseInput)).rejects.toThrow('无法读取');expect(writes).toEqual([]);return;
   }
-  if(reason==='old-hub'){idempotency=false;resetRemoteForTests();await pair();}
+  if(reason==='old-hub'){idempotency=false;resetRemoteForTests();await restoreConnection();}
   handler=()=>reason==='foreign-result'?{ok:true,result:{sessionKey:'claude:foreign'}}:(()=>{throw new Error('synthetic interruption');})();
   await expect(startSession('pc',{...baseInput,...(reason==='missing-image'?{images:[image]}:{})})).rejects.toMatchObject({name:'DeliveryPendingError'});
   const pending=await getPendingNewSession('pc','codex');const priorWrites=writes.length;
@@ -264,7 +270,7 @@ test('new task sends feature selections as native fields and freezes skills befo
     role:'user',text:baseInput.prompt,skills:[{name:'review',path:'C:/fixture/SKILL.md'}],clientId:writes.find(row=>row.command.type==='session.start')!.requestId,
   });
   const accepted = await getPendingNewSession('pc','codex');
-  resetRemoteForTests(); resetDeliveryForTests(); await pair();
+  resetRemoteForTests(); resetDeliveryForTests(); await restoreConnection();
   expect(await retryNewSession('pc','codex',false,accepted!.requestId)).toBe('codex:created');
   expect(writes.filter(row=>row.command.type==='session.start')).toHaveLength(1);
   expect(getRemoteState().timelines[timelineKey('pc','codex:created')].items[0]).toMatchObject({

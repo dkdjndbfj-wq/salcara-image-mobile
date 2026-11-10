@@ -86,12 +86,13 @@ test('Claude Desktop Code also requires a confirmed API and cannot create native
   await view.unmount();
 });
 
-test('new Claude tasks open API selection first, and a later API revocation preserves the new draft', async () => {
+test('new Claude tasks require API confirmation first, and a later API revocation preserves the new draft', async () => {
   currentApi = { ...readyApi, source: 'tool' };
   const view = await render(<DirectExperience/>);
-  await fireEvent.press(await view.findByRole('button', {name:'新建 Code 对话'}));
-  expect(mockOpenApi).toHaveBeenCalledTimes(1); expect(view.queryByText('新建直连会话')).toBeNull();
-  await updateApi(readyApi); await fireEvent.press(view.getByRole('button', {name:'新建 Code 对话'}));
+  await fireEvent.press(await view.findByRole('button', {name:'选择并确认 Claude API'}));
+  expect(mockOpenApi).toHaveBeenCalledTimes(1); expect(mockComposer).toBeUndefined(); expect(writes()).toHaveLength(0);
+  expect(view.queryByRole('button', {name:'在 project 中新建 Code 对话'})).toBeNull();
+  await updateApi(readyApi); await fireEvent.press(view.getByRole('button', {name:'在 project 中新建 Code 对话'}));
   await waitFor(() => expect(mockComposer.uncertain).toBe(false));
   expect(mockComposer.canSend).toBe(true);
   await fireEvent.changeText(view.getByLabelText('新任务草稿'), 'new task draft');
@@ -105,7 +106,7 @@ test('new Claude tasks open API selection first, and a later API revocation pres
 });
 
 test('API revocation while persisting a new task cannot dispatch the queued callback', async () => {
-  const view = await render(<DirectExperience/>); await fireEvent.press(await view.findByRole('button', {name:'新建 Code 对话'}));
+  const view = await render(<DirectExperience/>); await fireEvent.press(await view.findByRole('button', {name:'在 project 中新建 Code 对话'}));
   await waitFor(() => expect(mockComposer.uncertain).toBe(false));
   await fireEvent.changeText(view.getByLabelText('新任务草稿'), 'still unsent');
   let release!: () => void, entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });

@@ -114,9 +114,12 @@ test('feature change snapshots accept new additive metadata', async () => {
   expect(page.featureChanges).toEqual([expect.objectContaining({ deviceId: 'd1', seq: 1 })]);
 });
 
-test('derives the hub address from the relay origin', () => {
+test('derives the first hub candidate from a public HTTPS relay address', () => {
   expect(hubUrlFor('https://api.relay.top/v1')).toBe('https://api.relay.top/salcara-hub/v1');
-  expect(hubUrlFor('http://10.0.0.2:3000/openai/v1/')).toBe('http://10.0.0.2:3000/salcara-hub/v1');
+  expect(hubUrlFor('https://api.relay.top/openai/v1/')).toBe('https://api.relay.top/openai/salcara-hub/v1');
+  expect(hubUrlFor('http://10.0.0.2:3000/openai/v1/')).toBe(null);
+  expect(hubUrlFor('https://10.0.0.2:3000/openai/v1/')).toBe(null);
+  expect(hubUrlFor('http://api.relay.top/v1')).toBe(null);
   expect(hubUrlFor('not a url')).toBe(null);
 });
 

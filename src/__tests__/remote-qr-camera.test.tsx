@@ -25,6 +25,7 @@ jest.mock('expo-camera', () => ({
 jest.mock('../state/AppContext', () => ({ useApp: () => ({ providers: [] }) }));
 jest.mock('../remote/ThreadView', () => ({ ThreadView: () => null }));
 jest.mock('../remote/DirectExperience', () => ({ DirectExperience: () => null }));
+jest.mock('../remote/NewConversationFlow', () => ({ NewConversationFlow: () => null }));
 jest.mock('../remote/store', () => ({ parseScannedRemoteQr: (...args: unknown[]) => mockParse(...args), pairScannedRemoteQr: (...args: unknown[]) => mockPair(...args) }));
 jest.mock('../remote/direct-pairing', () => ({ getDirectConnectionState: () => mockDirectState, subscribeDirectConnection: (listener: () => void) => { mockDirectStateListeners.add(listener); return () => mockDirectStateListeners.delete(listener); }, isDirectPairQr: (raw: string) => mockIsDirect(raw), parseDirectPairQr: (...args: unknown[]) => mockParseDirect(...args), pairDirectQr: (...args: unknown[]) => mockPairDirect(...args) }));
 jest.mock('../components/ui', () => {

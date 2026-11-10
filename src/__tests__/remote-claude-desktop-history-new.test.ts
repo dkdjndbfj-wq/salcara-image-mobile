@@ -156,15 +156,16 @@ test.each(['open', 'earlier'])('a late %s response cannot restore an account cle
   expect(getRemoteState().timelines[timelineKey('pc', key)]).toBeUndefined();
 });
 
-test.each(['open', 'earlier'])('readonly %s validates tool, client and scope before merging', async operation => {
-  for (const invalid of [{ tool: 'codex' }, { client: 'Claude Code' }, { sessionScope: 'desktop-cowork' }]) {
-    await pair(); handler = defaultHandler; await loadClaudeDesktopHistory('pc', 'desktop-chat'); await openSession('pc', key);
-    handler = command => command.type === 'session.open' ? { ok: true, result: { session: { ...row, ...invalid }, historyIdentity: identity, events: [
-      { type: 'message', deviceId: 'pc', sessionKey: key, tool: 'claude', ts: 1, id: 'foreign', role: 'assistant', text: 'Wrong client', final: true },
-    ] } } : defaultHandler(command);
-    await expect(operation === 'open' ? openSession('pc', key) : loadEarlierHistory('pc', key)).rejects.toThrow('身份不一致');
-    expect(getRemoteState().timelines[timelineKey('pc', key)].items.some(item => item.id === 'foreign')).toBe(false);
-  }
+test.each([
+  ['open', { tool: 'codex' }], ['open', { client: 'Claude Code' }], ['open', { sessionScope: 'desktop-cowork' }],
+  ['earlier', { tool: 'codex' }], ['earlier', { client: 'Claude Code' }], ['earlier', { sessionScope: 'desktop-cowork' }],
+] as const)('readonly %s validates tool, client and scope before merging (%p)', async (operation, invalid) => {
+  await pair(); await loadClaudeDesktopHistory('pc', 'desktop-chat'); await openSession('pc', key);
+  handler = command => command.type === 'session.open' ? { ok: true, result: { session: { ...row, ...invalid }, historyIdentity: identity, events: [
+    { type: 'message', deviceId: 'pc', sessionKey: key, tool: 'claude', ts: 1, id: 'foreign', role: 'assistant', text: 'Wrong client', final: true },
+  ] } } : defaultHandler(command);
+  await expect(operation === 'open' ? openSession('pc', key) : loadEarlierHistory('pc', key)).rejects.toThrow('身份不一致');
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items.some(item => item.id === 'foreign')).toBe(false);
 });
 
 test.each(['cli', 'wrong-scope', 'controllable', 'foreign-identity'])('malformed native history is rejected (%s)', async fault => {

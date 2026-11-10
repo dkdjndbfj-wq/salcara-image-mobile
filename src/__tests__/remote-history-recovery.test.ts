@@ -537,7 +537,12 @@ test.each(['app_read_capacity', undefined])('event read capacity (%s) preserves 
   expect(getRemoteState().connection).toBe('open'); expect(commands).toEqual(['session.open']);
 });
 
-test.each([0, 401, 403, 503])('event read status %s remains an error and a later capacity rejection cannot claim recovery', async status => {
+test.each([
+  { status: 0, connectionProblem: 'network', connectionError: '连不上中转站或电脑，请检查网络后重试；已保存的配对保留' },
+  { status: 401, connectionProblem: 'pairing', connectionError: '手机配对已失效，请重新扫码连接电脑；聊天记录保留' },
+  { status: 403, connectionProblem: 'pairing', connectionError: '手机配对已失效，请重新扫码连接电脑；聊天记录保留' },
+  { status: 503, connectionProblem: 'unavailable', connectionError: '远程服务暂不可用，请稍后重试；已保存的配对和 API 保留' },
+])('event read status $status remains an error and a later capacity rejection cannot claim recovery', async ({ status, connectionProblem, connectionError }) => {
   let failure = new HubError('unavailable fixture', status);
   setHubFetch(transport((url, command) => {
     if (command) return { ok: true, result: { session, events: [event('snapshot', 10)] } };
@@ -546,10 +551,10 @@ test.each([0, 401, 403, 503])('event read status %s remains an error and a later
   }));
   await pair(); await openSession('pc', key);
   await expect(syncSessionEvents('pc', key)).rejects.toBe(failure);
-  expect(getRemoteState().connection).toBe('error'); expect(getRemoteState().connectionError).toBe('unavailable fixture');
+  expect(getRemoteState()).toMatchObject({ connection: 'error', connectionProblem, connectionError });
   failure = new HubError('read capacity fixture', 429, 'app_read_capacity');
   await expect(syncSessionEvents('pc', key)).rejects.toBe(failure);
-  expect(getRemoteState().connection).toBe('error'); expect(getRemoteState().connectionError).toBe('unavailable fixture');
+  expect(getRemoteState()).toMatchObject({ connection: 'error', connectionProblem, connectionError });
   expect(commands).toEqual(['session.open']);
 });
 
