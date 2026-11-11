@@ -4,7 +4,7 @@
 
 Salcara 不提供模型账号或内置 API Key，不要求使用指定中转站。对话、图片和语音可以分别选择服务商；普通手机功能不需要部署服务器。
 
-[下载 Android 安装包](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.4/salcara-image-android-v1.8.4.apk) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [远程编程教程](docs/REMOTE-PROGRAMMING.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-image-mobile/issues)
+[下载 Android 安装包](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.5/salcara-image-android-v1.8.5.apk) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [远程编程教程](docs/REMOTE-PROGRAMMING.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-image-mobile/issues)
 
 ## 界面预览
 
@@ -33,8 +33,8 @@ Salcara 不提供模型账号或内置 API Key，不要求使用指定中转站�
 
 当前正式提供 **Android APK**，支持 ARM64 与 ARMv7。下载文件是：
 
-- [salcara-image-android-v1.8.4.apk](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.4/salcara-image-android-v1.8.4.apk)：手机安装包。
-- [对应的 SHA-256 校验文件](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.4/salcara-image-android-v1.8.4.apk.sha256)：用于核对下载完整性。
+- [salcara-image-android-v1.8.5.apk](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.5/salcara-image-android-v1.8.5.apk)：手机安装包。
+- [对应的 SHA-256 校验文件](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.5/salcara-image-android-v1.8.5.apk.sha256)：用于核对下载完整性。
 
 在 Android 手机打开安装包，只为实际使用的下载来源授权“安装未知应用”，按系统提示安装。已经安装正式版时直接覆盖更新，不要先卸载；应用数据会继续沿用。不要用测试包或不同签名的包覆盖正式版。
 
@@ -67,7 +67,7 @@ GitHub 的 Source code 是源码，不是安装包。目前**没有面向普通�
 
 浏览目录和打开编辑器不会启动任务；确认创建后才提交目录操作，首次发送消息才创建会话。同名、权限不足或创建结果未确认时会给出提示，不覆盖原目录或自动重复创建。
 
-新流程配合 Desktop 1.6.6 使用，通过 Hub 中继时还需 Hub 0.5.4；具体功能以电脑及连接方式报告的能力为准。目录访问受电脑系统权限限制，不会自动提权；本次支持实际可用的本地磁盘，不含网络盘。
+本次发布配套 Desktop 1.6.8 与 Hub 0.5.5；具体功能以电脑及连接方式报告的能力为准。目录访问受电脑系统权限限制，不会自动提权；本次支持实际可用的本地磁盘，不含网络盘。
 
 **编程使用电脑的 API 密钥库**。新增或修改密钥在电脑端进行，手机读取名称及模型目录并选择使用，不需要再建立一套手机编程密钥库。设备配对也不要求手机和电脑共用一把模型 API Key。
 
