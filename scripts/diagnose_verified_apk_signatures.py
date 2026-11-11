@@ -13,22 +13,50 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import unicodedata
 
 import stage_verified_apk_draft as stage
 
 
 SCHEMES = ("v1", "v2", "v3", "v3.1", "v4")
+PUBLIC_CANDIDATE_TOKEN = r"(?:Signer|certificate|public|key|SHA-256|digest|fingerprint|minSdkVersion|maxSdkVersion|[0-9a-fA-F]{64}|[0-9]{1,10})"
+PUBLIC_CANDIDATE_SEPARATOR = r"[ #()\[\],:=.-]"
+PUBLIC_CANDIDATE_LINE = re.compile(rf"{PUBLIC_CANDIDATE_TOKEN}(?:{PUBLIC_CANDIDATE_SEPARATOR}+{PUBLIC_CANDIDATE_TOKEN})*{PUBLIC_CANDIDATE_SEPARATOR}*")
+
+
+def public_candidates(raw, stream):
+    stage.need(stream in ("stdout", "stderr"), "Unknown diagnostic stream")
+    candidates = []
+    # Split only actual LF/CRLF lines: other control characters must not be
+    # treated as hidden separators that turn unsafe output into a safe line.
+    for original in raw.decode("utf-8", errors="replace").split("\n"):
+        if original.endswith("\r"):
+            original = original[:-1]
+        line = original.strip(" \t")
+        if not line or len(line) > 256 or "\ufffd" in line or any(unicodedata.category(char).startswith("C") for char in line):
+            continue
+        if not re.search(r"\bSigner\b", line) or not re.search(r"(?<![0-9A-Za-z_])[0-9a-fA-F]{64}(?![0-9A-Za-z_])", line):
+            continue
+        # Only a fixed public vocabulary, decimal structure and punctuation
+        # may surround the digest. Unknown DN attributes, owners and suffixes
+        # must not pass merely because their labels escaped a blacklist.
+        if not PUBLIC_CANDIDATE_LINE.fullmatch(line):
+            continue
+        candidates.append({"stream": stream, "line": line,
+                           "leading_ascii_whitespace": len(original) - len(original.lstrip(" \t")),
+                           "trailing_ascii_whitespace": len(original) - len(original.rstrip(" \t"))})
+        if len(candidates) == 16:
+            break
+    return candidates
 
 
 def public_signature_fields(raw):
     text = raw.decode("utf-8", errors="replace")
     # Public digest lines only: bounded format evidence without guessing the
     # SDK's signer prefix. Never include DN, other output, or redirect URLs.
-    certificate_lines = [line for line in text.splitlines()
-                         if len(line) <= 256 and line.startswith("Signer")
-                         and "certificate SHA-256 digest" in line and "://" not in line
-                         and "certificate DN:" not in line
-                         and re.search(r"[0-9a-fA-F]{64}$", line)][:16]
+    certificate_lines = [candidate["line"] for candidate in public_candidates(raw, "stdout")
+                         if candidate["line"].startswith("Signer") and "certificate SHA-256 digest" in candidate["line"]
+                         and re.search(r"[0-9a-fA-F]{64}$", candidate["line"])]
     certificates = [{"signer": int(number), "sha256": digest} for number, digest in re.findall(
         r"^Signer #([1-9][0-9]{0,8}) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$", text, re.MULTILINE)]
     sdk_range_certificates = [{"min_sdk": int(minimum), "max_sdk": int(maximum), "sha256": digest}
@@ -65,23 +93,43 @@ def probe(args, timeout=300):
     # A timed-out process is killed and reaped; report its actual integer code.
     process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        stdout, _stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.kill()
-        stdout, _stderr = process.communicate()
-    return process.returncode, stdout
+        stdout, stderr = process.communicate()
+    return process.returncode, stdout, stderr
+
+
+def signature_variants(tools):
+    variants = [("latest-original", tools, ["--verbose", "--print-certs"]),
+                ("latest-print-certs-only", tools, ["--print-certs"]),
+                ("latest-explicit-true", tools, ["--verbose", "true", "--print-certs", "true"])]
+    comparison = tools.parent / "36.0.0"
+    if comparison != tools and (comparison / "apksigner").is_file():
+        stage.regular(comparison / "apksigner")
+        variants.append(("sdk36-original", comparison, ["--verbose", "--print-certs"]))
+    return variants
 
 
 def collect_signatures(tools, old, current):
-    version_code, version_raw = probe([str(tools / "apksigner"), "--version"], timeout=30)
-    records, failed = [], False
-    for apk in (old, current):
-        exit_code, raw = probe([str(tools / "apksigner"), "verify", "--verbose", "--print-certs", str(apk)])
-        failed = failed or exit_code != 0
-        records.append({"name": apk.name, "sha256": stage.sha(apk), "exit_code": exit_code, **public_signature_fields(raw)})
-    sdk_version = tools.name if re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(?:[-.][A-Za-z0-9.-]{1,24})?", tools.name) else None
-    return {"status": "diagnostics-collected-not-release-acceptance", "sdk_version": sdk_version,
-            "apksigner_version": short_version(version_raw) if version_code == 0 else None, "packages": records}, 1 if failed else 0
+    variants, versions, failed = [], {}, False
+    digests = {apk: stage.sha(apk) for apk in (old, current)}
+    for name, sdk_tools, flags in signature_variants(tools):
+        if sdk_tools not in versions:
+            version_code, version_raw, _version_stderr = probe([str(sdk_tools / "apksigner"), "--version"], timeout=30)
+            failed = failed or version_code != 0
+            versions[sdk_tools] = (version_code, short_version(version_raw) if version_code == 0 else None)
+        records = []
+        for apk in (old, current):
+            exit_code, stdout, stderr = probe([str(sdk_tools / "apksigner"), "verify", *flags, str(apk)])
+            failed = failed or exit_code != 0
+            records.append({"name": apk.name, "sha256": digests[apk], "exit_code": exit_code,
+                            **public_signature_fields(stdout),
+                            "public_candidates": public_candidates(stdout, "stdout") + public_candidates(stderr, "stderr")})
+        sdk_version = sdk_tools.name if re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(?:[-.][A-Za-z0-9.-]{1,24})?", sdk_tools.name) else None
+        variants.append({"variant": name, "sdk_version": sdk_version, "version_exit_code": versions[sdk_tools][0],
+                         "apksigner_version": versions[sdk_tools][1], "packages": records})
+    return {"status": "diagnostics-collected-not-release-acceptance", "variants": variants}, 1 if failed else 0
 
 
 def main():
