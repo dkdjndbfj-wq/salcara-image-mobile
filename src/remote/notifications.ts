@@ -3,6 +3,7 @@ import { AppState, Platform } from 'react-native';
 import { requireOptionalNativeModule } from 'expo';
 
 import { adoptRecoveredHubIngress, hubIngressSnapshot, type HubEvent, type SessionInfo } from './client';
+import * as notificationClient from './client';
 import { onPushChange, standbyEnabled, syncPush } from './push';
 import { getRemoteState, hubSupportsWait, onRemoteChange, onRemoteEvent, pushTarget, sessionCursor, setRemoteFocus, useSavedConnection, watchCredentials } from './store';
 import { loadNotificationPreference, onNotificationPreferenceChange, remoteNotificationsEnabled, setNotificationPreference } from './notification-preferences';
@@ -177,6 +178,19 @@ function onEvent(event: HubEvent) {
 type Running = { deviceId: string; session: Pick<SessionInfo, 'sessionKey' | 'title' | 'updatedAt'> & Partial<Pick<SessionInfo, 'tool' | 'client'>> };
 type NotificationBotPin = { instanceId: string; publicKey: string };
 type PinnedWatchHub = NoticeTarget['hub'] & { botPin?: NotificationBotPin };
+type BotIngress = ReturnType<typeof parseIngressManifest>;
+type BotRecovery = { hubUrl: string; pin: NotificationBotPin; manifest: BotIngress };
+// Public locators are scoped to a saved credential namespace AND its durable
+// identity. A different binding sharing the same URL never owns this cache.
+const recoveredBotIngress = new Map<string, BotRecovery>();
+let botRecoveryGeneration = 0;
+let knownTargetsGeneration = -1;
+const recoveringBotIngress = new Map<string, { generation: number }>();
+// Mobile's client owns the explicit-pin router import. Older clients can only
+// upgrade a matching existing pin; they must not establish trust from a cache.
+const adoptRecoveredBotHubIngress = (notificationClient as typeof notificationClient & {
+  adoptRecoveredBotHubIngress?: (canonical: string, manifest: unknown, expectedPin: NotificationBotPin, active: () => boolean) => Promise<boolean>;
+}).adoptRecoveredBotHubIngress;
 
 /** This anchor is copied only from the saved Bot binding, never learned from a shared URL cache. */
 function savedBotPin(hub: PinnedWatchHub): NotificationBotPin | null {
@@ -186,22 +200,37 @@ function savedBotPin(hub: PinnedWatchHub): NotificationBotPin | null {
     || typeof pin.publicKey !== 'string' || !/^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/.test(pin.publicKey)) return null;
   return { instanceId: pin.instanceId, publicKey: pin.publicKey };
 }
+const sameBotPin = (left: NotificationBotPin | null, right: NotificationBotPin | null) => Boolean(left && right
+  && left.instanceId === right.instanceId && left.publicKey === right.publicKey);
+function verifiedBotIngress(value: unknown, hub: PinnedWatchHub, pin: NotificationBotPin): BotIngress | undefined {
+  try {
+    // Signed fields, never outer fields, determine identity and routing. An
+    // expired envelope remains a hint; the client/native router must re-prove it.
+    const verified = parseIngressManifest(value, hub.url, Date.now(), true, false);
+    if (verified.signed_payload && verified.signature && verified.hub_instance_id === pin.instanceId
+      && verified.identity_public_key === pin.publicKey) return verified;
+  } catch { /* Invalid public hints do not change the original binding. */ }
+  return undefined;
+}
+function newestBotIngress(previous: BotIngress | undefined, next: BotIngress | undefined): BotIngress | undefined {
+  if (!next || previous && (next.revision < previous.revision
+    || next.revision === previous.revision && next.expires_at < previous.expires_at)) return previous;
+  return next;
+}
+function botIngressFor(hub: PinnedWatchHub, pin: NotificationBotPin, scope?: string): BotIngress | undefined {
+  const saved = scope ? recoveredBotIngress.get(scope) : undefined;
+  const retained = saved?.hubUrl === hub.url && sameBotPin(saved.pin, pin) ? verifiedBotIngress(saved.manifest, hub, pin) : undefined;
+  let shared: unknown;
+  try { shared = hubIngressSnapshot?.(hub.url); } catch { /* Optional cache only. */ }
+  return newestBotIngress(retained, verifiedBotIngress(shared, hub, pin));
+}
 
 /** Pure handoff builder: an unpinned legacy Bot remains saved but gets no native credential handoff. */
-export function nativeNotificationWatchAuthority(hub: PinnedWatchHub) {
+export function nativeNotificationWatchAuthority(hub: PinnedWatchHub, scope?: string) {
   if (!hub.botToken) return { hubUrl: hub.url, pairToken: hub.pairToken, ingressManifest: hubIngressSnapshot?.(hub.url) };
   const botPin = savedBotPin(hub);
   if (!botPin) return null;
-  let ingressManifest: ReturnType<typeof parseIngressManifest> | undefined;
-  try {
-    const cached = hubIngressSnapshot?.(hub.url);
-    if (cached?.signed_payload && cached.signature) {
-      // Parse verifies the signed payload, ignoring forged unsigned outer fields.
-      // An expired same-pin envelope is a discovery hint, never token authority.
-      const verified = parseIngressManifest(cached, hub.url, Date.now(), true, false);
-      if (verified.hub_instance_id === botPin.instanceId && verified.identity_public_key === botPin.publicKey) ingressManifest = verified;
-    }
-  } catch { /* Native can discover anonymously using the durable pin alone. */ }
+  const ingressManifest = botIngressFor(hub, botPin, scope);
   return { hubUrl: hub.url, botToken: hub.botToken, botPin, ...(ingressManifest ? { ingressManifest } : {}) };
 }
 const recentlySent = new Map<string, { deviceId: string; sessionKey: string; at: number; scope: string }>();
@@ -239,12 +268,19 @@ const runningSessions = (): Running[] => {
   return live.length ? live : old && Date.now() - old.at <= 30_000 ? old.tasks : [];
 };
 async function refreshTargets(): Promise<void> {
+  const generation = botRecoveryGeneration;
   const targets = (await notificationTargets()).filter(target => !target.hub.botToken || savedBotPin(target.hub));
+  if (generation !== botRecoveryGeneration) return;
   knownTargets = targets;
+  knownTargetsGeneration = generation;
   publishNotificationTargets(targets);
   const valid = new Set(targets.map(target => target.notificationScope));
   for (const [scope, entry] of runningByScope) if (!valid.has(scope) || Date.now() - entry.at > 2 * 60 * 60_000) runningByScope.delete(scope);
   for (const [key, sent] of recentlySent) if (!valid.has(sent.scope) || Date.now() - sent.at > 5 * 60_000) recentlySent.delete(key);
+  for (const [scope, entry] of recoveredBotIngress) if (!targets.some(target => target.notificationScope === scope
+    && target.hub.url === entry.hubUrl && sameBotPin(savedBotPin(target.hub), entry.pin))) recoveredBotIngress.delete(scope);
+  for (const target of targets) rememberRecoveredBotIngress(target);
+  restoreRecoveredIngress();
 }
 
 let watching = false;
@@ -351,12 +387,64 @@ function captureRecoveredIngress() {
     }
   } catch { /* Old native builds have no routing hand-back API. */ }
 }
+function rememberRecoveredBotIngress(target: NoticeTarget): BotIngress | undefined {
+  const { hub, notificationScope: scope, deviceId } = target, pin = savedBotPin(hub);
+  if (!hub.botToken || !pin || notificationScopeFor(hub, deviceId) !== scope) return undefined;
+  const entry = recoveredIngress.get(scope);
+  if (!entry || entry.hubUrl !== hub.url) return botIngressFor(hub, pin, scope);
+  const candidate = verifiedBotIngress(entry.manifest, hub, pin);
+  if (!candidate) return undefined;
+  const manifest = newestBotIngress(botIngressFor(hub, pin, scope), candidate)!;
+  recoveredBotIngress.set(scope, { hubUrl: hub.url, pin: { ...pin }, manifest });
+  if (recoveredBotIngress.size > 64) recoveredBotIngress.delete(recoveredBotIngress.keys().next().value!);
+  return manifest;
+}
+function restoreRecoveredBotIngress(target: NoticeTarget) {
+  const scope = target.notificationScope, hub = target.hub, pin = savedBotPin(hub);
+  const entry = recoveredIngress.get(scope), generation = botRecoveryGeneration;
+  const authorizedTarget = () => knownTargetsGeneration === generation && knownTargets.some(saved => saved.notificationScope === scope
+    && saved.deviceId === target.deviceId && saved.hub.url === hub.url && saved.hub.botToken === hub.botToken && sameBotPin(savedBotPin(saved.hub), pin));
+  if (!pin || !entry || !authorizedTarget() || entry.retryAt > Date.now() || recoveringBotIngress.get(scope)?.generation === generation) return;
+  const manifest = rememberRecoveredBotIngress(target);
+  if (!manifest) return;
+  const shared = hubIngressSnapshot?.(hub.url);
+  const matchingShared = verifiedBotIngress(shared, hub, pin);
+  // A different shared identity belongs to someone else. A dedicated scoped
+  // handoff remains usable without changing that global owner's identity.
+  if (shared && !matchingShared) return;
+  if (!adoptRecoveredBotHubIngress && (!matchingShared || !adoptRecoveredHubIngress)) return;
+  const token = hub.botToken, deviceId = target.deviceId;
+  const owner = { generation };
+  const active = () => {
+    const current = pushTarget(), credentials = watchCredentials();
+    if (!started || generation !== botRecoveryGeneration || !authorizedTarget() || recoveringBotIngress.get(scope) !== owner
+      || !remoteNotificationsEnabled() || current?.deviceId !== deviceId || currentNotificationScope() !== scope
+      || credentials?.url !== hub.url || credentials.botToken !== token || !sameBotPin(savedBotPin(credentials), pin)) return false;
+    const global = hubIngressSnapshot?.(hub.url);
+    return !global || Boolean(verifiedBotIngress(global, hub, pin));
+  };
+  recoveringBotIngress.set(scope, owner);
+  const imported = adoptRecoveredBotHubIngress
+    ? adoptRecoveredBotHubIngress(hub.url, manifest, { ...pin }, active)
+    : adoptRecoveredHubIngress(hub.url, manifest, active);
+  void imported.then(accepted => {
+    if (accepted && active() && recoveredIngress.get(scope) === entry) recoveredIngress.delete(scope);
+  }).catch(() => undefined).finally(() => {
+    const stillActive = active();
+    if (recoveringBotIngress.get(scope) === owner) recoveringBotIngress.delete(scope);
+    if (recoveredIngress.get(scope) === entry) entry.retryAt = stillActive ? Date.now() + 60_000 : 0;
+  });
+}
 function restoreRecoveredIngress() {
   const credentials = watchCredentials(), scope = currentNotificationScope();
-  // The current import API writes the URL-shared router, not a particular Bot
-  // binding. Preserve its durable pin and let native rediscover; do not overwrite
-  // another binding's global cache with this Bot's hand-back.
-  if (!credentials || credentials.botToken || !scope) return;
+  if (!credentials || !scope) return;
+  if (credentials.botToken) {
+    // The current target is synchronous ownership evidence. Saved inactive
+    // targets are retained by refreshTargets for their next native handoff.
+    const target = pushTarget();
+    if (target) restoreRecoveredBotIngress({ ...target, notificationScope: scope });
+    return;
+  }
   const entry = recoveredIngress.get(scope);
   if (!entry || entry.hubUrl !== credentials.url || recoveringIngress.has(scope) || entry.retryAt > Date.now()) return;
   const active = () => currentNotificationScope() === scope && watchCredentials()?.url === entry.hubUrl;
@@ -392,7 +480,8 @@ function configureNative(follow: boolean) {
     const connections = knownTargets.flatMap(target => {
       const tasks = runningByScope.get(target.notificationScope)?.tasks ?? [];
       if (!standing && !tasks.length) return [];
-      const authority = nativeNotificationWatchAuthority(target.hub);
+      rememberRecoveredBotIngress(target);
+      const authority = nativeNotificationWatchAuthority(target.hub, target.notificationScope);
       if (!authority) return [];
       const deviceWide = standing || tasks.length > 4;
       return [{ version, follow: true, standby: standing, ...authority,
@@ -480,13 +569,17 @@ export function startRemoteNotifications(open: () => void): () => void {
   });
   const pushSub = onPushChange(() => { void ensureStandby(); });
   const bindingSub = onConnectionBindingsChange(() => {
+    botRecoveryGeneration++; configVersion++;
     void refreshTargets().then(() => { if (appIsBackgrounded()) configureNative(true); else void ensureStandby().then(ensureWatch); }).catch(() => undefined);
   });
   let observedScope = currentNotificationScope();
+  const currentBotIdentity = () => { const hub = watchCredentials(); return hub?.botToken ? JSON.stringify(savedBotPin(hub)) : ''; };
+  let observedBotIdentity = currentBotIdentity();
   const connectionSub = onRemoteChange(() => {
-    const next = currentNotificationScope();
-    if (next !== observedScope) {
-      observedScope = next; setVisibleThread(null, null);
+    const next = currentNotificationScope(), nextBotIdentity = currentBotIdentity();
+    if (next !== observedScope || nextBotIdentity !== observedBotIdentity) {
+      botRecoveryGeneration++;
+      observedScope = next; observedBotIdentity = nextBotIdentity; setVisibleThread(null, null);
       // Re-pairing may replace credentials without resetting the connection.
       // Retire a queued navigation before the screen consumes it in an effect.
       if (getRemoteState().focus) setRemoteFocus({ home: true });
@@ -502,7 +595,7 @@ export function startRemoteNotifications(open: () => void): () => void {
   reconcileNativeWatch();
   configureNative(false);
   void ensureStandby().then(ensureWatch);
-  return () => { alive = false; openGeneration++; started = false; pendingOpen = null; if (openTimer) clearTimeout(openTimer); lastOpen = ''; recoveredIngress.clear(); recoveringIngress.clear(); preferenceSub(); openSub?.remove(); eventSub(); appSub.remove(); pushSub(); bindingSub(); connectionSub(); standing = false; void stopWatch(); };
+  return () => { alive = false; openGeneration++; started = false; botRecoveryGeneration++; pendingOpen = null; if (openTimer) clearTimeout(openTimer); lastOpen = ''; recoveredIngress.clear(); recoveringIngress.clear(); recoveredBotIngress.clear(); recoveringBotIngress.clear(); preferenceSub(); openSub?.remove(); eventSub(); appSub.remove(); pushSub(); bindingSub(); connectionSub(); standing = false; void stopWatch(); };
 }
 
 /** Native truth while the notification menu is visible; a saved switch is not a running service. */
