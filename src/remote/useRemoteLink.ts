@@ -73,7 +73,7 @@ export function useRemoteLink(onOpen: () => void) {
       const requests = items.filter(item => ['approval', 'question'].includes(item.value.decision.kind)).length;
       const text = items.length === 1 ? notice.text : [failed && `${failed} 项任务失败`, requests && `${requests} 项需要你处理`,
         items.length - failed - requests > 0 && `${items.length - failed - requests} 项任务有更新`].filter(Boolean).join(' · ');
-      showToast(text, failed ? 'alert' : requests ? 'code' : notice.icon, () => {
+      showToast(text, items.length === 1 ? notice.icon : failed ? 'alert' : requests ? 'code' : notice.icon, () => {
         setRemoteFocus(items.length === 1 && first.scope === remoteDeliveryScope()
           ? { deviceId: event.deviceId, sessionKey: event.sessionKey } : { home: true });
         openRef.current();

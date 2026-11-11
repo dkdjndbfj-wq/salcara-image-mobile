@@ -173,6 +173,7 @@ test('a question in another programming thread remains actionable; resolved queu
   mockPending = { q1: { deviceId: 'pc', sessionKey: 'hermes:task', approvalId: 'q1', title: 'choose', tool: 'hermes', ts: Date.now() } };
   await emit(request);
   expect(mockToast.mock.calls.at(-1)?.[0]).toContain('需要你回答');
+  expect(mockToast.mock.calls.at(-1)?.[1]).toBe('chat');
   mockToast.mockClear();
   await act(async () => {
     const next = { ...request, approvalId: 'q2' } as HubEvent;
