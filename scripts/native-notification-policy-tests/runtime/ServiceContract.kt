@@ -52,6 +52,7 @@ private object NetworkFixture {
   var calls = 0
   var serviceKey = botKeyA
   var manifestMode = "signed"
+  var eventResponse: Pair<Int, String>? = null
   var beforeEvents: (() -> Unit)? = null
   val publicHeaders = mutableListOf<Map<String, String>>()
   fun install() {
@@ -67,11 +68,16 @@ private object NetworkFixture {
             publicHeaders.add(sent.toMap()); check(sent.keys.all { it == "Accept" })
             if (manifestMode == "missing") return 404
             body = if (url.path.endsWith("/manifest")) serviceManifest(serviceKey, manifestMode != "unsigned").toString() else serviceProof(url, serviceKey).toString()
-          } else { calls++; headers.add(sent.toMap()); body = if (pages.isEmpty()) "{\"events\":[]}" else pages.removeFirst() }
+          } else {
+            calls++; headers.add(sent.toMap())
+            eventResponse?.let { body = it.second; return it.first }
+            body = if (pages.isEmpty()) "{\"events\":[]}" else pages.removeFirst()
+          }
           return 200
         }
         override fun getContentLengthLong() = body.toByteArray().size.toLong()
         override fun getInputStream() = body.byteInputStream()
+        override fun getErrorStream() = body.byteInputStream()
         override fun connect() { }; override fun disconnect() { }; override fun usingProxy() = false
       }
       }
@@ -103,6 +109,7 @@ private inline fun serviceFixture(block: (SalcaraWatchService, RecordedExecutor)
   SalcaraNotificationCenter.setTargets(service, JSONArray().put(JSONObject().put("notificationScope", serviceScope).put("deviceId", "pc-a")).toString())
   NetworkFixture.pages.clear(); NetworkFixture.headers.clear(); NetworkFixture.calls = 0
   NetworkFixture.publicHeaders.clear(); NetworkFixture.serviceKey = botKeyA; NetworkFixture.manifestMode = "signed"; NetworkFixture.beforeEvents = null
+  NetworkFixture.eventResponse = null
   try { block(service, executor) } finally { SalcaraWatchService.clearConfiguration(service); service.onDestroy(); executor.shutdownNow(); android.os.Handler.flush(); android.os.Handler.delayed.clear() }
 }
 
@@ -336,6 +343,33 @@ fun serviceContracts(): Int {
       check(SalcaraWatchVault.saved?.toString()?.contains("synthetic-bot-only") == false)
       check((SalcaraWatchService.status()["connections"] as List<*>).any { (it as Map<*, *>)["notificationScope"] == serviceScope && it["reason"] == "identity" })
       check(service.manager.posts.count { it.tag == "$serviceScope:watch-status" } == 1)
+    }
+  }
+  for ((status, code) in listOf(403 to "bot_credentials_invalid", 403 to "bot_phone_credentials_invalid", 401 to "pair_credentials_invalid")) {
+    test("actual HTTP $status $code retires the rejected credential without retrying") {
+      serviceFixture { service, executor ->
+        NetworkFixture.eventResponse = status to JSONObject().put("code", code).toString()
+        service.onStartCommand(SalcaraWatchService.prepareStart(Intent()), 0, 1)
+        SalcaraWatchService.configure(service, if (code.startsWith("bot_")) botWatchConfig(true) else watchConfig(true))
+        executor.next()
+        check(NetworkFixture.calls == 1 && service.stopped && SalcaraWatchService.status()["reason"] == "authentication")
+        check(executor.pending.isEmpty() && SalcaraWatchVault.saved == null)
+        check(service.manager.posts.count { it.tag == "$serviceScope:watch-status" } == 1)
+      }
+    }
+  }
+  for ((status, code) in listOf(503 to "bot_phone_revoke_pending", 503 to "bot_phone_bind_pending", 503 to "bot_phone_reset_pending",
+    403 to "source_grant_required", 403 to "source_station_denied", 403 to "station_policy_invalid", 403 to "device_credentials_invalid", 403 to "unknown_policy")) {
+    test("actual HTTP $status $code keeps a valid Bot credential available for retry") {
+      serviceFixture { service, executor ->
+        NetworkFixture.eventResponse = status to JSONObject().put("code", code).toString()
+        service.onStartCommand(SalcaraWatchService.prepareStart(Intent()), 0, 1)
+        SalcaraWatchService.configure(service, botWatchConfig(true)); executor.next()
+        check(NetworkFixture.calls == 1 && !service.stopped && executor.pending.size == 1)
+        check(SalcaraWatchService.config!!.getString("botToken") == "synthetic-bot-only")
+        check((SalcaraWatchService.status()["connections"] as List<*>).any { (it as Map<*, *>)["running"] == true && it["reason"] == "connection" })
+        check(service.manager.posts.none { it.tag == "$serviceScope:watch-status" })
+      }
     }
   }
   return count
