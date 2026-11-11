@@ -17,7 +17,7 @@ class DiagnosticTests(unittest.TestCase):
                "Number of signers: 1\nVerified using v2 scheme (APK Signature Scheme v2): true\n"
                "Verified using v3 scheme (APK Signature Scheme v3): false\n").encode()
         fields = diagnose.public_signature_fields(raw)
-        self.assertEqual(set(fields), {"certificates", "sdk_range_certificates", "signer_count", "schemes", "stage_predicates"})
+        self.assertEqual(set(fields), {"certificate_lines", "certificates", "sdk_range_certificates", "signer_count", "schemes", "stage_predicates"})
         self.assertEqual(fields["certificates"], [{"signer": 1, "sha256": "A" * 64}])
         self.assertEqual(fields["signer_count"], 1)
         self.assertEqual(fields["schemes"], {"v1": None, "v2": True, "v3": False, "v3.1": None, "v4": None})
@@ -59,9 +59,21 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual([record["exit_code"] for record in facts["packages"]], [1, 0])
         self.assertEqual(set(facts), {"status", "sdk_version", "apksigner_version", "packages"})
         for record in facts["packages"]:
-            self.assertEqual(set(record), {"name", "sha256", "exit_code", "certificates", "sdk_range_certificates", "signer_count", "schemes", "stage_predicates"})
+            self.assertEqual(set(record), {"name", "sha256", "exit_code", "certificate_lines", "certificates", "sdk_range_certificates", "signer_count", "schemes", "stage_predicates"})
         self.assertNotIn("PRIVATE-OLD-ERROR", json.dumps(facts))
         self.assertEqual(facts["status"], "diagnostics-collected-not-release-acceptance")
+
+    def test_public_digest_line_evidence_is_bounded_without_guessing_signer_prefix(self):
+        digest = "a" * 64
+        public = "Signer #1 (minSdkVersion=24,maxSdkVersion=2147483647) certificate SHA-256 digest: " + digest
+        rejected = ["PRIVATE " + public, "Signer certificate DN: PRIVATE certificate SHA-256 digest: " + digest,
+                    "Signer https://example.invalid/private certificate SHA-256 digest: " + digest,
+                    "Signer " + "x" * 256 + " certificate SHA-256 digest: " + digest,
+                    "Signer certificate SHA-256 digest: " + digest + " PRIVATE"]
+        fields = diagnose.public_signature_fields(("\n".join(rejected + [public] * 20)).encode())
+        self.assertEqual(fields["certificate_lines"], [public] * 16)
+        self.assertNotIn("PRIVATE", json.dumps(fields))
+        self.assertFalse(fields["stage_predicates"]["cert"])
 
     def test_two_zero_exit_codes_mean_collection_only_not_release_acceptance(self):
         with patch.object(diagnose, "probe", side_effect=[(0, b"bad version private"), (0, b""), (0, b"")]), patch.object(diagnose.stage, "sha", return_value="a" * 64):

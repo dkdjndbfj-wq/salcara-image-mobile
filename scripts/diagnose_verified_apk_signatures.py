@@ -22,6 +22,13 @@ SCHEMES = ("v1", "v2", "v3", "v3.1", "v4")
 
 def public_signature_fields(raw):
     text = raw.decode("utf-8", errors="replace")
+    # Public digest lines only: bounded format evidence without guessing the
+    # SDK's signer prefix. Never include DN, other output, or redirect URLs.
+    certificate_lines = [line for line in text.splitlines()
+                         if len(line) <= 256 and line.startswith("Signer")
+                         and "certificate SHA-256 digest" in line and "://" not in line
+                         and "certificate DN:" not in line
+                         and re.search(r"[0-9a-fA-F]{64}$", line)][:16]
     certificates = [{"signer": int(number), "sha256": digest} for number, digest in re.findall(
         r"^Signer #([1-9][0-9]{0,8}) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$", text, re.MULTILINE)]
     sdk_range_certificates = [{"min_sdk": int(minimum), "max_sdk": int(maximum), "sha256": digest}
@@ -44,7 +51,7 @@ def public_signature_fields(raw):
     predicates = {"cert": stage_certificates == [("1", stage.CERT)],
                   "count": bool(re.search(r"^Number of signers: 1\s*$", text, re.MULTILINE)),
                   "scheme": bool(re.search(r"^Verified using v(?:2|3|3\.1) scheme[^\r\n]*: true\s*$", text, re.MULTILINE))}
-    return {"certificates": certificates or None, "sdk_range_certificates": sdk_range_certificates or None,
+    return {"certificate_lines": certificate_lines, "certificates": certificates or None, "sdk_range_certificates": sdk_range_certificates or None,
             "signer_count": count, "schemes": schemes, "stage_predicates": predicates}
 
 
