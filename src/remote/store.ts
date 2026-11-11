@@ -16,8 +16,9 @@ import { parseComputerActivity, type ComputerActivity } from './computer-activit
 import type { ProviderProfile } from '../domain';
 import { getSetting, setSetting } from '../storage/database';
 import { connectionFailure, connectionProblem, type ConnectionProblem } from './connection-errors';
+import { readPreferredAgent, rememberPreferredAgent, type AgentPreferenceScope } from './agent-preferences';
 import {
-  command, confirmPair, confirmQrPair, devices as fetchDevices, discoverStation, hubUrlFor, HubError, isExecutionPolicyError, isPairingAuthenticationError, ping, revokePair, sessionEventsPage, parseFeatureChange, verifyHubAlias, confirmPairingHubIdentity,
+  command, confirmPair, confirmQrPair, devices as fetchDevices, discoverStation, discoverSavedStation, hubUrlFor, HubError, isExecutionPolicyError, isPairingAuthenticationError, ping, revokePair, sessionEventsPage, parseFeatureChange, verifyHubAlias, confirmPairingHubIdentity,
   type AgentId, type AgentProfile, type ApprovalMode, type AttachmentRef, type Command, type Decision, type DeviceStatus, type Effort, type Hub, type HubEvent, type Project, type ClaudeDesktopScope, type WorkspaceMode,
   type RemoteApiOption, type SessionInfo, type ToolId, type ToolKind, type Usage, type PermissionMode,
   type RemoteQuestion, type QuestionAnswers, type ModelCapability, type ModelCatalog,
@@ -1003,7 +1004,7 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
   // active Hub to atomically switch the desktop first; otherwise the phone
   // could show B while the computer remains attached to A.
   if (!options.skipHandover && !deferNetwork && !profile.botGroupId && !currentProfile?.botGroupId && currentOwner?.pairToken && currentProfile && currentProfile.id !== profile.id
-    && currentProfile.deviceId === profile.deviceId && (!currentProfile.computerId || !profile.computerId || currentProfile.computerId !== profile.computerId)) {
+    && currentProfile.deviceId === profile.deviceId && (!currentProfile.computerId || !profile.computerId)) {
     // Legacy records do not carry the physical-computer identity. Never move
     // the phone between two station records that expose the same device ID
     // without that proof; re-pair after updating the computer instead.
@@ -1024,7 +1025,7 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
   const requireOnline = options.requireOnline === true && !deferNetwork;
   let pairedRequestIssued = false;
   try {
-    const discovery = deferNetwork ? null : await discoverStation(profile.hubUrl);
+    const discovery = deferNetwork ? null : await discoverSavedStation(profile.hubUrl);
     if (!current()) return;
     const token = await connectionToken(profile);
     if (!current()) return;
@@ -1078,7 +1079,7 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
 
 /** Scanner validation and confirmation are separate: merely scanning never sends a ticket. */
 export function parseRemoteQr(raw: string): PairQr {
-  if (!state.selectedHubUrl || state.phase !== 'pairing') throw new Error('请先输入中转站地址并检查远程插件');
+  if (!state.selectedHubUrl || state.phase !== 'pairing') throw new Error('请先输入电脑端显示的连接地址并检查远程服务');
   return readPairQr(raw, state.selectedHubUrl);
 }
 
@@ -1179,7 +1180,7 @@ export async function renameRemoteConnection(id: string, alias: string): Promise
   set({ connections });
 }
 
-export type SavedConnectionHealth = 'online' | 'offline' | 'unreachable' | 'reauth' | 'denied' | 'enrollment' | 'unsupported' | 'unavailable' | 'timeout';
+export type SavedConnectionHealth = 'online' | 'offline' | 'unreachable' | 'reauth' | 'denied' | 'enrollment' | 'identity' | 'unsupported' | 'unavailable' | 'timeout';
 /** Read every saved computer without changing the selected route or its UI state. */
 export async function probeSavedConnections(): Promise<Record<string, SavedConnectionHealth>> {
   const profiles = state.connections;
@@ -1558,7 +1559,7 @@ export async function refreshDevices(quiet = false): Promise<void> {
   let pairedDevicesRequestIssued = false;
   try {
     if (!hubCapabilities.size) {
-      const discovery = await discoverStation(owner.url);
+      const discovery = await discoverSavedStation(owner.url);
       if (!current()) return;
       hubCapabilities = new Set(discovery.capabilities);
     }
@@ -1577,29 +1578,39 @@ export async function refreshDevices(quiet = false): Promise<void> {
         && item.hubUrl === owner.url && item.deviceId === owner.deviceId);
       // Retire a multi-station profile, not just the in-memory Hub. Otherwise
       // bootRemote() reads the revoked SecureStore token again after restart.
-      // The profile is removed only for this exact station/device; other Hub
-      // connections for the same physical computer remain usable.
-      const revokedHub = { ...owner, pairToken: undefined };
+      // Bot credentials authorize one group. Retire all saved members using
+      // this exact Hub/group/token; other groups and relay pairings survive.
+      const related = profile ? state.connections.filter(item => item.id === profile.id
+        || Boolean(profile.botGroupId && item.hubUrl === profile.hubUrl && item.botGroupId === profile.botGroupId)) : [];
+      const revokedHub = { ...owner, pairToken: undefined, botToken: undefined };
       hub = revokedHub;
       connectionGeneration += 1;
       let deliveryCleanupFailed = false;
       try {
         await retirePairingReceipts(deliveryScope);
-        if (profile) await retirePairingReceipts(profile.id);
       } catch {
         // The credential is already invalid. Keep its profile index available
         // for retry if durable retirement or cleanup could not complete.
         deliveryCleanupFailed = true;
       }
-      if (hub !== revokedHub) return;
-      if (cacheScope) await clearRemoteCache(cacheScope, Object.keys(state.sessions)).catch(() => undefined);
-      if (hub !== revokedHub) return;
+      if (cacheScope) await clearRemoteCache(cacheScope, [owner.deviceId!]).catch(() => undefined);
       let connections = state.connections;
       if (profile && !deliveryCleanupFailed) {
-        try { connections = await forgetConnection(profile, owner.pairToken); }
-        catch { connections = await loadConnections().catch(() => state.connections.filter((item) => item.id !== profile.id)); }
-        if (hub !== revokedHub) return;
-        await clearRemoteCache(profile.id, [profile.deviceId]).catch(() => undefined);
+        for (const item of related) {
+          // A concurrent successful rebind can replace any group member.
+          // Finish old-credential cleanup without deleting the replacement.
+          if (await connectionToken(item) !== owner.pairToken) continue;
+          const scope = `${item.id}|credential:${deliveryCredentialId(owner.pairToken!)}`;
+          try {
+            await retirePairingReceipts(scope);
+            await retirePairingReceipts(item.id);
+            await clearRemoteCache(scope, [item.deviceId]).catch(() => undefined);
+            connections = await forgetConnection(item, owner.pairToken);
+            if (await connectionToken(item) === null) await clearRemoteCache(item.id, [item.deviceId]).catch(() => undefined);
+          } catch {
+            connections = await loadConnections().catch(() => connections);
+          }
+        }
       } else if (!profile && state.serviceId && !deliveryCleanupFailed) {
         await deletePairToken(state.serviceId, owner.pairToken).catch(() => undefined);
       }
@@ -1947,7 +1958,7 @@ async function recoverPendingHandover(intent: PendingStationHandover, expectedGe
 async function requestStandbyHandover(target: RemoteConnection, intent: PendingStationHandover, expectedGeneration: number, expectedOwner: Hub, stillWanted: () => boolean = () => true): Promise<void> {
   const current = () => stillWanted() && expectedGeneration === connectionGeneration && expectedOwner === hub && state.connectionId === intent.fromConnectionId;
   if (!current()) throw new Error('连接选择已取消，请重新选择');
-  const discovery = await discoverStation(target.hubUrl);
+  const discovery = await discoverSavedStation(target.hubUrl);
   if (!current()) throw new Error('连接已切换，请刷新确认');
   if (!discovery.capabilities.includes('station.standby.v1') || !discovery.capabilities.includes('commands.idempotency.v1')) {
     throw new HubError('目标中转站暂不支持备用切换，请先更新远程服务', 200, 'station_standby_unsupported');
@@ -2027,7 +2038,7 @@ async function runCommand<T = Record<string, unknown>>(owner: Hub, deviceId: str
 
 async function retryCapability(owner: Hub, force = false): Promise<boolean> {
   if (!hubCapabilities.size || force) {
-    const discovery = await discoverStation(owner.url);
+    const discovery = await discoverSavedStation(owner.url);
     if (owner !== hub) throw new Error('连接已切换');
     hubCapabilities = new Set(discovery.capabilities);
   }
@@ -2067,7 +2078,7 @@ async function syncSessionEventsCore(deviceId: string, sessionKey: string, waitS
     && (sessionRequests.get(snapshotKey) ?? 0) === snapshotRevision;
   try {
     if (!hubCapabilities.size) {
-      const discovery = await discoverStation(owner.url);
+      const discovery = await discoverSavedStation(owner.url);
       if (!currentRequest()) return;
       hubCapabilities = new Set(discovery.capabilities);
     }
@@ -2466,7 +2477,7 @@ async function switchRemoteStationImpl(deviceId: string, targetConnectionId: str
         // newer card choice for the same UUID after an ambiguous reply.
         agent = previous.agent; accountId = previous.accountId; sourceOnly = previous.sourceOnly === true;
       } else {
-        const preferred = await lastAgent();
+        const preferred = await readPreferredAgent({ kind: 'remote', connectionId: current.id, deviceId }).catch(() => null);
         if (!stillWanted()) return;
         if (!state.agents[deviceId]?.loaded) await loadAgentProfiles(deviceId).catch(() => undefined);
         if (!stillWanted()) return;
@@ -2486,7 +2497,7 @@ async function switchRemoteStationImpl(deviceId: string, targetConnectionId: str
         // An older Bridge ignores the flag and would apply the API with an
         // empty model. Never send preservation intent without its capability.
         const supportsSourceOnly = state.devices.find(item => item.deviceId === deviceId)?.capabilities?.includes('station.source-only.v1');
-        if (supportsSourceOnly && selected?.api.configured && !selected.api.pending && selected.api.accountId) {
+        if (supportsSourceOnly && selected?.available && selected.api.configured && !selected.api.pending && selected.api.accountId) {
           agent = selected.id; accountId = selected.api.accountId; sourceOnly = true;
         }
         // No proven current source: legacy open mode may still switch stations;
@@ -2583,12 +2594,14 @@ async function switchRemoteStationImpl(deviceId: string, targetConnectionId: str
   } finally { endApiMutation(mutation); }
 }
 
-const LAST_AGENT = 'remote_last_agent_v1';
-export async function lastAgent(): Promise<AgentId> {
-  const saved = await getSetting(LAST_AGENT).catch(() => null);
-  return validAgentId(saved) ? saved : 'codex';
+function currentAgentPreferenceScope(): AgentPreferenceScope | null {
+  if (!hub?.deviceId) return null;
+  return { kind: 'remote', connectionId: state.connectionId ?? JSON.stringify([hub.url, hub.deviceId]), deviceId: hub.deviceId };
 }
-export async function rememberAgent(agent: AgentId): Promise<void> { if (validAgentId(agent)) await setSetting(LAST_AGENT, agent).catch(() => undefined); }
+export async function lastAgent(): Promise<AgentId> {
+  return await readPreferredAgent(currentAgentPreferenceScope()).catch(() => null) ?? 'codex';
+}
+export async function rememberAgent(agent: AgentId): Promise<void> { await rememberPreferredAgent(currentAgentPreferenceScope(), agent).catch(() => undefined); }
 
 /** Explicit no-folder starts require the forwarding/receipt schema on the station too. */
 export function hubSupportsProjectless(): boolean { return hubCapabilities.has('session.projectless.v1'); }

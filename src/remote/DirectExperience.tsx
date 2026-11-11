@@ -9,6 +9,7 @@ import type { AgentProfile, Decision, HubEvent, Project, QuestionAnswers, Remote
 import { isDirectEvent, readDirectHistoryWithRevertGuard, normalizeDirectEvent, parseDirectHistoryPage, parseDirectProjects, parseDirectWorkspaceCapabilities, parseDirectSessionPage, parseDirectStartReceipt } from './direct-history';
 import { directConnectionGeneration, directDeliveryScope, getDirectConnectionState, subscribeDirectConnection, disconnectDirect, forgetDirectPairing, reconnectDirect } from './direct-pairing';
 import { requestDirect, subscribeDirectEvents, type DirectEventEnvelope } from './direct-api';
+import { readPreferredAgent, rememberPreferredAgent } from './agent-preferences';
 import { approvalDecisions } from './approvals';
 import {directQuestionDraftSource,finishDirectQuestionDraft} from './direct-question-drafts';
 import { applyEvent, EMPTY_TIMELINE, timelineKey, type RemoteState, type Timeline } from './store';
@@ -114,6 +115,8 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
     const deviceId = connection.deviceId;
     if (!deviceId || connection.status !== 'connected') return;
     const revision = ++owner.current;
+    const current = () => revision === owner.current && getDirectConnectionState().deviceId === deviceId
+      && getDirectConnectionState().status === 'connected' && directDeliveryScope() === scope && directConnectionGeneration() === connectionGeneration;
     const restore=connectedOwner.current===connectionOwner?selectionRef.current:null;
     connectedOwner.current=connectionOwner;
     busy.current = false; selectedKey.current = null; snapshotLoading.current = false; pendingEvents.current = [];
@@ -122,30 +125,32 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
     setCapabilities([]);setProjects([]);setProjectPath('');setProjectless(false);setNewSession(false);setDraftRecovery(undefined);setSending(false);setLoadingMore(false);
     setError(''); setLoading(true);
     try {
-      const raw = await requestDirect({ type: 'agents.status' });
-      if (revision !== owner.current || getDirectConnectionState().deviceId !== deviceId) return;
+      const [raw, preferred] = await Promise.all([requestDirect({ type: 'agents.status' }),
+        readPreferredAgent({ kind: 'direct', connectionId: scope, deviceId }).catch(() => null)]);
+      if (!current()) return;
       const parsed = parseAgentStatus(raw);
       const available = parsed.agents.filter(profile => profile.available && agentSupports(profile, profile.id, 'list'));
       setAgents(available);
       setApis(parsed.apis);
       setAutoAll(parsed.autoAll);
-      setAgentId(current => available.some(profile => profile.id === current) ? current : available[0]?.id ?? null);
+      setAgentId(previous => restore && available.some(profile => profile.id === previous) ? previous
+        : available.some(profile => profile.id === preferred) ? preferred : available[0]?.id ?? null);
       if(restore&&!available.some(item=>agentSessions([restore],item).length)){
         selectedKey.current=null;setSelected(null);setTimeline(EMPTY_TIMELINE);setDirectoryLoaded(false);
       }
       try {
         const projectReply = await requestDirect({ type: 'projects.list' });
         const directory = parseDirectProjects(projectReply), advertised = parseDirectWorkspaceCapabilities(projectReply);
-        if (revision !== owner.current || getDirectConnectionState().deviceId !== deviceId) return;
+        if (!current()) return;
         setProjects(directory);
         setCapabilities(advertised);
         // Selecting a computer must never silently choose its first project.
       } catch (reason) {
-        if (revision === owner.current) { setProjects([]); setProjectPath('');setProjectless(false); setError(reason instanceof Error ? reason.message : '读取电脑项目失败'); }
+        if (current()) { setProjects([]); setProjectPath('');setProjectless(false); setError(reason instanceof Error ? reason.message : '读取电脑项目失败'); }
       }
     } catch (reason) {
-      if (revision === owner.current) setError(reason instanceof Error ? reason.message : '读取电脑 Agent 失败');
-    } finally { if (revision === owner.current) {setLoading(false);if(restore)setRecoveryRevision(value=>value+1);} }
+      if (current()) setError(reason instanceof Error ? reason.message : '读取电脑 Agent 失败');
+    } finally { if (current()) {setLoading(false);if(restore)setRecoveryRevision(value=>value+1);} }
   }, [connection.deviceId, connection.status, scope, connectionGeneration, workspaceMode]);
 
   const readDirectory = useCallback(async (more = false) => {
@@ -731,7 +736,7 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
     const deviceId = connection.deviceId;
     if (!deviceId) return;
     owner.current += 1; busy.current = false; selectedKey.current = null; snapshotLoading.current = false; pendingEvents.current = [];
-    try { await forgetDirectPairing(deviceId); }
+    try { await forgetDirectPairing(deviceId, { pairingScope: scope }); }
     catch (reason) { setError(reason instanceof Error ? reason.message : '无法解除直连绑定'); }
   };
   const reconnect = async () => {
@@ -767,8 +772,9 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
     transport="direct" agents={agents} mode={workspaceMode} loading={loading} error={error} online={connection.status === 'connected'}
     explorerAvailable={capabilities.includes('workspace.explorer.v1')} projectlessAvailable={projectlessAllowed} onRegisterBack={globalNewBack.register}
     onRefresh={() => { void loadProfiles(); }} onClose={() => setGlobalNew(false)} onComplete={selection => {
-      if (directDeliveryScope() !== scope || directConnectionGeneration() !== connectionGeneration || getDirectConnectionState().deviceId !== connection.deviceId || getDirectConnectionState().status !== 'connected') return;
+      if (!connection.deviceId || directDeliveryScope() !== scope || directConnectionGeneration() !== connectionGeneration || getDirectConnectionState().deviceId !== connection.deviceId || getDirectConnectionState().status !== 'connected') return;
       backToDirectory(); setDraftRecovery(undefined); setAgentId(selection.agent.id);
+      void rememberPreferredAgent({ kind: 'direct', connectionId: scope, deviceId: connection.deviceId }, selection.agent.id).catch(() => undefined);
       if (selection.project) setProjects(previous => [...previous.filter(item => item.path !== selection.cwd), selection.project!]);
       setGlobalSelection({ ...selection, scope: globalScope }); setGlobalNew(false);
     }} />;
@@ -786,9 +792,11 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
     {!selected ? <>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.agentPicker}>
         {agents.map(item => <Pressable key={item.id} disabled={sending || apiSelection.busy} accessibilityRole="button" accessibilityState={{ selected: item.id === agentId }} onPress={() => {
-          if (sending || apiSelection.busy || item.id === agentId) return;
+          if (sending || apiSelection.busy || item.id === agentId || !connection.deviceId || directDeliveryScope() !== scope
+            || directConnectionGeneration() !== connectionGeneration || getDirectConnectionState().deviceId !== connection.deviceId || getDirectConnectionState().status !== 'connected') return;
           owner.current += 1; busy.current = false; selectedKey.current = null; snapshotLoading.current = false; pendingEvents.current = [];
           setLoading(false); setLoadingMore(false); setSending(false); setAgentId(item.id); setSessions([]); setNextCursor(undefined); setDirectoryLoaded(false); setError('');
+          void rememberPreferredAgent({ kind: 'direct', connectionId: scope, deviceId: connection.deviceId }, item.id).catch(() => undefined);
         }} style={[styles.agentChip, item.id === agentId && styles.agentChipSelected]}>
           <Text style={[styles.agentText, item.id === agentId && styles.agentTextSelected]}>{item.name}</Text></Pressable>)}
       </ScrollView>

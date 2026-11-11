@@ -3,6 +3,7 @@ import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, T
 import { useBackAction, useChildBackAction } from './useBackAction';
 import { connectionSelection, type ComputerSelection } from './computer-connections';
 import { readComputerSelection, saveComputerSelection } from './computer-selection';
+import { readPreferredAgent, rememberPreferredAgent } from './agent-preferences';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 
@@ -30,13 +31,13 @@ import { setStandbyEnabled, usePushStatus } from './push';
 import { ProgrammingAction, ProgrammingCard, ProgrammingField, ProgrammingHeading, ProgrammingPanel, ProgrammingRow, useProgrammingStyles } from './ProgrammingUi';
 import { EmptyState } from './parts';
 import type { PairQr } from './pairing';
-import { getDirectConnectionState, isDirectPairQr, listDirectPairings, pairDirectQr, parseDirectPairQr, reconnectDirect, restoreDirectPairing, subscribeDirectConnection, type DirectPairQr } from './direct-pairing';
+import { directDeliveryScope, getDirectConnectionState, isDirectPairQr, listDirectPairings, pairDirectQr, parseDirectPairQr, reconnectDirect, restoreDirectPairing, subscribeDirectConnection, type DirectPairQr } from './direct-pairing';
 import { DirectExperience } from './DirectExperience';
 import {
   builtinAgent, fallbackAgentProfiles, sessionWorkspaceMode, validAgentId,
 } from './projection';
 import {
-  getRemoteState, hydrateCachedThread, hubSupportsExplorer, hubSupportsProjectless, lastAgent, loadAgentProfiles, loadClaudeDesktopHistory, loadNativeSessions, loadSessions, pairRemote, pairScannedRemoteQr, parseScannedRemoteQr, rememberAgent,
+  getRemoteState, hydrateCachedThread, hubSupportsExplorer, hubSupportsProjectless, loadAgentProfiles, loadClaudeDesktopHistory, loadNativeSessions, loadSessions, pairRemote, pairScannedRemoteQr, parseScannedRemoteQr,
   reloadSavedConnections, setRemoteFocus, setRemoteScreenOpen, useRemote, useSavedConnection, type RemoteState,
 } from './store';
 import { ThreadView, type ContinueSeed } from './ThreadView';
@@ -185,7 +186,9 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
     const owner = {...navigation.current};
     try {
       const current = getDirectConnectionState();
-      if (current.deviceId !== target.deviceId || current.status !== 'connected') await reconnectDirect(target.deviceId);
+      if (current.deviceId !== target.deviceId || current.status !== 'connected') await reconnectDirect(target.deviceId, {
+        stillWanted: () => stillHere(owner.route, owner.revision, owner.scope),
+      });
       if (!stillHere(owner.route,owner.revision,owner.scope)) return;
       if (!rememberDirect(target.deviceId)) throw new Error('直连目标已改变，请重新选择电脑');
       setDirectNewRequest(value => newConversation ? value + 1 : 0);
@@ -235,7 +238,13 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
     if (!navigation.current.visible || navigation.current.scope !== scope || navigation.current.revision !== revision || !menuGeneration.current.open || menuGeneration.current !== renderedMenu) return;
     closeMenu(); callback();
   };
-  const chooseAgent = (id: AgentId) => { selectionRevision.current += 1; setAgentId(id); };
+  const chooseAgent = (id: AgentId, targetDeviceId = deviceId) => {
+    selectionRevision.current += 1; setAgentId(id);
+    const snapshot = getRemoteState(), selected = snapshot.connections.find(item => item.id === snapshot.connectionId);
+    if (targetDeviceId && selected?.deviceId === targetDeviceId) {
+      void rememberPreferredAgent({ kind: 'remote', connectionId: selected.id, deviceId: targetDeviceId }, id).catch(() => undefined);
+    }
+  };
   const openSimulatedSession = (id: AgentId, session?: SessionInfo, mode = workspaceMode) => {
     const selected = session ?? [...SIMULATED_REMOTE_SESSIONS]
       .filter((item) => sessionAgent(item, simulatedAgents) === id && sessionWorkspaceMode(item) === mode)
@@ -251,10 +260,9 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
   // The homepage already owns the active computer and connection status. An Agent card
   // therefore opens that computer's directory directly; settings remain available inside it.
   const openAgentOnDevice = (id: AgentId, targetDeviceId: string, mode: WorkspaceMode) => {
-    setSelectedTransport('remote',isSimulatedRemoteDevice(targetDeviceId)?null:undefined); chooseAgent(id); setDeviceId(targetDeviceId); setWorkspaceMode(mode);
+    setSelectedTransport('remote',isSimulatedRemoteDevice(targetDeviceId)?null:undefined); chooseAgent(id, targetDeviceId); setDeviceId(targetDeviceId); setWorkspaceMode(mode);
     setThreadKey(null); setNewThread(false); returnToHome.current = false;
     if (isSimulatedRemoteDevice(targetDeviceId)) { openSimulatedAgent(id, mode); return; }
-    void rememberAgent(id);
     navigate('workspace');
   };
   const openAgent = (id: AgentId) => {
@@ -363,7 +371,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
     }
     if (!guess) return;
     if (sessionForOpening) setWorkspaceMode(sessionWorkspaceMode(sessionForOpening));
-    setSelectedTransport('remote'); chooseAgent(guess); setDeviceId(targetDeviceId); setNewThread(false);
+    setSelectedTransport('remote'); chooseAgent(guess, targetDeviceId); setDeviceId(targetDeviceId); setNewThread(false);
     returnToHome.current = true;
     if (sessionKey) void hydrateCachedThread(targetDeviceId, sessionKey);
     setThreadKey(sessionKey || null); navigate('workspace');
@@ -394,7 +402,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
       if (expectedSource?.agentId && id !== expectedSource.agentId) {
         setThreadKey(null); setNewThread(false); navigate('home'); showToast('链接中的 Agent 与会话不匹配', 'alert'); return;
       }
-      if (id !== guess) chooseAgent(id);
+      if (id !== guess) chooseAgent(id, targetDeviceId);
     } catch (error) {
       if (stillHere('workspace', ownedRevision, ownedScope)) showToast(error instanceof Error ? `${error.message}，可先查看记录` : '暂时连不上电脑，可先查看记录', 'alert');
     }
@@ -432,10 +440,17 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
     if (typeof restoreDirectPairing === 'function') void restoreDirectPairing().catch(() => undefined);
   }, [visible]);
   useEffect(() => {
-    let active = true; const selectedAt = selectionRevision.current;
-    void lastAgent().then(id => { if (active && selectedAt === selectionRevision.current) setAgentId(id); }).catch(() => undefined);
+    // Restore only the active computer's preference. A delayed disk read must
+    // not replace an explicitly opened Agent, conversation or different route.
+    if (directSelected || !deviceId || !remote.connectionId || profile?.deviceId !== deviceId
+      || navigation.current.route !== 'home' && navigation.current.route !== 'devices') return;
+    let active = true; const selectedAt = selectionRevision.current, owner = { ...navigation.current };
+    setAgentId('codex');
+    void readPreferredAgent({ kind: 'remote', connectionId: remote.connectionId, deviceId }).then(id => {
+      if (active && selectedAt === selectionRevision.current && stillHere(owner.route, owner.revision, owner.scope)) setAgentId(id ?? 'codex');
+    }).catch(() => undefined);
     return () => { active = false; };
-  }, []);
+  }, [remote.connectionId, deviceId, directSelected, profile?.deviceId]);
   useEffect(() => {
     if (priorScope.current === scope) return;
     priorScope.current = scope;
@@ -551,7 +566,13 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
           onProjects={openProjects} onSession={openRecent} onDownload={() => void openDesktopGithub()} />
         : step === 'devices'
           ? <RemoteComputers visible={visible} remote={remote} selectedDeviceId={deviceId} directConnection={directConnection} directSelected={directSelected} selectedDirectDeviceId={directTarget?.deviceId}
-            onDirectRemoved={id=>{if(directTarget?.deviceId===id){setDirectChoice(null);setSelectedTransport('remote');}}}
+            isNavigationCurrent={() => stillHere('devices', revision, scope)}
+            onDirectRemoved={(id,removedScope)=>{
+              if (!stillHere('devices', revision, scope) || directTarget?.deviceId !== id) return;
+              const current = getDirectConnectionState();
+              if (current.deviceId === id && removedScope && directDeliveryScope() && directDeliveryScope() !== removedScope) return;
+              setDirectChoice(null);setSelectedTransport('remote');
+            }}
             demoComputer={Platform.OS === 'web' && simulatedBound} demoComputerName={simulatedDeviceName} onDemoRename={setSimulatedDeviceName}
             onDemoForget={() => { setSimulatedBound(false); setDeviceId(profile?.deviceId ?? null); setSimulatedDeviceName(SIMULATED_REMOTE_DEVICE_NAME); setDemoApiAssignments({}); navigate('home'); }}
             onBind={() => navigate('pairing')} onSelected={selectComputer} />
@@ -593,7 +614,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
                 explorerAvailable={typeof hubSupportsExplorer === 'function' && hubSupportsExplorer() && Boolean(device?.capabilities?.includes('workspace.explorer.v1'))}
                 projectlessAvailable={typeof hubSupportsProjectless === 'function' && hubSupportsProjectless() && Boolean(device?.capabilities?.includes('session.projectless.v1'))}
                 onRefresh={() => { void loadAgentProfiles(deviceId).catch(() => undefined); }} onRegisterBack={newFlowBack.register} onClose={() => navigate('home')}
-                onComplete={selection => { if (!stillHere('new-session', revision, scope)) return; chooseAgent(selection.agent.id); void rememberAgent(selection.agent.id); setNewProjectPath(selection.cwd); setNewProjectless(selection.projectless === true); setNewWorkspaceMode(workspaceMode); setSeed(null); setThreadKey(null); setNewThread(true); returnToHome.current = true; navigate('workspace'); }} />
+                onComplete={selection => { if (!stillHere('new-session', revision, scope)) return; chooseAgent(selection.agent.id); setNewProjectPath(selection.cwd); setNewProjectless(selection.projectless === true); setNewWorkspaceMode(workspaceMode); setSeed(null); setThreadKey(null); setNewThread(true); returnToHome.current = true; navigate('workspace'); }} />
             : step === 'demo'
               ? demoView === 'flow'
                 ? <RemoteDemoFlow visible={visible} computer={{ ...SIMULATED_REMOTE_DEVICE, name: simulatedDeviceName }} agents={simulatedAgents} sessions={SIMULATED_REMOTE_SESSIONS} initialAgentId={demoFlowAgentId} initialWorkspaceMode={demoWorkspaceMode} onRegisterBack={registerDemoBack}

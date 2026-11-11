@@ -95,6 +95,7 @@ import type { Effort } from './effort';
 export interface Project { path: string; name: string }
 export interface DeviceStatus {
   deviceId: string; name: string; os: 'windows' | 'darwin' | 'linux' | string; version?: string;
+  computerId?: string;
   tools: DeviceTool[]; projects: Project[]; online: boolean; lastSeen: number;
   capabilities?: string[];
 }
@@ -206,6 +207,7 @@ function validSessionEventIdentity(value: unknown, sessionKey: string, _tool: st
 
 function parseDeviceStatus(input: unknown): DeviceStatus | undefined {
   if (!isRecord(input) || !validId(input.deviceId, 128) || !validText(input.name, 1024) || !validText(input.os, 128)
+    || !optionalField(input, 'computerId', value => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value))
     || input.online !== undefined && typeof input.online !== 'boolean'
     || input.lastSeen !== undefined && !validCounter(input.lastSeen)) return;
   const tools = input.tools === undefined ? [] : input.tools;
@@ -442,6 +444,9 @@ export function setHubFetch(next: FetchLike | null, enableIngress = false) {
 }
 /** Public, already validated authority handed to the Android background watcher. */
 export function hubIngressSnapshot(canonical: string) { return ingressEnabled ? ingress.pinSnapshot(canonical) : undefined; }
+export async function adoptRecoveredHubIngress(canonical: string, manifest: unknown, active: () => boolean): Promise<boolean> {
+  return ingressEnabled && await ingress.adoptPinnedManifest(canonical, manifest, active);
+}
 /** A candidate may reuse a saved pairing only after signed membership and a fresh pinned proof. */
 export async function verifyHubAlias(canonical: string, candidate: string): Promise<boolean> { return ingressEnabled && await ingress.verifyAlias(canonical, candidate); }
 export async function confirmPairingHubIdentity(canonical: string, active: () => boolean): Promise<void> { if (ingressEnabled) await ingress.confirmPairingIdentity(canonical, active); }
@@ -584,24 +589,43 @@ export async function diagnosticProbe(hub: Hub, deviceId: string, nonce: string,
 }
 
 export interface HubDiscovery { url: string; service: 'salcara-hub'; protocol: 'salcara-remote'; protocolVersion: 1; capabilities: string[] }
+function discoveryResult(result: Record<string, unknown>, url: string): HubDiscovery {
+  const capabilities = Array.isArray(result.capabilities) ? result.capabilities.filter((item): item is string => typeof item === 'string') : [];
+  if (result.service !== 'salcara-hub' || result.protocol !== 'salcara-remote') {
+    throw new HubError('这个地址未提供 Salcara 远程服务，请核对电脑端显示的连接地址，或联系服务管理员检查服务是否已启用', 404, 'remote_unsupported');
+  }
+  if (result.protocolVersion !== 1 || !Array.isArray(result.authModes) || !result.authModes.includes('device-pairing')
+    || !['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1'].every((item) => capabilities.includes(item))) {
+    throw new HubError('远程服务的版本或授权能力不兼容，请联系服务管理员检查更新；手机和电脑无需另装远程插件', 404, 'remote_unsupported');
+  }
+  return { url, service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, capabilities };
+}
 /** Discovery is public and requires all device-only pairing capabilities, not an API-user login. */
 export async function discoverStation(stationUrl: string): Promise<HubDiscovery> {
   let failure: unknown;
   for (const url of remoteDiscoveryCandidates(stationUrl)) {
+    let result: Record<string, unknown>;
     try {
-      const result = await request({ url }, '/ping', { timeoutMs: 2500, exact: true });
-      const capabilities = Array.isArray(result.capabilities) ? result.capabilities.filter((item): item is string => typeof item === 'string') : [];
-      if (result.service !== 'salcara-hub' || result.protocol !== 'salcara-remote' || result.protocolVersion !== 1
-        || !Array.isArray(result.authModes) || !result.authModes.includes('device-pairing')
-        || !['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1'].every((item) => capabilities.includes(item))) {
-        throw new HubError('这个中转站没有安装兼容的扫码远程插件，请联系站长', 404, 'remote_unsupported');
-      }
-      return { url, service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, capabilities };
+      result = await request({ url }, '/ping', { timeoutMs: 2500, exact: true });
     } catch (error) {
-      if (!failure || failure instanceof HubError && (failure.status === 404 || failure.status === 405)) failure = error;
+      if (!(error instanceof HubError) || error.status !== 404) throw error;
+      failure = error;
+      continue;
     }
+    // An incompatible successful response is not a missing path. Do not hide
+    // policy/identity/version failures by searching other routes on the host.
+    return discoveryResult(result, url);
   }
   throw failure;
+}
+
+/** Saved connections retain their logical identity while using already verified routing authority. */
+export async function discoverSavedStation(hubUrl: string): Promise<HubDiscovery> {
+  const canonical = canonicalHubUrl(hubUrl);
+  if (ingressEnabled) await ingress.refresh(canonical);
+  // This read is anonymous. Pair tokens are sent only by the subsequent
+  // authenticated request, after the router's fresh pinned identity proof.
+  return discoveryResult(await request({ url: canonical }, '/ping', { timeoutMs: 8000 }), canonical);
 }
 
 export async function confirmQrPair(qr: PairQr, phoneId?: string): Promise<{ token: string; device: DeviceStatus }> {
@@ -673,13 +697,14 @@ export function parseBotBindingPackage(raw: string): BotBindingPackage {
 
 export async function bindBotPhone(binding: BotBindingPackage, phoneId: string): Promise<BotPhoneBindResult> {
   if (!/^[a-f0-9]{64}$/.test(phoneId)) throw new HubError('手机身份无效', 400, 'bot_phone_invalid');
-  const result = await request({ url: botBindingEndpoint(binding) }, '/bot/phone/bind', { method: 'POST', body: { binding, phoneId }, timeoutMs: 20_000 });
+  const result = await request({ url: botBindingEndpoint(binding) }, '/bot/phone/bind', { method: 'POST', body: { binding, phoneId }, timeoutMs: 20_000, exact: true });
   if (typeof result.botToken !== 'string' || !/^[a-f0-9]{64}$/.test(result.botToken) || !Array.isArray(result.devices)
     || result.groupId !== binding.groupId || !result.devices.length || result.devices.length > 1000
     || result.devices.some((item: unknown) => {
       if (!item || typeof item !== 'object') return true;
       const device = item as DeviceStatus;
       return typeof device.deviceId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(device.deviceId)
+        || !optionalField(item as Record<string, unknown>, 'computerId', value => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value))
         || typeof device.name !== 'string' || !device.name.trim() || device.name.length > 200 || /[\u0000-\u001f]/.test(device.name)
         || !Array.isArray(device.tools) || !Array.isArray(device.projects);
     }) || new Set(result.devices.map(item => (item as DeviceStatus).deviceId)).size !== result.devices.length) throw new HubError('Hub 返回的 Bot 手机凭据无效', 502, 'bot_binding_invalid');

@@ -15,9 +15,14 @@ import { RemoteConnectionSyncNotice } from './RemoteConnectionSyncNotice';
 const DEVICE_ONLINE = '#12A86B';
 const DEVICE_OFFLINE = '#B45353';
 const stationHost = (url: string) => { try { return new URL(url).host; } catch { return '已保存连接'; } };
+const samePairing = (current: RemoteConnection, previous: RemoteConnection) => current.id === previous.id
+  && current.hubUrl === previous.hubUrl && current.deviceId === previous.deviceId && current.botGroupId === previous.botGroupId
+  && current.computerId === previous.computerId && current.pairedAt === previous.pairedAt;
+const sameDirectPairing = (current: DirectPairingInfo, previous: DirectPairingInfo) => current.deviceId === previous.deviceId
+  && current.pairingScope === previous.pairingScope && current.pairedAt === previous.pairedAt && current.endpoint === previous.endpoint;
 
 /** Saved pairings remain manageable while a computer is offline or its connection was interrupted. */
-export function RemoteComputers({ visible = true, remote, selectedDeviceId, directConnection, directSelected = false, selectedDirectDeviceId, onDirectRemoved, onSelected, onBind, demoComputer = false, demoComputerName = SIMULATED_REMOTE_DEVICE_NAME, onDemoRename, onDemoForget }: { visible?: boolean; remote: RemoteState; selectedDeviceId?: string | null; directConnection?: DirectConnectionState; directSelected?: boolean; selectedDirectDeviceId?: string; onDirectRemoved?: (deviceId:string)=>void; onSelected: (selection: ComputerSelection) => void; onBind: () => void; demoComputer?: boolean; demoComputerName?: string; onDemoRename?: (name: string) => void; onDemoForget?: () => void }) {
+export function RemoteComputers({ visible = true, remote, selectedDeviceId, directConnection, directSelected = false, selectedDirectDeviceId, isNavigationCurrent, onDirectRemoved, onSelected, onBind, demoComputer = false, demoComputerName = SIMULATED_REMOTE_DEVICE_NAME, onDemoRename, onDemoForget }: { visible?: boolean; remote: RemoteState; selectedDeviceId?: string | null; directConnection?: DirectConnectionState; directSelected?: boolean; selectedDirectDeviceId?: string; isNavigationCurrent?: () => boolean; onDirectRemoved?: (deviceId:string,pairingScope?:string)=>void; onSelected: (selection: ComputerSelection) => void; onBind: () => void; demoComputer?: boolean; demoComputerName?: string; onDemoRename?: (name: string) => void; onDemoForget?: () => void }) {
   const p = useProgrammingStyles();
   const dk = useDesk();
   const styles = useStyles();
@@ -52,29 +57,40 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
   const showDemoComputer = SIMULATED_REMOTE_COMPUTER_ENABLED && demoComputer;
   const demoActive = !directSelected && showDemoComputer && selectedDeviceId === SIMULATED_REMOTE_DEVICE_ID;
   const visibleComputers = computers + directPairings.length + (showDemoComputer ? 1 : 0);
+  const computerCards = computerGroups.map(group => ({ ...group, profile: group.connections.find(value => value.id === remote.connectionId)
+    ?? group.connections.find(value => health[value.id] === 'online')
+    ?? group.connections.find(value => health[value.id] === 'offline') ?? group.connections[0] }));
+  const nameCounts = new Map<string, number>();
+  for (const name of [...computerCards.map(card => connectionDisplayName(card.profile)), ...directPairings.map(pairing => pairing.deviceName || '直连电脑')]) {
+    const key = name.trim().toLocaleLowerCase();
+    nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+  }
+  const hasSameName = (name: string) => (nameCounts.get(name.trim().toLocaleLowerCase()) ?? 0) > 1;
   const managedConnections = manage ? remote.connections.filter(item => computerGroupKey(item) === computerGroupKey(manage)) : [];
   const switchConnections = switching ? remote.connections.filter(item => computerGroupKey(item) === computerGroupKey(switching)) : [];
   const revokedBotDevices = confirmRevoke?.botGroupId ? remote.connections.filter(item => item.hubUrl === confirmRevoke.hubUrl && item.botGroupId === confirmRevoke.botGroupId) : [];
   useEffect(() => {
+    if (!visible) return;
     let current = true;
     void listDirectPairings().then(items => { if (current) { setDirectPairings(items); setDirectError(''); } })
       .catch(() => { if (current) setDirectError('直连设备记录未读取，请下拉重试'); });
     return () => { current = false; };
-  }, [refreshRevision, directConnection?.deviceId, directConnection?.status]);
+  }, [visible, refreshRevision, directConnection?.deviceId, directConnection?.status]);
   useEffect(() => {
+    if (!visible) { setRefreshing(false); return; }
     let active = true;
     setHealth(Object.fromEntries(remote.connections.map(profile => [profile.id, 'checking' as const])));
     void probeSavedConnections().then(result => { if (active) setHealth(result); }).catch(() => {
       if (active) setHealth(Object.fromEntries(remote.connections.map(profile => [profile.id, 'unreachable' as const])));
     }).finally(() => { if (active) setRefreshing(false); });
     return () => { active = false; };
-  }, [remote.connections, refreshRevision]);
+  }, [visible, remote.connections, refreshRevision]);
   const select = async (profile: RemoteConnection) => {
     if (gate.current || !visible) return;
     const owner=activity.current;
     const stillWanted=()=>alive.current&&owner===activity.current&&activity.current.visible;
     const snapshot = getRemoteState();
-    if (!snapshot.connections.some(item => item.id === profile.id && item.deviceId === profile.deviceId && item.botGroupId === profile.botGroupId)) {
+    if (!snapshot.connections.some(item => samePairing(item, profile))) {
       showToast('这条连接已改变，请重新选择电脑', 'alert'); return;
     }
     const device = snapshot.devices.find(item => item.deviceId === profile.deviceId);
@@ -86,7 +102,7 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
       if (current.connectionId !== profile.id || current.phase !== 'ready' || current.signingIn
         || current.selectedHubUrl !== profile.hubUrl || current.connection !== 'open' || current.connectionError
         || !remoteDeviceConnected(current, current.devices.find(item=>item.deviceId===profile.deviceId))
-        || !current.connections.some(item => item.id === profile.id && item.deviceId === profile.deviceId && item.botGroupId === profile.botGroupId)) {
+        || !current.connections.some(item => samePairing(item, profile))) {
         throw new Error('未切换到这台电脑，请重新选择对应连接');
       }
       if (stillWanted()) onSelected(connectionSelection(profile));
@@ -101,7 +117,7 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
     gate.current = true; setBusy(`direct:${pairing.deviceId}`);
     try {
       const current = getDirectConnectionState();
-      if (current.deviceId !== pairing.deviceId || current.status !== 'connected') await reconnectDirect(pairing.deviceId);
+      if (current.deviceId !== pairing.deviceId || current.status !== 'connected') await reconnectDirect(pairing.deviceId, { stillWanted });
       const connected = getDirectConnectionState();
       if (connected.deviceId !== pairing.deviceId || connected.status !== 'connected') throw new Error('未连接到这台直连电脑，请重新选择');
       if (stillWanted()) onSelected({ kind: 'direct', deviceId: pairing.deviceId });
@@ -109,11 +125,21 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
     finally { gate.current = false; if (alive.current) setBusy(null); }
   };
   const removeDirect = async () => {
-    if (!revokeDirect || managementBusy || gate.current) return;
+    if (!visible || !revokeDirect || managementBusy || gate.current) return;
+    const owner = activity.current;
+    const stillWanted = () => alive.current && owner === activity.current && activity.current.visible && (isNavigationCurrent?.() ?? true);
+    if (!stillWanted()) return;
+    if (!directPairings.some(item => sameDirectPairing(item, revokeDirect))) {
+      setRevokeDirect(null); setManageDirect(null); showToast('直连绑定已改变，请刷新后重新确认', 'alert'); return;
+    }
+    const target = { ...revokeDirect };
     gate.current = true; setManagementBusy(true);
-    try { await forgetDirectPairing(revokeDirect.deviceId); onDirectRemoved?.(revokeDirect.deviceId); setRevokeDirect(null); setManageDirect(null); showToast('直连已解除', 'check'); }
-    catch (error) { showToast(error instanceof Error ? error.message : '无法解除直连', 'alert'); }
-    finally { gate.current = false; setManagementBusy(false); setRefreshRevision(value => value + 1); }
+    try {
+      await forgetDirectPairing(target.deviceId, target);
+      if (stillWanted()) { onDirectRemoved?.(target.deviceId, target.pairingScope); setRevokeDirect(null); setManageDirect(null); showToast('直连已解除', 'check'); }
+    }
+    catch (error) { if (stillWanted()) showToast(error instanceof Error ? error.message : '无法解除直连', 'alert'); }
+    finally { gate.current = false; if (alive.current) { setManagementBusy(false); setRefreshRevision(value => value + 1); } }
   };
   const rename = (profile: RemoteConnection) => {
     setManage(null);
@@ -128,21 +154,38 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
   const [demoEditing, setDemoEditing] = useState(false);
   const [demoNameDraft, setDemoNameDraft] = useState('');
   const [demoConfirmRevoke, setDemoConfirmRevoke] = useState(false);
+  useEffect(() => {
+    if (visible) return;
+    setManage(null); setSwitching(null); setConfirmRevoke(null); setEditing(null);
+    setManageDirect(null); setRevokeDirect(null);
+    setDemoManage(false); setDemoEditing(false); setDemoConfirmRevoke(false);
+  }, [visible]);
+  const pairingIsCurrent = (profile: RemoteConnection) => {
+    if (getRemoteState().connections.some(item => samePairing(item, profile))) return true;
+    showToast('这条连接已改变，请重新选择电脑', 'alert');
+    return false;
+  };
   const saveName = async () => {
-    if (!editing || managementBusy) return;
-    setManagementBusy(true);
-    try { await renameRemoteConnection(editing.id, name); setEditing(null); showToast('备注名已保存', 'check'); }
-    catch (error) { showToast((error as Error).message, 'alert'); }
-    finally { setManagementBusy(false); }
+    if (!visible || !editing || managementBusy || gate.current) return;
+    if (!pairingIsCurrent(editing)) { setEditing(null); return; }
+    const owner = activity.current;
+    const stillWanted = () => alive.current && owner === activity.current && activity.current.visible;
+    gate.current = true; setManagementBusy(true);
+    try { await renameRemoteConnection(editing.id, name); if (stillWanted()) { setEditing(null); showToast('备注名已保存', 'check'); } }
+    catch (error) { if (stillWanted()) showToast((error as Error).message, 'alert'); }
+    finally { gate.current = false; if (alive.current) setManagementBusy(false); }
   };
   const revoke = async () => {
-    if (!confirmRevoke || managementBusy) return;
-    setManagementBusy(true);
-    try { await revokeRemoteConnectionById(confirmRevoke.id); setConfirmRevoke(null); setManage(null); showToast('设备已删除', 'check'); }
-    catch (error) { showToast((error as Error).message, 'alert'); }
-    finally { setManagementBusy(false); }
+    if (!visible || !confirmRevoke || managementBusy || gate.current) return;
+    if (!pairingIsCurrent(confirmRevoke)) { setConfirmRevoke(null); return; }
+    const owner = activity.current;
+    const stillWanted = () => alive.current && owner === activity.current && activity.current.visible;
+    gate.current = true; setManagementBusy(true);
+    try { await revokeRemoteConnectionById(confirmRevoke.id); if (stillWanted()) { setConfirmRevoke(null); setManage(null); showToast('连接已解除', 'check'); } }
+    catch (error) { if (stillWanted()) showToast((error as Error).message, 'alert'); }
+    finally { gate.current = false; if (alive.current) setManagementBusy(false); }
   };
-  const checkAgain = () => { setRefreshing(true); setRefreshRevision(value => value + 1); };
+  const checkAgain = () => { if (visible) { setRefreshing(true); setRefreshRevision(value => value + 1); } };
   const saveDemoName = () => {
     const next = demoNameDraft.trim().replace(/\s+/g, ' ');
     if (!next) { showToast('请输入设备名称', 'alert'); return; }
@@ -171,13 +214,14 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
           <View style={styles.deviceCardStatus}><View style={[styles.statusDot, { backgroundColor: DEVICE_ONLINE }]} /><Text style={styles.deviceCardStatusText}>在线 · Windows</Text></View>
           <Text style={styles.deviceCardDetail}>开发预览 · 不会操作真实电脑</Text>
         </Pressable>
-        <View style={styles.deviceCardFooter}><Text style={[styles.currentLabel, !demoActive && styles.availableLabel]}>{demoActive ? '当前 · 演示' : '演示'}</Text><View style={styles.cardFooterActions}><Pressable accessibilityRole="button" accessibilityLabel={`管理设备 ${demoComputerName}`} onPress={() => setDemoManage(true)} style={styles.manageButton}><Text style={styles.manageButtonText}>管理</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel={`切换到 ${demoComputerName}`} onPress={() => onSelected({kind:'demo',deviceId:SIMULATED_REMOTE_DEVICE_ID})} style={styles.switchButton}><Text style={styles.switchButtonText}>切换</Text></Pressable></View></View>
+        <View style={styles.deviceCardFooter}><Text style={[styles.currentLabel, !demoActive && styles.availableLabel]}>{demoActive ? '当前 · 演示' : '演示'}</Text><View style={styles.cardFooterActions}><Pressable accessibilityRole="button" accessibilityLabel={`管理设备 ${demoComputerName}`} onPress={() => setDemoManage(true)} style={styles.manageButton}><Text style={styles.manageButtonText}>管理</Text></Pressable></View></View>
       </View> : null}
       {directPairings.map(pairing => {
         const current = directSelected && (selectedDirectDeviceId ?? directConnection?.deviceId) === pairing.deviceId;
         const connected = directConnection?.deviceId === pairing.deviceId && directConnection.status === 'connected';
         const connecting = busy === `direct:${pairing.deviceId}`;
         const name = pairing.deviceName || '直连电脑';
+        const actionName = `${name}${hasSameName(name) ? ` ${pairing.deviceId.slice(-6)}` : ''}`;
         return <View key={`direct:${pairing.deviceId}`} style={[styles.deviceCard, {width:cardWidth}, current && styles.deviceCardCurrent]}>
           <Pressable accessibilityRole="button" accessibilityLabel={`选择直连电脑 ${name} ${pairing.deviceId.slice(-6)}`} disabled={Boolean(busy)} onPress={() => void selectDirect(pairing)} style={({pressed}) => [styles.cardMain, pressed && styles.deviceCardPressed]}>
             <View style={styles.deviceCardTop}><View style={[styles.deviceIcon,current && styles.deviceIconCurrent]}><Icon name="laptop" size={22} color={current?dk.onInk:dk.text2}/></View>{connecting?<ActivityIndicator size="small" color={dk.muted}/>:<Icon name="chevronRight" size={17} color={dk.faint}/>}</View>
@@ -187,23 +231,20 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
             <Text numberOfLines={2} style={styles.deviceCardDetail}>{stationHost(pairing.endpoint)} · {pairing.deviceId.slice(-6)}</Text>
           </Pressable>
           <View style={styles.deviceCardFooter}><Text style={[styles.currentLabel,!current && styles.availableLabel]}>{current?'当前 · 直连':'可切换'}</Text><View style={styles.cardFooterActions}>
-            <Pressable accessibilityRole="button" accessibilityLabel={`管理直连 ${name}`} disabled={Boolean(busy)} onPress={()=>setManageDirect(pairing)} style={styles.manageButton}><Text style={styles.manageButtonText}>管理</Text></Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel={`${current?'打开':'切换到'}直连 ${name}`} disabled={Boolean(busy)} onPress={()=>void selectDirect(pairing)} style={styles.switchButton}><Text style={styles.switchButtonText}>{connecting?'连接中':current?'打开':'切换'}</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`管理直连 ${actionName}`} disabled={Boolean(busy)} onPress={()=>setManageDirect(pairing)} style={styles.manageButton}><Text style={styles.manageButtonText}>管理</Text></Pressable>
           </View></View>
         </View>;
       })}
-      {computerGroups.length ? computerGroups.map((group) => {
-        const item = group.connections.find(value => value.id === remote.connectionId)
-          ?? group.connections.find(value => health[value.id] === 'online')
-          ?? group.connections.find(value => health[value.id] === 'offline')
-          ?? group.connections[0];
+      {computerCards.length ? computerCards.map((group) => {
+        const item = group.profile;
         const current = item.id === remote.connectionId && !demoActive && !directSelected;
         const changing = group.connections.some(profile=>profile.id===busy);
         const device = current ? remote.devices.find(value => value.deviceId === item.deviceId) : undefined;
         const healthState = health[item.id] ?? 'checking';
         const online = current ? remoteDeviceConnected(remote, device) : healthState === 'online';
         const displayName = connectionDisplayName(item);
-        const sameName = computerGroups.some(value => value.key !== group.key && connectionDisplayName(value.connections[0]).toLocaleLowerCase() === displayName.toLocaleLowerCase());
+        const sameName = hasSameName(displayName);
+        const actionName = `${displayName}${sameName ? ` ${item.deviceId.slice(-6)}` : ''}`;
         const host = stationHost(item.hubUrl);
         const mode = connectionKind(item), modes = [...new Set(group.connections.map(connectionKind))];
         const stateLabel = savedConnectionHealthLabel(healthState, mode === 'bot');
@@ -212,14 +253,14 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
             : remote.connection === 'open' && device && !device.online ? '电脑离线' : '未连接' : stateLabel;
         const open = () => { if (group.connections.length > 1) setSwitching(item); else void select(item); };
         return <View key={group.key} style={[styles.deviceCard, { width: cardWidth }, current && styles.deviceCardCurrent]}>
-          <Pressable accessibilityRole="button" accessibilityLabel={`选择电脑 ${displayName}${sameName ? ` ${item.deviceId.slice(-6)}` : ''}`} accessibilityHint={modes.map(connectionModeLabel).join('、')} disabled={Boolean(busy) || Boolean(manage)} onPress={open} style={({ pressed }) => [styles.cardMain, pressed && styles.deviceCardPressed]}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`选择电脑 ${actionName}`} accessibilityHint={modes.map(connectionModeLabel).join('、')} disabled={Boolean(busy) || Boolean(manage)} onPress={open} style={({ pressed }) => [styles.cardMain, pressed && styles.deviceCardPressed]}>
             <View style={styles.deviceCardTop}><View style={[styles.deviceIcon, current && styles.deviceIconCurrent]}><Icon name="laptop" size={22} color={current ? dk.onInk : dk.text2} /></View>{changing ? <ActivityIndicator size="small" color={dk.muted} /> : <Icon name="chevronRight" size={17} color={dk.faint} />}</View>
             <Text style={styles.deviceCardName}>{displayName}</Text>
             <View style={styles.modes}>{modes.map(kind=><View key={kind} style={styles.modeBadge}><Icon name={connectionModeIcon(kind)} size={13} color={dk.text2}/><Text style={styles.modeText}>{connectionModeLabel(kind)}</Text></View>)}</View>
             <View style={styles.deviceCardStatus}><View style={[styles.statusDot, { backgroundColor: online ? DEVICE_ONLINE : DEVICE_OFFLINE }]} /><Text style={styles.deviceCardStatusText}>{changing?'正在切换':info}</Text></View>
             <Text numberOfLines={2} style={styles.deviceCardDetail}>{host}{sameName ? ` · ${item.deviceId.slice(-6)}` : ''}{group.connections.length > 1 ? ` · ${group.connections.length} 条连接` : ''}</Text>
           </Pressable>
-          <View style={styles.deviceCardFooter}><Text style={[styles.currentLabel, !current && styles.availableLabel]}>{current ? `当前 · ${connectionModeLabel(mode)}` : '可切换'}</Text><View style={styles.cardFooterActions}><Pressable accessibilityRole="button" accessibilityLabel={`管理设备 ${displayName}`} disabled={Boolean(busy)} onPress={() => setManage(item)} style={styles.manageButton}><Text style={styles.manageButtonText}>管理</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel={group.connections.length>1?`切换连接 ${displayName}`:`${current ? '打开' : '切换到'}${connectionModeLabel(mode)} ${displayName}`} onPress={open} disabled={Boolean(busy)} style={styles.switchButton}><Text style={styles.switchButtonText}>{group.connections.length>1?'切换连接':current?'打开':'切换'}</Text></Pressable></View></View>
+          <View style={styles.deviceCardFooter}><Text style={[styles.currentLabel, !current && styles.availableLabel]}>{current ? `当前 · ${connectionModeLabel(mode)}` : '可切换'}</Text><View style={styles.cardFooterActions}><Pressable accessibilityRole="button" accessibilityLabel={`管理设备 ${actionName}`} disabled={Boolean(busy)} onPress={() => setManage(item)} style={styles.manageButton}><Text style={styles.manageButtonText}>管理</Text></Pressable></View></View>
         </View>;
       }) : null}
       </View>
@@ -330,8 +371,6 @@ const useStyles = themed((c, d) => StyleSheet.create({
   manageButtonText: { color: d.text2, fontSize: 12, fontWeight: '600' },
   currentLabel: { color: d.accentText, fontSize: 11.5, fontWeight: '600' },
   availableLabel: { color: d.muted },
-  switchButton: { minHeight: 30, paddingHorizontal: 12, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: d.ink },
-  switchButtonText: { color: d.onInk, fontSize: 12, fontWeight: '600' },
   nameEditor: { gap: 10, paddingHorizontal: 4, paddingVertical: 8 },
   nameInput: { minHeight: 46, borderRadius: 11, borderWidth: StyleSheet.hairlineWidth, borderColor: d.lineStrong, backgroundColor: d.surface2, paddingHorizontal: 12, color: d.text, fontSize: 15 },
 }));

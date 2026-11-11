@@ -5,7 +5,7 @@ import { computerGroupKey, connectionDisplayName, connectionId, connectionToken,
 import { resetDeliveryForTests } from '../remote/delivery';
 import { resetQuestionOutboxForTests } from '../remote/question-outbox';
 import { parseConnectionSync } from '../remote/connection-sync';
-import { syncRemoteConnections } from '../remote/store';
+import { syncRemoteConnections, rememberAgent } from '../remote/store';
 import { bootRemote, connectStation, getPendingRemoteMessage, getRemoteState, loadAgentProfiles, loadSessions, openSession, pairRemoteQr, pairScannedRemoteQr, parseScannedRemoteQr, parseRemoteQr, probeSavedConnections, refreshDevices, remoteDeliveryScope, revokeRemoteConnection, revokeRemoteConnectionById, resetRemoteForTests, sendToSession, setAgentApi, setRemoteForeground, setRemoteScreenOpen, signOutRemote, syncSessionEvents, timelineKey, useSavedConnection } from '../remote/store';
 
 const mockSettings = new Map<string, string>();
@@ -178,7 +178,7 @@ test('direct QR obtains the station from QR, discovers before claiming and prese
   expect(calls[0].url).toBe(`${url}/ping`); expect(calls[1].url).toBe(`${url}/app/pair/qr`);
   const before = getRemoteState().connectionId;
   setHubFetch((async () => response({ service: 'wrong' })) as FetchLike);
-  await expect(pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify({ ...qr(), hubUrl: 'https://other.example/salcara-hub/v1' })))).rejects.toThrow('兼容');
+  await expect(pairScannedRemoteQr(parseScannedRemoteQr(JSON.stringify({ ...qr(), hubUrl: 'https://other.example/salcara-hub/v1' })))).rejects.toThrow('未提供');
   expect(getRemoteState().connectionId).toBe(before); expect(getRemoteState().connections).toHaveLength(1);
   expect(mockGetProviderKey).not.toHaveBeenCalled();
 });
@@ -407,7 +407,7 @@ test('station handover blocks durable message receipts before moving A to B', as
   expect(getRemoteState().connectionId).toBe(bId);
 });
 
-test('station-only handover freezes the selected source for restricted authorization without changing API', async () => {
+test.each([true, false])('station-only handover uses only this computer’s explicit source preference (remembered=%s)', async remembered => {
   const other = 'https://restricted-backup.example/salcara-hub/v1';
   const api = 'api_' + 'b'.repeat(16);
   const writes: Record<string, unknown>[] = [], challenges: Record<string, unknown>[] = [];
@@ -443,9 +443,16 @@ test('station-only handover freezes the selected source for restricted authoriza
   const bId = getRemoteState().connectionId!;
   await useSavedConnection(aId, true);
   await loadAgentProfiles('pc-1');
+  if (remembered) await rememberAgent('codex');
+  else mockSettings.set('remote_last_agent_v1', 'codex'); // Legacy global choice has no proven owning computer.
   await useSavedConnection(bId);
   expect(writes).toHaveLength(2); expect(challenges).toHaveLength(1);
-  expect(writes[0].command).toMatchObject({ agent: 'codex', accountId: api, sourceOnly: true });
+  if (remembered) expect(writes[0].command).toMatchObject({ agent: 'codex', accountId: api, sourceOnly: true });
+  else {
+    expect(writes[0].command).not.toHaveProperty('agent');
+    expect(writes[0].command).not.toHaveProperty('accountId');
+    expect(writes[0].command).not.toHaveProperty('sourceOnly');
+  }
   expect(writes[0].command).not.toHaveProperty('model');
   expect(writes[1].command).toEqual(writes[0].command);
   expect(challenges[0].command).toEqual(writes[0].command);
@@ -538,7 +545,7 @@ test('Bridge direct-relay QR is rejected before any Hub discovery or credential 
 test('discovery rejects the old API-account plugin and requires supported protocol capabilities', async () => {
   let payload: unknown = { service: 'salcara-hub' };
   setHubFetch((async () => response(payload)) as FetchLike);
-  await expect(discoverStation(origin)).rejects.toThrow('兼容');
+  await expect(discoverStation(origin)).rejects.toThrow('未提供');
   payload = { ...discovery, capabilities: capabilities.slice(1) };
   await expect(discoverStation(origin)).rejects.toThrow('兼容');
   payload = discovery;

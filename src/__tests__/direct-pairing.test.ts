@@ -106,7 +106,7 @@ test('device management lists every valid direct peer without exposing secrets o
   mockConnect.mockClear();mockSend.mockClear();
   const peers=await listDirectPairings();
   expect(peers.map(item=>item.deviceId)).toEqual(['pc-1','pc-2']);
-  expect(peers[1]).toEqual({deviceId:'pc-2',deviceName:'Second PC',endpoint:original.urls[0],pairedAt:original.pairedAt});
+  expect(peers[1]).toEqual({deviceId:'pc-2',deviceName:'Second PC',endpoint:original.urls[0],pairedAt:original.pairedAt,pairingScope:expect.stringMatching(/^direct:/)});
   expect(JSON.stringify(peers)).not.toContain(original.secret);expect(peers[0]).not.toHaveProperty('phoneId');
   expect(mockConnect).not.toHaveBeenCalled();expect(mockSend).not.toHaveBeenCalled();
 });

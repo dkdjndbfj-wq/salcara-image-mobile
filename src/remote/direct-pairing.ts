@@ -56,6 +56,8 @@ export interface DirectPairingInfo {
   deviceName?: string;
   endpoint: string;
   pairedAt: number;
+  /** Opaque binding identity; no phone secret or certificate bytes are exposed. */
+  pairingScope: string;
 }
 
 export async function listDirectPairings(): Promise<DirectPairingInfo[]> {
@@ -66,7 +68,7 @@ export async function listDirectPairings(): Promise<DirectPairingInfo[]> {
       try {
         const value: unknown = JSON.parse(raw || 'null');
         return validCredential(value, deviceId)
-          ? { deviceId, deviceName: value.deviceName, endpoint: value.urls[0], pairedAt: value.pairedAt }
+          ? { deviceId, deviceName: value.deviceName, endpoint: value.urls[0], pairedAt: value.pairedAt, pairingScope: credentialScope(value) }
           : null;
       } catch { return null; }
     }));
@@ -98,7 +100,7 @@ let activeDeliveryScope = '';
 let activeSubscriptions: Listener[] = [];
 let cancelActiveAuthentication: (() => void) | undefined;
 let pairingFlight: { key: string; promise: Promise<DirectConnectionState> } | null = null;
-let reconnectFlight: { deviceId: string; promise: Promise<DirectConnectionState> } | null = null;
+let reconnectFlight: { deviceId: string; stillWanted?: () => boolean; promise: Promise<DirectConnectionState> } | null = null;
 let restoreFlight: Promise<DirectConnectionState> | null = null;
 let mutationTail: Promise<void> = Promise.resolve();
 
@@ -445,7 +447,8 @@ function authenticateEndpoint(
   });
 }
 
-async function connectCredential(record: DirectCredential, token?: string, ownerGeneration = ++generation, tokenExpiresAt?: number): Promise<DirectConnectionState> {
+async function connectCredential(record: DirectCredential, token?: string, ownerGeneration = ++generation, tokenExpiresAt?: number, stillWanted: () => boolean = () => true): Promise<DirectConnectionState> {
+  if (ownerGeneration !== generation || !stillWanted()) throw new DirectConnectionError('disconnected', '直连选择已改变');
   closeCurrentNative();
   activeDeviceId = record.deviceId;
   activeFingerprint = record.fingerprint;
@@ -454,13 +457,19 @@ async function connectCredential(record: DirectCredential, token?: string, owner
   const phoneHash = hex(sha256(new TextEncoder().encode(record.secret)));
   let lastError = new DirectConnectionError('network', '电脑直连不可用', true);
   for (const endpoint of record.urls) {
-    if (ownerGeneration !== generation) throw new DirectConnectionError('disconnected', '直连选择已改变');
+    if (ownerGeneration !== generation || !stillWanted()) {
+      if (ownerGeneration === generation) disconnectDirect();
+      throw new DirectConnectionError('disconnected', '直连选择已改变');
+    }
     if (token && tokenExpiresAt !== undefined && tokenExpiresAt <= Date.now()) throw new DirectConnectionError('expired', '直连配对码已过期，请在电脑上重新生成');
     try {
       const result = await authenticateEndpoint(endpoint, record.fingerprint, {
         ...(token ? { token } : {}), phoneId: record.phoneId, phoneHash, deviceId: record.deviceId,
       }, ownerGeneration);
-      if (ownerGeneration !== generation) throw new DirectConnectionError('disconnected', '直连选择已改变', false, Boolean(token));
+      if (ownerGeneration !== generation || !stillWanted()) {
+        if (ownerGeneration === generation) disconnectDirect();
+        throw new DirectConnectionError('disconnected', '直连选择已改变', false, Boolean(token));
+      }
       // The long-lived binding was safely stored before the one-time token was
       // sent. Avoid a second keychain write after desktop acceptance: a local
       // storage hiccup here must not turn a successful pair into an orphan.
@@ -525,8 +534,10 @@ export function pairDirectQr(input: DirectPairQr): Promise<DirectConnectionState
 }
 
 /** Reconnect only to the stored direct WSS URLs; failure never selects a Hub. */
-export async function reconnectDirect(deviceId: string): Promise<DirectConnectionState> {
-  if (reconnectFlight?.deviceId === deviceId) return reconnectFlight.promise;
+export async function reconnectDirect(deviceId: string, options: { stillWanted?: () => boolean } = {}): Promise<DirectConnectionState> {
+  const stillWanted = options.stillWanted;
+  if (stillWanted && !stillWanted()) throw new DirectConnectionError('disconnected', '直连选择已改变');
+  if (reconnectFlight?.deviceId === deviceId && reconnectFlight.stillWanted === stillWanted) return reconnectFlight.promise;
   if (reconnectFlight) {
     generation += 1;
     closeCurrentNative();
@@ -543,19 +554,23 @@ export async function reconnectDirect(deviceId: string): Promise<DirectConnectio
       throw mapped;
     }
     if (ownerGeneration !== generation) throw new DirectConnectionError('disconnected', '直连选择已改变');
+    if (stillWanted && !stillWanted()) {
+      disconnectDirect();
+      throw new DirectConnectionError('disconnected', '直连选择已改变');
+    }
     if (!record) {
       const error = new DirectConnectionError('pairing_rejected', '没有这台电脑的直连凭据，请重新扫描二维码');
       if (ownerGeneration === generation) publish({ status: 'error', deviceId, error: error.message, errorCode: error.code });
       throw error;
     }
-    try { return await connectCredential(record, undefined, ownerGeneration); }
+    try { return await connectCredential(record, undefined, ownerGeneration, undefined, stillWanted); }
     catch (error) {
       const mapped = error instanceof DirectConnectionError ? error : mapNativeError(error instanceof Error ? error.message : '电脑直连失败');
-      if (mapped.code === 'pairing_rejected') await forgetDirectPairing(deviceId);
+      if (mapped.code === 'pairing_rejected') await forgetDirectPairing(deviceId, { pairingScope: credentialScope(record) });
       throw mapped;
     }
   })();
-  reconnectFlight = { deviceId, promise };
+  reconnectFlight = { deviceId, stillWanted, promise };
   void promise.finally(() => { if (reconnectFlight?.promise === promise) reconnectFlight = null; }).catch(() => undefined);
   return promise;
 }
@@ -608,16 +623,32 @@ export function disconnectDirect(): void {
 }
 
 /** Forget this phone's direct credential. The desktop can still revoke its side independently. */
-export async function forgetDirectPairing(deviceId: string): Promise<void> {
+export async function forgetDirectPairing(deviceId: string, expected?: { pairingScope: string; pairedAt?: number; endpoint?: string }): Promise<void> {
   const key = credentialKey(deviceId);
+  // Capture before joining the storage queue. A stale confirmation may not
+  // follow a mutable card object into a newly issued credential for this ID.
+  const expectedPairing = expected ? { ...expected } : undefined;
+  const ownerGeneration = generation;
+  let retiredGeneration: number | undefined;
   let removedScope='';
-  if (activeDeviceId === deviceId || state.deviceId === deviceId) disconnectDirect();
   await mutate(async () => {
     const previousCredential = await SecureStore.getItemAsync(key);
-    if(previousCredential){try{const previous:unknown=JSON.parse(previousCredential);if(validCredential(previous,deviceId))removedScope=credentialScope(previous);}catch{/* An invalid credential has no proven draft scope. */}}
+    let previous: DirectCredential | undefined;
+    if(previousCredential){try{const parsed:unknown=JSON.parse(previousCredential);if(validCredential(parsed,deviceId)){previous=parsed;removedScope=credentialScope(parsed);}}catch{/* An invalid credential has no proven draft scope. */}}
+    if (expectedPairing && (!previous || !expectedPairing.pairingScope || removedScope !== expectedPairing.pairingScope
+      || expectedPairing.pairedAt !== undefined && previous.pairedAt !== expectedPairing.pairedAt
+      || expectedPairing.endpoint !== undefined && previous.urls[0] !== expectedPairing.endpoint)) {
+      throw new DirectConnectionError('disconnected', '直连绑定已改变，请刷新后重新确认');
+    }
     const previousIndex = await SecureStore.getItemAsync(CREDENTIAL_INDEX_KEY);
     const next = indexedDeviceIds(previousIndex).filter(id => id !== deviceId);
     const nextIndex = next.length ? JSON.stringify(next) : null;
+    // Storage CAS succeeded. Do not disconnect a newer authentication that
+    // started while this removal waited, even if it reused the same device ID.
+    if (generation === ownerGeneration && (activeDeviceId === deviceId || state.deviceId === deviceId)
+      && (!removedScope || activeDeliveryScope === removedScope)) {
+      disconnectDirect(); retiredGeneration = generation;
+    }
     try {
       await SecureStore.deleteItemAsync(key);
       if (nextIndex) await SecureStore.setItemAsync(CREDENTIAL_INDEX_KEY, nextIndex, { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
@@ -639,7 +670,8 @@ export async function forgetDirectPairing(deviceId: string): Promise<void> {
       throw error;
     }
   });
-  if ((activeDeviceId === deviceId || state.deviceId === deviceId)&&(!removedScope||activeDeliveryScope===removedScope)) {
+  if (retiredGeneration !== undefined && generation === retiredGeneration
+    && (activeDeviceId === deviceId || state.deviceId === deviceId)&&(!removedScope||activeDeliveryScope===removedScope)) {
     activeDeviceId = undefined;
     activeFingerprint = undefined;
     activeDeliveryScope = '';
@@ -651,6 +683,9 @@ export async function forgetDirectPairing(deviceId: string): Promise<void> {
       (require('./direct-message-queue') as typeof import('./direct-message-queue')).clearDirectMessageQueueScope(removedScope),
       (require('./direct-pending-operation') as typeof import('./direct-pending-operation')).clearDirectPendingOperationScope(removedScope),
       (require('./direct-api-selection') as typeof import('./direct-api-selection')).clearDirectApiSelectionScope(removedScope),
+      // This optional navigation preference cannot authorize a new pairing;
+      // unavailable preference storage must not make unpairing fail.
+      (require('./agent-preferences') as typeof import('./agent-preferences')).clearPreferredAgent({ kind: 'direct', connectionId: removedScope, deviceId }).catch(() => undefined),
     ]);
     if(cleanup.some(result => result.status === 'rejected'))throw new Error('电脑已解除绑定，但本地草稿清理失败；已删除的绑定不会恢复');
   }

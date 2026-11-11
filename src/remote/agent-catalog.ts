@@ -12,3 +12,11 @@ export const AGENT_CHOICES: ReadonlyArray<{ id: AgentId; name: string; tool: Too
 export function agentDisplayName(id: string | null | undefined, profiles?: readonly Pick<AgentProfile, 'id' | 'name'>[]): string {
   return profiles?.find(profile => profile.id === id)?.name || AGENT_CHOICES.find(choice => choice.id === id)?.name || id || 'Agent';
 }
+
+/** Notification labels only; unknown identities must not impersonate a built-in Agent. */
+export function sessionAgentDisplayName(session?: { tool?: string; client?: string } | null, fallbackTool?: string | null): string {
+  const tool = session?.tool || fallbackTool;
+  if (!tool || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(tool)) return 'Agent';
+  const id = tool === 'claude' && /Claude Desktop/i.test(session?.client ?? '') ? 'claude-desktop' : tool;
+  return agentDisplayName(id);
+}

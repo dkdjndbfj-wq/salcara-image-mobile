@@ -223,9 +223,37 @@ class SalcaraWatchService : Service() {
   private fun ingressUrl(current: JSONObject): String {
     val hubUrl = current.optString("hubUrl").trimEnd('/')
     if (!hubUrl.startsWith("https://") && !hubUrl.startsWith("http://")) throw AuthError()
-    return ingress.resolve(hubUrl, current.optJSONObject("ingressManifest"), current.optString("navigationScope")) {
-      active && running && !Thread.currentThread().isInterrupted && config === current && SalcaraNotifyModule.notificationsAllowed(this)
+    val ownerGeneration = generation
+    try {
+      return ingress.resolve(hubUrl, current.optJSONObject("ingressManifest"), current.optString("navigationScope")) {
+        active && running && !Thread.currentThread().isInterrupted && generation == ownerGeneration && config === current && SalcaraNotifyModule.notificationsAllowed(this)
+      }
+    } finally {
+      // Even if a nonce endpoint is temporarily unavailable, a freshly signed
+      // same-pin catalog is useful recovery data, not credential authority.
+      persistIngressSnapshot(current, ownerGeneration)
     }
+  }
+
+  private fun persistIngressSnapshot(current: JSONObject, ownerGeneration: Long) = synchronized(configLock) {
+    if (!active || !running || activeService !== this || generation != ownerGeneration || config !== current || !current.optBoolean("follow")) return@synchronized
+    val envelope = ingress.recoverySnapshot(current.optString("hubUrl").trimEnd('/'), current.optString("navigationScope"), current.optJSONObject("ingressManifest")) ?: return@synchronized
+    val stored = snapshot ?: SalcaraWatchRecovery.create(current, startedAt, standby, System.currentTimeMillis()) ?: return@synchronized
+    val merged = SalcaraWatchRecovery.withIngressManifest(stored, config ?: return@synchronized, current, envelope, System.currentTimeMillis()) ?: return@synchronized
+    // Preserve the checkpoint object's identity and monotonic lease deadline.
+    // In particular, do not replace session cursors with the original handoff.
+    if (leaseIdentity !== stored) {
+      leaseIdentity = stored
+      leaseDeadlineElapsed = SystemClock.elapsedRealtime() + (stored.optLong("expiresAt") - System.currentTimeMillis()).coerceAtLeast(0)
+    }
+    stored.put("config", merged.getJSONObject("config"))
+    snapshot = stored
+    current.put("ingressManifest", JSONObject(envelope.toString()))
+    val payload = stored.toString()
+    if (recoveryReady && payload == lastCheckpointPayload) return@synchronized
+    recoveryReady = SalcaraWatchVault.save(this, stored)
+    stopReason = if (recoveryReady) "" else "storage"
+    lastCheckpointPayload = if (recoveryReady) payload else null
   }
 
   private fun pairingRejected(connection: HttpURLConnection, status: Int): Boolean {
@@ -297,7 +325,7 @@ class SalcaraWatchService : Service() {
           sessionTitles["$deviceId|$sessionKey"] = it
           if (sessionTitles.size > 200) sessionTitles.remove(sessionTitles.keys.first())
         }
-        val agent = when (event.optString("tool")) { "codex" -> "Codex"; "claude" -> "Claude Code"; else -> "Agent" }
+        val agent = SalcaraWatchRecovery.agentDisplayName(event.optString("tool"))
         handle(current, Target(deviceId, sessionKey, sessionTitles["$deviceId|$sessionKey"] ?: "电脑上的任务", agent, 0), event)
       }
       // `nextSeq` is allowed to describe the station tail, while this read is
@@ -408,7 +436,7 @@ class SalcaraWatchService : Service() {
     const val MAX_WATCH_MS = 2L * 60 * 60 * 1000
 
     private val configLock = Any()
-    private var generation = 0L
+    @Volatile private var generation = 0L
     @Volatile private var activeService: SalcaraWatchService? = null
     @Volatile private var snapshot: JSONObject? = null
     @Volatile private var recoveryReady = false
@@ -434,6 +462,13 @@ class SalcaraWatchService : Service() {
         activeService?.stopSelf()
         return@synchronized
       }
+      // A same-pairing JS handoff may still carry an older public catalog than
+      // the background worker discovered. Never downgrade that locator. This
+      // export is a volatile snapshot, so the main thread never waits for I/O.
+      val persistedConfig = (snapshot?.takeIf { SalcaraWatchRecovery.validate(it, System.currentTimeMillis()) != null }
+        ?: SalcaraWatchVault.peek(context))?.optJSONObject("config")
+      (activeService?.ingress ?: SalcaraIngressRouter()).recoverySnapshot(value.optString("hubUrl").trimEnd('/'), value.optString("navigationScope"), value.optJSONObject("ingressManifest"), persistedConfig)
+        ?.let { value.put("ingressManifest", it) }
       config = value
       snapshot = null
       recoveryReady = false
@@ -462,6 +497,22 @@ class SalcaraWatchService : Service() {
 
     fun status(): Map<String, Any> = synchronized(configLock) { mapOf("running" to running, "standby" to standby,
       "recoveryReady" to recoveryReady, "expiresAt" to (snapshot?.optLong("expiresAt") ?: 0L), "reason" to stopReason) }
+    fun recoveredIngress(context: Context): String? = synchronized(configLock) {
+      if (!SalcaraNotifyModule.notificationsAllowed(context)) return@synchronized null
+      val current = config
+      if (current != null && !current.optBoolean("follow")) return@synchronized null
+      val restored = snapshot?.takeIf { SalcaraWatchRecovery.validate(it, System.currentTimeMillis()) != null }
+        ?: SalcaraWatchVault.peek(context) ?: return@synchronized null
+      val saved = restored.getJSONObject("config")
+      if (current != null && (saved.optString("hubUrl").trimEnd('/') != current.optString("hubUrl").trimEnd('/')
+        || saved.optString("navigationScope") != current.optString("navigationScope")
+        || saved.optString("pairToken") != current.optString("pairToken") || saved.optString("key") != current.optString("key"))) return@synchronized null
+      val publicConfig = JSONObject(saved.toString())
+      val router = activeService?.ingress ?: SalcaraIngressRouter()
+      router.recoverySnapshot(saved.optString("hubUrl").trimEnd('/'), saved.optString("navigationScope"), saved.optJSONObject("ingressManifest"))
+        ?.let { publicConfig.put("ingressManifest", it) }
+      router.publicRecoverySnapshot(publicConfig)?.toString()
+    }
     const val STANDBY_TITLE = "Salcara 正在待命"
     const val STANDBY_BODY = "电脑上的任务完成、失败或收到最终回复时会提醒你"
   }

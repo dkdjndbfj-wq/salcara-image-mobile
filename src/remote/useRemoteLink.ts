@@ -10,8 +10,7 @@ import { startRemotePush } from './push';
 import { foregroundTaskNotice } from './notification-policy';
 import { parseSalcaraThreadLink } from './remote-links';
 import { nextBackgroundSyncBatch } from './background-sync';
-
-const TOOL_NAMES: Record<string, string> = { codex: 'Codex', claude: 'Claude Code' };
+import { sessionAgentDisplayName } from './agent-catalog';
 
 /** Restore pairing locally; network access is demand-driven by the visible remote workspace. */
 export function useRemoteLink(onOpen: () => void) {
@@ -59,7 +58,8 @@ export function useRemoteLink(onOpen: () => void) {
     return onApprovalAlert((approval) => {
       if (AppState.currentState !== 'active') return;
       const scope = remoteDeliveryScope();
-      showToast(`电脑上的 ${TOOL_NAMES[approval.tool] ?? approval.tool} 需要批准：${approval.title}`, 'code', () => {
+      const session = getRemoteState().sessions[approval.deviceId]?.list.find(item => item.sessionKey === approval.sessionKey);
+      showToast(`电脑上的 ${sessionAgentDisplayName(session, approval.tool)} 需要批准：${approval.title}`, 'code', () => {
         setRemoteFocus(scope === remoteDeliveryScope() ? { deviceId: approval.deviceId, sessionKey: approval.sessionKey } : { home: true });
         openRef.current();
       });
@@ -74,7 +74,7 @@ export function useRemoteLink(onOpen: () => void) {
     const label = (event: HubEvent) => {
       const session = getRemoteState().sessions[event.deviceId]?.list.find(item => item.sessionKey === event.sessionKey);
       const name = session?.title?.trim() || '远程任务';
-      const agent = /Claude Desktop/i.test(session?.client ?? '') ? 'Claude Desktop' : event.tool === 'codex' ? 'Codex' : 'Claude Code';
+      const agent = sessionAgentDisplayName(session, event.tool);
       const notice = foregroundTaskNotice(event, name, isVisibleThread(event.deviceId, event.sessionKey), agent);
       if (!notice) return;
       const sessionId = `${event.deviceId}|${event.sessionKey}`;

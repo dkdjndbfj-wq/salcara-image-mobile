@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { setHubFetch, type FetchLike, type RemoteApiOption } from '../remote/client';
 import { connectionId, saveConnection } from '../remote/connections';
-import { apiStationChoices, bootRemote, getRemoteState, loadAgentProfiles, pairScannedRemoteQr, parseScannedRemoteQr, resetRemoteForTests, setAgentApi, useSavedConnection } from '../remote/store';
+import { apiStationChoices, bootRemote, getRemoteState, loadAgentProfiles, pairScannedRemoteQr, parseScannedRemoteQr, rememberAgent, resetRemoteForTests, setAgentApi, useSavedConnection } from '../remote/store';
 
 const mockSettings = new Map<string, string>();
 const mockSecrets = new Map<string, string>();
@@ -151,6 +151,7 @@ test('capability withdrawal during journal persistence cancels before dispatch a
 test('transport-only switch preserves a source without granting permission to run it at the destination', async () => {
   await pair(); currentApi = option.id;
   await loadAgentProfiles('pc-a');
+  await rememberAgent('codex');
   await useSavedConnection(bId);
   expect(writes).toHaveLength(1);
   expect(writes[0].body.command).toMatchObject({ sourceOnly: true, accountId: option.id });

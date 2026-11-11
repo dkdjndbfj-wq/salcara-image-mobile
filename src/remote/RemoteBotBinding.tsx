@@ -4,7 +4,7 @@ import { StyleSheet, Text, TextInput, View } from 'react-native';
 import { showToast } from '../components/ui';
 import { themed, useDesk } from '../theme';
 import { botConnectionId, saveBotConnections, type RemoteConnection } from './connections';
-import { bindBotPhone, botBindingEndpoint, parseBotBindingPackage } from './client';
+import { bindBotPhone, botBindingEndpoint, confirmPairingHubIdentity, parseBotBindingPackage } from './client';
 import { connectionSelection, type ComputerSelection } from './computer-connections';
 import { phoneIdentity } from './phone-identity';
 import { getRemoteState, reloadSavedConnections, remoteConnectionRevision, useSavedConnection, type RemoteState } from './store';
@@ -39,11 +39,14 @@ export function RemoteBotBinding({ remote, onBound }: { remote: RemoteState; onB
           hubUrl,
           deviceId: item.deviceId,
           deviceName: item.name,
+          ...(item.computerId ? { computerId: item.computerId } : {}),
           pairedAt: Date.now(),
           botGroupId: result.groupId,
         }));
       await saveBotConnections(profiles, result.botToken);
       await reloadSavedConnections();
+      if (!mounted.current || revision !== remoteConnectionRevision()) return;
+      await confirmPairingHubIdentity(hubUrl, () => mounted.current && revision === remoteConnectionRevision());
       if (!mounted.current || revision !== remoteConnectionRevision()) return;
       const firstProfile = profiles.find(item => item.id === getRemoteState().connectionId)
         ?? profiles.find(profile => result.devices.some(item => item.deviceId === profile.deviceId && item.online)) ?? profiles[0];

@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 import { requireOptionalNativeModule } from 'expo';
 
-import { hubIngressSnapshot, type HubEvent, type SessionInfo } from './client';
+import { adoptRecoveredHubIngress, hubIngressSnapshot, type HubEvent, type SessionInfo } from './client';
 import { onPushChange, pushStatus, standbyEnabled, syncPush } from './push';
 import { getRemoteState, hubSupportsWait, onRemoteChange, onRemoteEvent, pushTarget, sessionCursor, setRemoteFocus, watchCredentials } from './store';
 import { loadNotificationPreference, onNotificationPreferenceChange, remoteNotificationsEnabled, setNotificationPreference } from './notification-preferences';
 import { notificationScopeFor, validNotificationScope } from './notification-scope';
 import { taskNoticeKind } from './notification-policy';
+import { sessionAgentDisplayName } from './agent-catalog';
+import { sessionKeyAgentId } from './projection';
 
 /**
  * Task notifications for the 编程 space.
@@ -32,6 +34,7 @@ type Native = {
   watchStatus?(): BackgroundWatchStatus;
   wait(ms: number): Promise<void>;
   configureWatch?(json: string): void;
+  recoveredIngress?(): string | null;
   consumeLaunchPayload(): string | null;
   addListener?(event: 'onOpen' | 'onPermissionChange', listener: (event: { payload?: string; allowed?: boolean }) => void): { remove(): void };
 };
@@ -77,7 +80,6 @@ export async function requestNotificationPermission(force = false): Promise<bool
   } catch { return false; }
 }
 
-const AGENT = (session?: Pick<SessionInfo, 'tool' | 'client'>) => !session ? 'Agent' : session.tool === 'codex' ? 'Codex' : /Claude Desktop/i.test(session.client) ? 'Claude Desktop' : 'Claude Code';
 const sessionOf = (deviceId: string, sessionKey: string) => getRemoteState().sessions[deviceId]?.list.find((item) => item.sessionKey === sessionKey);
 const currentNotificationScope = () => { const target = pushTarget(); return target ? notificationScopeFor(target.hub, target.deviceId) : null; };
 
@@ -112,7 +114,7 @@ function onEvent(event: HubEvent) {
   if (Platform.OS === 'ios') return;
   const session = sessionOf(event.deviceId, event.sessionKey);
   const name = session?.title?.trim() || '远程任务';
-  const agent = AGENT(session);
+  const agent = sessionAgentDisplayName(session, event.tool);
   const turnKey = event.turnId ? `${event.deviceId}|${event.sessionKey}|${event.turnId}` : null;
   switch (taskNoticeKind(event)) {
     case 'completed':
@@ -134,7 +136,7 @@ function onEvent(event: HubEvent) {
 // sessions natively (JS timers pause there, and the JS runtime may be gone after
 // a swipe-away) and posts completion, failure, or final-reply notifications.
 
-type Running = { deviceId: string; session: SessionInfo };
+type Running = { deviceId: string; session: Pick<SessionInfo, 'sessionKey' | 'title' | 'updatedAt'> & Partial<Pick<SessionInfo, 'tool' | 'client'>> };
 const recentlySent = new Map<string, { deviceId: string; sessionKey: string; at: number; scope: string }>();
 /** A task the user just sent counts as running before the computer reports it. */
 export function noteTaskSent(deviceId: string, sessionKey: string) {
@@ -148,7 +150,7 @@ const runningSessions = (): Running[] => {
   const state = getRemoteState();
   const target = pushTarget(), scope = currentNotificationScope();
   if (!target || !scope) { recentlySent.clear(); return []; }
-  const live = Object.entries(state.sessions)
+  const live: Running[] = Object.entries(state.sessions)
     .flatMap(([deviceId, entry]) => (entry?.list ?? []).map((session) => ({ deviceId, session })))
     .filter(({ deviceId, session }) => deviceId === target.deviceId && !session.parentSessionKey && (session.status === 'running' || session.status === 'waiting_approval'));
   const keys = new Set(live.map(({ deviceId, session }) => `${deviceId}|${session.sessionKey}`));
@@ -156,7 +158,7 @@ const runningSessions = (): Running[] => {
     if (sent.scope !== scope || sent.deviceId !== target.deviceId) { recentlySent.delete(key); continue; }
     const known = state.sessions[sent.deviceId]?.list.find((item) => item.sessionKey === sent.sessionKey);
     if (Date.now() - sent.at > 5 * 60_000 || (known && known.status !== 'running' && known.status !== 'waiting_approval' && known.updatedAt > sent.at)) { recentlySent.delete(key); continue; }
-    if (!keys.has(key)) live.push({ deviceId: sent.deviceId, session: known ?? { sessionKey: sent.sessionKey, tool: 'codex', client: '', title: '远程任务', cwd: '', updatedAt: sent.at, status: 'running', controllable: true } });
+    if (!keys.has(key)) live.push({ deviceId: sent.deviceId, session: known ?? { sessionKey: sent.sessionKey, tool: sessionKeyAgentId(sent.sessionKey), title: '远程任务', updatedAt: sent.at } });
   }
   return live.sort((a, b) => b.session.updatedAt - a.session.updatedAt).slice(0, 4);
 };
@@ -229,7 +231,7 @@ async function ensureWatch() {
   const running = runningSessions();
   if (!running.length) { if (AppState.currentState === 'active') void stopWatch(); return; }
   const first = running[0].session;
-  const title = `${AGENT(first)} 正在运行`;
+  const title = `${sessionAgentDisplayName(first)} 正在运行`;
   const body = running.length > 1 ? `${first.title || '远程任务'} 等 ${running.length} 个任务` : first.title || '远程任务';
   const generation = watchGeneration;
   try {
@@ -243,9 +245,48 @@ async function ensureWatch() {
   } catch { /* ignore */ }
 }
 
+// A sticky native service may predate JS pairing restoration. Keep only its
+// public signed authority until that exact credential-scoped owner is loaded.
+const recoveredIngress = new Map<string, { hubUrl: string; manifest: unknown; serialized: string; retryAt: number }>();
+const recoveringIngress = new Set<string>();
+function captureRecoveredIngress() {
+  try {
+    const raw = native?.recoveredIngress?.();
+    if (!raw || raw.length > 20_000) return;
+    const value = JSON.parse(raw);
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3
+      || !validNotificationScope(value.navigationScope) || typeof value.hubUrl !== 'string' || value.hubUrl.length > 512
+      || !value.manifest || typeof value.manifest !== 'object') return;
+    const serialized = JSON.stringify(value.manifest), existing = recoveredIngress.get(value.navigationScope);
+    if (existing && existing.hubUrl === value.hubUrl && existing.serialized === serialized) return;
+    recoveredIngress.set(value.navigationScope, { hubUrl: value.hubUrl, manifest: value.manifest, serialized, retryAt: 0 });
+    if (recoveredIngress.size > 8) recoveredIngress.delete(recoveredIngress.keys().next().value!);
+  } catch { /* Old native builds have no routing hand-back API. */ }
+}
+function restoreRecoveredIngress() {
+  const credentials = watchCredentials(), scope = currentNotificationScope();
+  if (!credentials || credentials.botToken || !scope) return;
+  const entry = recoveredIngress.get(scope);
+  if (!entry || entry.hubUrl !== credentials.url || recoveringIngress.has(scope) || entry.retryAt > Date.now()) return;
+  const active = () => currentNotificationScope() === scope && watchCredentials()?.url === entry.hubUrl;
+  if (!adoptRecoveredHubIngress) return;
+  recoveringIngress.add(scope);
+  void adoptRecoveredHubIngress(entry.hubUrl, entry.manifest, active).then(accepted => {
+    if (accepted && recoveredIngress.get(scope) === entry) recoveredIngress.delete(scope);
+  }).catch(() => undefined).finally(() => {
+    recoveringIngress.delete(scope);
+    // Native may already have cleared its checkpoint. Keep a cancelled or
+    // failed import for this exact owner, with bounded retries while active.
+    if (recoveredIngress.get(scope) === entry) entry.retryAt = active() ? Date.now() + 60_000 : 0;
+  });
+}
+
 /** Hand the running sessions to the native watch (background) or take them back (foreground). */
 function configureNative(follow: boolean) {
   if (!native?.configureWatch || Platform.OS !== 'android') return;
+  // Capture before configureWatch(false) clears the native checkpoint. Stop
+  // immediately; importing this public cache must never keep a revoked watch alive.
+  captureRecoveredIngress();
   const credentials = watchCredentials();
   const navigationScope = currentNotificationScope();
   const running = follow ? runningSessions() : [];
@@ -260,9 +301,10 @@ function configureNative(follow: boolean) {
       ingressManifest: hubIngressSnapshot?.(credentials.url),
       // 后台待命: follow the whole computer (Hub scope=device), not only the running tasks.
       ...(target ? { standby: true, devices: [{ deviceId: target.deviceId }] } : {}),
-      sessions: running.map(({ deviceId, session }) => ({ deviceId, sessionKey: session.sessionKey, title: session.title?.trim() || '远程任务', agent: AGENT(session), after: sessionCursor(deviceId, session.sessionKey) })),
+      sessions: running.map(({ deviceId, session }) => ({ deviceId, sessionKey: session.sessionKey, title: session.title?.trim() || '远程任务', agent: sessionAgentDisplayName(session), after: sessionCursor(deviceId, session.sessionKey) })),
     } : { version: ++configVersion, follow: false }));
   } catch { nativeFollowing = false; }
+  restoreRecoveredIngress();
 }
 
 let started = false;
@@ -324,13 +366,14 @@ export function startRemoteNotifications(open: () => void): () => void {
       void stopWatch().then(() => ensureStandby()).then(() => ensureWatch());
     }
     openPending();
+    restoreRecoveredIngress();
   });
   // A sticky Android service can predate this JS runtime. Foreground launch
   // must retire its old handoff before asynchronous pairing restoration runs.
   reconcileNativeWatch();
   configureNative(false);
   void ensureStandby().then(ensureWatch);
-  return () => { started = false; pendingOpen = null; preferenceSub(); openSub?.remove(); eventSub(); appSub.remove(); pushSub(); connectionSub(); standing = false; void stopWatch(); };
+  return () => { started = false; pendingOpen = null; recoveredIngress.clear(); recoveringIngress.clear(); preferenceSub(); openSub?.remove(); eventSub(); appSub.remove(); pushSub(); connectionSub(); standing = false; void stopWatch(); };
 }
 
 /** Native truth while the notification menu is visible; a saved switch is not a running service. */

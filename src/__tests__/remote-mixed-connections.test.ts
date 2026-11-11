@@ -1,6 +1,6 @@
 import { bindBotPhone, botBindingEndpoint, devices, parseBotBindingPackage, setHubFetch, type FetchLike } from '../remote/client';
 import { botConnectionId, connectionId, connectionToken, loadConnections, saveBotConnections, saveConnection, selectedConnection, type RemoteConnection } from '../remote/connections';
-import { bootRemote, getRemoteState, probeSavedConnections, reloadSavedConnections, resetRemoteForTests, revokeRemoteConnectionById, useSavedConnection, watchCredentials } from '../remote/store';
+import { bootRemote, getRemoteState, probeSavedConnections, refreshDevices, reloadSavedConnections, resetRemoteForTests, revokeRemoteConnectionById, useSavedConnection, watchCredentials } from '../remote/store';
 
 const mockSettings = new Map<string, string>(), mockSecrets = new Map<string, string>();
 const mockWriteSetting = jest.fn();
@@ -42,6 +42,60 @@ beforeEach(() => {
   setHubFetch(transport);
 });
 afterEach(() => { resetRemoteForTests(); setHubFetch(null); });
+
+test('Bot import retains verified computer identities with identical display names through persistence and restart', async () => {
+  setHubFetch(async () => reply({ groupId: 'group', botToken, devices: [
+    { ...device('a'), name: '电脑', computerId: 'physical-a' }, { ...device('b'), name: '电脑', computerId: 'physical-b' },
+  ] }));
+  const result = await bindBotPhone(binding, 'f'.repeat(64));
+  const profiles = result.devices.map(item => ({ ...profile(item.deviceId, result.groupId, item.computerId), deviceName: item.name }));
+  await saveBotConnections(profiles, result.botToken);
+  resetRemoteForTests(); await bootRemote([]);
+  expect(getRemoteState().connections.map(item => item.computerId).sort()).toEqual(['physical-a', 'physical-b']);
+  expect(await connectionToken(profiles[0])).toBe(botToken);
+  expect(await connectionToken(profiles[1])).toBe(botToken);
+});
+
+test('different proven computers may share a device ID across separate Hubs without a station handover', async () => {
+  const first = profile('a', undefined, 'physical-a'), otherHub = 'https://other.example/salcara-hub/v1';
+  const second = { ...profile('a', undefined, 'physical-b'), hubUrl: otherHub, id: connectionId(otherHub, 'a') };
+  await saveConnection(first, token); await saveConnection(second, 'e'.repeat(64)); await bootRemote([]);
+  const commands: string[] = [];
+  setHubFetch(async (url, init) => { if (init.method === 'POST') commands.push(url); return transport(url, init); });
+  await useSavedConnection(first.id); await useSavedConnection(second.id);
+  expect(getRemoteState().connectionId).toBe(second.id);
+  expect(watchCredentials()).toMatchObject({ url: otherHub, pairToken: 'e'.repeat(64) });
+  expect(getRemoteState().devices.map(item => item.deviceId)).toEqual(['a']);
+  expect(commands).toEqual([]);
+});
+
+test.each(['revoked', 'network'] as const)('a Bot %s response cleans only confirmed group credentials, never another mode or group', async failure => {
+  await saveMixed();
+  const otherGroup = profile('a', 'other'); await saveBotConnections([otherGroup], 'e'.repeat(64)); await reloadSavedConnections();
+  await useSavedConnection(profile('a', 'group').id);
+  setHubFetch(async () => reply({ code: failure === 'revoked' ? 'bot_phone_credentials_invalid' : 'service_unavailable' }, failure === 'revoked' ? 403 : 503));
+  await refreshDevices(true);
+  const remaining = await loadConnections();
+  expect(remaining.some(item => item.id === profile().id)).toBe(true);
+  expect(await connectionToken(otherGroup)).toBe('e'.repeat(64));
+  expect(remaining.filter(item => item.botGroupId === 'group')).toHaveLength(failure === 'revoked' ? 0 : 2);
+  if (failure === 'revoked') expect(watchCredentials()).toBeNull();
+  resetRemoteForTests(); await bootRemote([]);
+  expect(getRemoteState().connections.filter(item => item.botGroupId === 'group')).toHaveLength(failure === 'revoked' ? 0 : 2);
+});
+
+test('a concurrent successful Bot rebind survives old group-token revocation cleanup', async () => {
+  await saveMixed(); await useSavedConnection(profile('a', 'group').id);
+  const pending = deferred<Awaited<ReturnType<FetchLike>>>();
+  setHubFetch(async () => pending.promise);
+  const refreshing = refreshDevices(true); await flush();
+  const replacement = { ...profile('b', 'group'), pairedAt: 2 };
+  await saveBotConnections([replacement], 'e'.repeat(64));
+  pending.resolve(reply({ code: 'bot_phone_credentials_invalid' }, 403)); await refreshing;
+  expect(await connectionToken(replacement)).toBe('e'.repeat(64));
+  expect(await connectionToken(profile('a', 'group'))).toBeNull();
+  expect(await connectionToken(profile())).toBe(token);
+});
 
 test('ordinary pairing, two Bot groups and identical device IDs have independent credentials', async () => {
   const relay = profile(), first = profile('a', 'one'), second = profile('a', 'two');
@@ -109,9 +163,9 @@ test('Bot import uses the versioned API without altering its signed package and 
   expect(calls[1].init.headers).not.toHaveProperty('X-Salcara-Pair-Token');
 });
 
-test.each(['wrong-group', 'duplicate', 'invalid-device', 'empty'] as const)('Bot import rejects the entire %s response', async failure => {
+test.each(['wrong-group', 'duplicate', 'invalid-device', 'invalid-computer', 'empty'] as const)('Bot import rejects the entire %s response', async failure => {
   const body = { groupId: failure === 'wrong-group' ? 'other' : 'group', botToken,
-    devices: failure === 'duplicate' ? [device(), device()] : failure === 'invalid-device' ? [{ ...device(), deviceId: '../bad' }] : failure === 'empty' ? [] : [device()] };
+    devices: failure === 'duplicate' ? [device(), device()] : failure === 'invalid-device' ? [{ ...device(), deviceId: '../bad' }] : failure === 'invalid-computer' ? [{ ...device(), computerId: '../bad' }] : failure === 'empty' ? [] : [device()] };
   setHubFetch(async () => reply(body));
   await expect(bindBotPhone(binding, 'f'.repeat(64))).rejects.toMatchObject({ code: 'bot_binding_invalid' });
 });

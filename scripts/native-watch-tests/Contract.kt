@@ -81,6 +81,44 @@ fun main() {
     check(b.getJSONArray("devices").getJSONObject(0).getLong("after") == 0L)
     check(SalcaraWatchRecovery.checkpointConfig(b).getJSONArray("devices").getJSONObject(0).getLong("after") == 0L)
   }
+  val envelope = JSONObject().put("signed_payload", "cHJlc2VydmVkLXNpZ25lZC1wYXlsb2Fk").put("signature", "s".repeat(88))
+  test("verified ingress replacement preserves progressed cursors, credentials and original lease") {
+    val current = config()
+    val stored = SalcaraWatchRecovery.create(current, now - 60_000, false, now)!!
+    stored.getJSONObject("config").getJSONArray("sessions").getJSONObject(0).put("after", 999)
+    val merged = SalcaraWatchRecovery.withIngressManifest(stored, current, current, envelope, now)!!
+    check(merged.getLong("startedAt") == stored.getLong("startedAt") && merged.getLong("expiresAt") == stored.getLong("expiresAt"))
+    check(merged.getJSONObject("config").getJSONArray("sessions").getJSONObject(0).getLong("after") == 999L)
+    check(merged.getJSONObject("config").getString("pairToken") == current.getString("pairToken"))
+    check(merged.getJSONObject("config").getJSONObject("ingressManifest").toString() == envelope.toString())
+    check(!stored.getJSONObject("config").has("ingressManifest") && !current.has("ingressManifest"))
+  }
+  test("late ingress replacement cannot cross config ownership, credential or scope boundaries") {
+    val current = config(); val stored = SalcaraWatchRecovery.create(current, now, false, now)!!
+    check(SalcaraWatchRecovery.withIngressManifest(stored, current, config(), envelope, now) == null)
+    for ((field, value) in listOf("navigationScope" to "ns1_" + "b".repeat(64), "pairToken" to "replacement", "hubUrl" to "https://other.test/v1", "key" to "new-key")) {
+      val next = JSONObject(current.toString()).put(field, value)
+      check(SalcaraWatchRecovery.withIngressManifest(stored, next, next, envelope, now) == null)
+    }
+    check(SalcaraWatchRecovery.withIngressManifest(stored, current, current, envelope, now + SalcaraWatchRecovery.TASK_TTL) == null)
+  }
+  test("public ingress handoff exposes only namespace and original envelope fields") {
+    val current = config().put("ingressManifest", JSONObject(envelope.toString()).put("pairToken", "must-not-export"))
+    val exported = SalcaraWatchRecovery.publicIngressInfo(current)!!
+    check(exported.keySet() == setOf("hubUrl", "navigationScope", "manifest"))
+    check(exported.getJSONObject("manifest").keySet() == setOf("signed_payload", "signature"))
+    check(!exported.toString().contains("synthetic-credential") && !exported.toString().contains("must-not-export"))
+    check(exported.getJSONObject("manifest").getString("signed_payload") == envelope.getString("signed_payload"))
+    check(SalcaraWatchRecovery.publicIngressInfo(current.put("follow", false)) == null)
+  }
+  test("native task agent labels recognize advertised DeepSeek and Hermes without inventing capabilities") {
+    check(SalcaraWatchRecovery.agentDisplayName("deepseek-harness") == "DeepSeek Harness")
+    check(SalcaraWatchRecovery.agentDisplayName("hermes") == "Hermes Agent")
+    check(SalcaraWatchRecovery.agentDisplayName("deepseek") == "Agent")
+    check(SalcaraWatchRecovery.agentDisplayName("codex") == "Codex")
+    check(SalcaraWatchRecovery.agentDisplayName("claude") == "Claude Code")
+    check(SalcaraWatchRecovery.agentDisplayName("new-tool") == "Agent")
+  }
   val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
   val plaintext = SalcaraWatchRecovery.create(config(), now, false, now)!!.toString().toByteArray()
   test("device-key encryption round trips without readable credentials") {

@@ -16,6 +16,60 @@ const released = {
 };
 
 describe('app updates', () => {
+  test('a healthy mirror completes after the deadline when another endpoint ignores abort', async () => {
+    jest.useFakeTimers();
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('cdn.jsdelivr.net')) return { ok: true, json: async () => released } as Response;
+      return new Promise<Response>(() => undefined);
+    });
+    try {
+      const completed = jest.fn();
+      const result = fetchLatestRelease();
+      void result.then(completed, () => undefined);
+      await jest.advanceTimersByTimeAsync(8001);
+      expect(completed).toHaveBeenCalledWith(expect.objectContaining({ version: '1.2.3' }));
+      expect(jest.getTimerCount()).toBe(0);
+    } finally { fetchMock.mockRestore(); jest.useRealTimers(); }
+  });
+
+  test('a cancelled check settles when every native request ignores cancellation', async () => {
+    const controller = new AbortController();
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(() => new Promise<Response>(() => undefined));
+    jest.useFakeTimers();
+    try {
+      const failed = jest.fn();
+      const result = fetchLatestRelease(controller.signal);
+      void result.catch(failed);
+      controller.abort();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(failed).toHaveBeenCalledWith(expect.objectContaining({ name: 'AbortError' }));
+    } finally { fetchMock.mockRestore(); jest.clearAllTimers(); jest.useRealTimers(); }
+  });
+
+  test('a pending JSON body is bounded by the same endpoint deadline', async () => {
+    jest.useFakeTimers();
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('cdn.jsdelivr.net')) return { ok: true, json: async () => released } as Response;
+      return { ok: true, json: () => new Promise<never>(() => undefined) } as unknown as Response;
+    });
+    try {
+      const result = fetchLatestRelease();
+      await jest.advanceTimersByTimeAsync(8001);
+      await expect(result).resolves.toMatchObject({ version: '1.2.3' });
+      expect(jest.getTimerCount()).toBe(0);
+    } finally { fetchMock.mockRestore(); jest.useRealTimers(); }
+  });
+
+  test('an already cancelled check starts no endpoint requests', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = jest.spyOn(global, 'fetch');
+    try {
+      await expect(fetchLatestRelease(controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { fetchMock.mockRestore(); }
+  });
+
   test('isolates the remote test APK from every production update entry point', () => {
     expect(productionUpdateCheckEnabled(REMOTE_TEST_APPLICATION_ID)).toBe(false);
     expect(productionUpdateCheckEnabled('top.salcara.image')).toBe(true);

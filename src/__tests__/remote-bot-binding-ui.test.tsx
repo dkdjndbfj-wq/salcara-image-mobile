@@ -19,7 +19,7 @@ jest.mock('../components/ui', () => ({ ...jest.requireActual('../components/ui')
 
 const endpoint = 'https://bot.example/salcara-hub/v1';
 const binding = { type: 'salcara-hub-bot-binding', version: 1, hubUrl: 'https://bot.example/salcara-hub', groupId: 'group', invite: 'a'.repeat(64), signature: 'b'.repeat(64) };
-const device = (deviceId: string, online: boolean) => ({ deviceId, name: `电脑 ${deviceId}`, tools: [], projects: [], online });
+const device = (deviceId: string, online: boolean) => ({ deviceId, computerId: `physical-${deviceId}`, name: '同名电脑', tools: [], projects: [], online });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function importBot(onBound = jest.fn()) {
   const view = await render(<RemoteBotBinding remote={mockState} onBound={onBound} />);
@@ -46,6 +46,7 @@ test('Bot import saves every group member and returns the exact active online pr
   const profiles = mockSave.mock.calls[0][0] as RemoteConnection[];
   expect(profiles.map(item => item.id)).toEqual(['a', 'b'].map(id => botConnectionId(endpoint, id, 'group')));
   expect(profiles.every(item => item.hubUrl === endpoint && item.botGroupId === 'group')).toBe(true);
+  expect(profiles.map(item => item.computerId)).toEqual(['physical-a', 'physical-b']);
   expect(mockUse).toHaveBeenCalledWith(profiles[1].id, false, expect.objectContaining({ stillWanted: expect.any(Function) }));
   expect(onBound).toHaveBeenCalledWith({ kind: 'bot', connectionId: profiles[1].id, deviceId: 'b' });
 });

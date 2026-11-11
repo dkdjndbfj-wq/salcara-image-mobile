@@ -2,7 +2,7 @@ import { randomUUID } from 'expo-crypto';
 import { diagnosticProbe, HubError, isPairingAuthenticationError, type Hub } from './client';
 import { connectionProblem } from './connection-errors';
 
-export type DiagnosticStatus = 'ok' | 'offline' | 'reauth' | 'denied' | 'enrollment' | 'unsupported' | 'busy' | 'timeout' | 'invalid' | 'unreachable' | 'not_measured';
+export type DiagnosticStatus = 'ok' | 'offline' | 'reauth' | 'denied' | 'enrollment' | 'identity' | 'unsupported' | 'busy' | 'timeout' | 'invalid' | 'unreachable' | 'not_measured';
 export interface DiagnosticSegment { status: DiagnosticStatus; ms: number | null; detail: string }
 export interface ConnectionDiagnosticResult {
   checkedAt: number;
@@ -21,6 +21,7 @@ function errorSegment(error: unknown, bot: boolean): DiagnosticSegment {
   if (error.status === 499 || error.code === 'aborted' || error.code === 'diagnostic_connection_changed') throw error;
   if (isPairingAuthenticationError(error)) return failed('reauth', bot ? 'Bot 绑定凭据已失效，请重新绑定 Bot。' : '手机配对凭据已失效，请重新扫码绑定这台电脑。');
   const problem = connectionProblem(error);
+  if (problem === 'identity') return failed('identity', '无法确认原远程服务身份，请核对连接地址或联系管理员；已保存的配对和聊天记录保留。');
   if (problem === 'enrollment') return failed('enrollment', '电脑的远程登记需要恢复，请在电脑端重新登记。');
   if (problem === 'permission') return failed('denied', '远程访问受限，请检查电脑端授权或联系管理员；已保存的手机配对保留。');
   if (error.status === 404 || error.status === 405) return failed('unsupported', '当前服务尚不支持分段诊断，请更新服务端；原有远程连接不受影响。');
@@ -70,7 +71,7 @@ export async function measureConnection(hub: Hub, deviceId: string, signal?: Abo
   return result;
 }
 
-export const diagnosticStatusLabels: Record<DiagnosticStatus, string> = { ok: '已测量', offline: '电脑离线', reauth: '需要重新配对', denied: '远程访问受限', enrollment: '电脑需要重新登记', unsupported: '版本不支持', busy: '稍后再试', timeout: '检测超时', invalid: '回显无效', unreachable: '连接无法确认', not_measured: '未测量' };
+export const diagnosticStatusLabels: Record<DiagnosticStatus, string> = { ok: '已测量', offline: '电脑离线', reauth: '需要重新配对', denied: '远程访问受限', enrollment: '电脑需要重新登记', identity: '连接身份待确认', unsupported: '版本不支持', busy: '稍后再试', timeout: '检测超时', invalid: '回显无效', unreachable: '连接无法确认', not_measured: '未测量' };
 export function diagnosticDuration(segment: DiagnosticSegment): string { return segment.status === 'ok' && segment.ms !== null ? `${Math.round(segment.ms)} ms` : diagnosticStatusLabels[segment.status]; }
 
 /** Explicit allowlist: no URLs, device identifiers, credentials, nonce, raw errors or conversation data. */

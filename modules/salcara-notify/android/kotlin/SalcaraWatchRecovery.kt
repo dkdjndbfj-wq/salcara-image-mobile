@@ -25,6 +25,41 @@ internal object SalcaraWatchRecovery {
     return result
   }
 
+  /** The caller supplies an envelope already verified/exported by the router.
+   * Replace only that public locator, never rebuild progress from a stale
+   * handoff or renew the original credential lease. */
+  fun withIngressManifest(snapshot: JSONObject, current: JSONObject, owner: JSONObject, verifiedManifest: JSONObject, now: Long): JSONObject? {
+    if (current !== owner || validate(snapshot, now) == null) return null
+    val stored = snapshot.getJSONObject("config")
+    if (stored.optString("hubUrl").trimEnd('/') != current.optString("hubUrl").trimEnd('/')
+      || stored.optString("navigationScope") != current.optString("navigationScope")
+      || stored.optString("pairToken") != current.optString("pairToken") || stored.optString("key") != current.optString("key")) return null
+    if (!verifiedManifest.has("signed_payload") || !verifiedManifest.has("signature")) return null
+    return JSONObject(snapshot.toString()).also {
+      it.getJSONObject("config").put("ingressManifest", JSONObject(verifiedManifest.toString()))
+    }.takeIf { validate(it, now) != null }
+  }
+
+  fun agentDisplayName(tool: String): String = when (tool.lowercase()) {
+    "codex" -> "Codex"
+    "claude" -> "Claude Code"
+    "deepseek-harness" -> "DeepSeek Harness"
+    "hermes" -> "Hermes Agent"
+    else -> "Agent"
+  }
+
+  /** Whitelist export; the router verifies the preserved signature before
+   * returning this across the module boundary. Never serialize the config. */
+  fun publicIngressInfo(config: JSONObject): JSONObject? {
+    if (!validConfig(config)) return null
+    val manifest = config.optJSONObject("ingressManifest") ?: return null
+    val payload = manifest.opt("signed_payload") as? String ?: return null
+    val signature = manifest.opt("signature") as? String ?: return null
+    if (payload.isEmpty() || payload.length > 12_000 || signature.length != 88) return null
+    return JSONObject().put("hubUrl", config.getString("hubUrl").trimEnd('/')).put("navigationScope", config.getString("navigationScope"))
+      .put("manifest", JSONObject().put("signed_payload", payload).put("signature", signature))
+  }
+
   fun create(config: JSONObject, startedAt: Long, standby: Boolean, now: Long): JSONObject? {
     if (!validConfig(config)) return null
     val start = if (startedAt > 0) startedAt else now

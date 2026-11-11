@@ -21,8 +21,9 @@ $tink = (Resolve-Path -LiteralPath $TinkJar).Path
 $classpath = "$stdlib;$json;$tink"
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $source = Join-Path $PSScriptRoot '..\modules\salcara-notify\android\kotlin\SalcaraIngressRouter.kt'
+$recovery = Join-Path $PSScriptRoot '..\modules\salcara-notify\android\kotlin\SalcaraWatchRecovery.kt'
 $fixture = Join-Path $PSScriptRoot 'native-ingress-tests\Contract.kt'
-& (Join-Path $JavaDirectory 'java.exe') '-Xmx512m' '-cp' "$compiler;$stdlib;$reflect;$trove;$annotations;$coroutines" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -no-stdlib -no-reflect -classpath $classpath -d $OutputDirectory $source $fixture
+& (Join-Path $JavaDirectory 'java.exe') '-Xmx512m' '-cp' "$compiler;$stdlib;$reflect;$trove;$annotations;$coroutines" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -no-stdlib -no-reflect -classpath $classpath -d $OutputDirectory $source $recovery $fixture
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & (Join-Path $JavaDirectory 'java.exe') '-cp' "$OutputDirectory;$classpath" expo.modules.salcaranotify.ContractKt
 exit $LASTEXITCODE

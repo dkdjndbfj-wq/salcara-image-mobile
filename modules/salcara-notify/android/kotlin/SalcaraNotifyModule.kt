@@ -107,6 +107,10 @@ class SalcaraNotifyModule : Module() {
 
     Function("watchStatus") { SalcaraWatchService.status() }
 
+    // Read before foreground configureWatch(false) clears the watch. This is a
+    // public signed locator only; JS must independently verify its saved pin.
+    Function("recoveredIngress") { SalcaraWatchService.recoveredIngress(context) }
+
     // An active background handoff is encrypted with a device-bound key. Foreground
     // handoffs and explicit stops erase it before they return to JS.
     Function("configureWatch") { json: String ->

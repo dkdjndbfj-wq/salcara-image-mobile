@@ -1,5 +1,6 @@
 import { fetch } from 'expo/fetch';
 import { MAX_APK_BYTES } from './apk-download';
+import { awaitUpdateOperation } from './update-async';
 
 const REPOSITORY = 'dkdjndbfj-wq/salcara-image-mobile';
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
@@ -236,7 +237,7 @@ async function withEndpointTimeout<T>(
   else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
   const timer = setTimeout(() => controller.abort(), 8_000);
   try {
-    return await operation(controller.signal);
+    return await awaitUpdateOperation(() => operation(controller.signal), controller.signal);
   } finally {
     clearTimeout(timer);
     parentSignal?.removeEventListener('abort', onParentAbort);

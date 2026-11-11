@@ -1,14 +1,21 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+// Networking is mocked below; do not initialize Expo's lazy native fetch
+// getter while resetModules/teardown is dismantling the native registry.
+beforeAll(() => { Object.defineProperty(globalThis, 'fetch', { value: jest.fn(), configurable: true, writable: true }); });
+
 const mockNative = {
   setNotificationsEnabled: jest.fn(), pushToken: jest.fn(), addListener: jest.fn((_event: string, _listener: (...args: any[]) => void) => ({ remove: jest.fn() })),
   canNotify: jest.fn(() => true), requestPermission: jest.fn(async () => undefined), stopWatch: jest.fn(async () => undefined), startWatch: jest.fn(), startStandby: jest.fn(),
   configureWatch: jest.fn(), consumeLaunchPayload: jest.fn(() => null), watchStatus: jest.fn(),
+  recoveredIngress: jest.fn(),
+  notify: jest.fn(async (_id: string, _title: string, _body: string, _payload: string) => undefined),
 };
 const mockGetSetting = jest.fn();
 const mockSetSetting = jest.fn();
 const mockRegister = jest.fn();
+const mockAdoptIngress = jest.fn();
 const mockSetFocus = jest.fn();
 let mockRemoteState: { phase: string; signingIn: string | null; sessions: Record<string, unknown>; focus?: { deviceId: string; sessionKey: string } | { home: true } | null };
 const mockRemoteListeners = new Set<() => void>();
@@ -16,6 +23,7 @@ let mockTarget: { hub: { url: string; pairToken: string; botToken?: string }; de
 let mockSupports = true;
 let mockRemoteChange: (() => void) | undefined;
 let mockAppChange: ((state: string) => void) | undefined;
+let mockRemoteEvent: ((event: import('../remote/client').HubEvent) => void) | undefined;
 jest.mock('expo', () => ({ requireOptionalNativeModule: () => mockNative }));
 jest.mock('react-native', () => ({
   Platform: { OS: 'android' },
@@ -24,11 +32,11 @@ jest.mock('react-native', () => ({
   } },
 }));
 jest.mock('../storage/database', () => ({ getSetting: (...args: unknown[]) => mockGetSetting(...args), setSetting: (...args: unknown[]) => mockSetSetting(...args) }));
-jest.mock('../remote/client', () => ({ registerPushToken: (...args: unknown[]) => mockRegister(...args) }));
+jest.mock('../remote/client', () => ({ registerPushToken: (...args: unknown[]) => mockRegister(...args), adoptRecoveredHubIngress: (...args: unknown[]) => mockAdoptIngress(...args) }));
 jest.mock('../remote/store', () => ({
   pushTarget: () => mockTarget, hubSupportsPush: () => mockSupports,
   onRemoteChange: (callback: () => void) => { mockRemoteListeners.add(callback); mockRemoteChange = () => mockRemoteListeners.forEach(listener => listener()); return () => mockRemoteListeners.delete(callback); },
-  getRemoteState: () => mockRemoteState, onRemoteEvent: () => jest.fn(), setRemoteFocus: (...args: unknown[]) => mockSetFocus(...args),
+  getRemoteState: () => mockRemoteState, onRemoteEvent: (callback: typeof mockRemoteEvent) => { mockRemoteEvent = callback; return () => { mockRemoteEvent = undefined; }; }, setRemoteFocus: (...args: unknown[]) => mockSetFocus(...args),
   sessionCursor: () => 0, hubSupportsWait: () => true, watchCredentials: () => mockTarget?.hub,
 }));
 
@@ -51,12 +59,99 @@ beforeEach(() => {
   mockNative.startWatch.mockResolvedValue(true);
   mockNative.startStandby.mockResolvedValue(true);
   mockNative.watchStatus.mockReturnValue(undefined);
+  mockNative.recoveredIngress.mockReset().mockReturnValue(null);
+  mockAdoptIngress.mockReset().mockResolvedValue(true);
   require('react-native').AppState.currentState = 'active';
   mockSupports = true;
   mockTarget = { hub: { url: 'https://station-a.example.test', pairToken: 'synthetic-a' }, deviceId: 'pc-a' };
   mockRemoteState = { phase: 'ready', signingIn: null, sessions: {} }; mockRemoteListeners.clear();
   mockSetFocus.mockImplementation((focus: typeof mockRemoteState.focus) => { mockRemoteState.focus = focus; });
-  mockRemoteChange = undefined; mockAppChange = undefined;
+  mockRemoteChange = undefined; mockAppChange = undefined; mockRemoteEvent = undefined;
+});
+
+test('a sticky native routing cache is captured before stop and imported only after its exact pairing restores', async () => {
+  const { prefs } = modules(); await prefs.loadNotificationPreference();
+  const saved = mockTarget!;
+  const scope = require('../remote/notification-scope').notificationScopeFor(saved.hub, saved.deviceId);
+  const manifest = { signed_payload: 'opaque-public-signed-payload', signature: 'opaque-public-signature' };
+  mockNative.recoveredIngress.mockReturnValueOnce(JSON.stringify({ hubUrl: saved.hub.url, navigationScope: scope, manifest }));
+  mockTarget = null; mockRemoteState.phase = 'loading';
+  const stop = require('../remote/notifications').startRemoteNotifications(() => undefined);
+  try {
+    expect(JSON.parse(mockNative.configureWatch.mock.calls[0][0]).follow).toBe(false);
+    expect(mockNative.recoveredIngress.mock.invocationCallOrder[0]).toBeLessThan(mockNative.configureWatch.mock.invocationCallOrder[0]);
+    expect(mockAdoptIngress).not.toHaveBeenCalled();
+    mockTarget = saved; mockRemoteState.phase = 'ready'; mockRemoteChange?.(); await flush();
+    expect(mockAdoptIngress).toHaveBeenCalledWith(saved.hub.url, manifest, expect.any(Function));
+    const active = mockAdoptIngress.mock.calls[0][2]; expect(active()).toBe(true);
+    mockTarget = { ...saved, hub: { ...saved.hub, pairToken: 'replacement-credential' } };
+    expect(active()).toBe(false);
+  } finally { stop(); }
+});
+
+test('a native routing hand-back from another pairing cannot import merely because the URL matches', async () => {
+  const { prefs } = modules(); await prefs.loadNotificationPreference();
+  mockNative.recoveredIngress.mockReturnValue(JSON.stringify({ hubUrl: mockTarget!.hub.url, navigationScope: 'ns1_' + 'f'.repeat(64), manifest: {} }));
+  const stop = require('../remote/notifications').startRemoteNotifications(() => undefined);
+  try { await flush(); expect(mockAdoptIngress).not.toHaveBeenCalled(); }
+  finally { stop(); }
+});
+
+const extensionAgents = [
+  ['deepseek-harness', 'DeepSeek Harness'], ['hermes', 'Hermes Agent'],
+] as const;
+
+test.each(extensionAgents)('running %s keeps its name before and after the session directory arrives', async (tool, agent) => {
+  const { prefs } = modules(); await prefs.loadNotificationPreference();
+  const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
+  const stop = notifications.startRemoteNotifications(() => undefined);
+  const sessionKey = `${tool}:fixture`;
+  try {
+    notifications.noteTaskSent('pc-a', sessionKey); await flush();
+    expect(mockNative.startWatch).toHaveBeenLastCalledWith(`${agent} 正在运行`, '远程任务');
+    mockAppChange?.('background');
+    const handoff = JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0]);
+    expect(handoff).toMatchObject({ follow: true, sessions: [{ deviceId: 'pc-a', sessionKey, agent, title: '远程任务' }] });
+    mockRemoteState.sessions['pc-a'] = { list: [{ sessionKey, tool, client: '', title: '测试任务', cwd: '', updatedAt: Date.now(), status: 'running', controllable: true }] };
+    mockAppChange?.('active'); await flush();
+    expect(mockNative.startWatch).toHaveBeenLastCalledWith(`${agent} 正在运行`, '测试任务');
+    mockAppChange?.('background');
+    expect(JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0])).toMatchObject({ follow: true, sessions: [{ deviceId: 'pc-a', sessionKey, agent, title: '测试任务' }] });
+  } finally { stop(); }
+});
+
+test.each(['invalid-key', 'codex:__salcara_start_v1__', 'hermes:', 'hermes:bad\nkey'])('a temporary task with no valid Agent namespace never claims Codex or Claude: %s', async sessionKey => {
+  const { prefs } = modules(); await prefs.loadNotificationPreference();
+  const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
+  const stop = notifications.startRemoteNotifications(() => undefined);
+  try {
+    notifications.noteTaskSent('pc-a', sessionKey); await flush();
+    expect(mockNative.startWatch).toHaveBeenLastCalledWith('Agent 正在运行', '远程任务');
+  } finally { stop(); }
+});
+
+test.each(extensionAgents.flatMap(([tool, agent]) => [false, true].flatMap(known =>
+  ['completed', 'failed', 'reply'].map(kind => ({ tool, agent, known, kind })),
+)))('background $tool $kind notification has the correct source (directory=$known)', async ({ tool, agent, known, kind }) => {
+  const { prefs } = modules(); await prefs.loadNotificationPreference();
+  const sessionKey = `${tool}:fixture`;
+  if (known) mockRemoteState.sessions['pc-a'] = { list: [{ sessionKey, tool, client: '', title: '测试任务', status: 'idle' }] };
+  const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
+  const stop = notifications.startRemoteNotifications(() => undefined);
+  try {
+    await flush();
+    require('react-native').AppState.currentState = 'background';
+    const base = { deviceId: 'pc-a', sessionKey, tool, ts: Date.now(), turnId: 'fixture-turn' };
+    mockRemoteEvent?.(kind === 'reply'
+      ? { ...base, type: 'message', id: 'reply', role: 'assistant', final: true, text: '完成' }
+      : { ...base, type: 'turn', status: kind as 'completed' | 'failed' });
+    await flush();
+    const suffix = kind === 'completed' ? '完成了任务' : kind === 'failed' ? '的任务没有完成' : '有新回复';
+    const title = known ? '测试任务' : '远程任务';
+    expect(mockNative.notify).toHaveBeenCalledTimes(1);
+    expect(mockNative.notify).toHaveBeenCalledWith(expect.any(String), `${agent} ${suffix}`, kind === 'reply' ? `${title} · 点开查看` : title, expect.any(String));
+    expect(JSON.parse(mockNative.notify.mock.calls[0][3])).toEqual({ deviceId: 'pc-a', sessionKey, notificationScope: targetScope(mockTarget!) });
+  } finally { stop(); }
 });
 
 const targetScope = (target: NonNullable<typeof mockTarget>) => `ns1_${require('node:crypto').createHash('sha256')

@@ -11,6 +11,8 @@ const mockLoadNative = jest.fn<Promise<void>, unknown[]>(async () => undefined);
 const mockLoadHistory = jest.fn<Promise<void>, unknown[]>(async () => undefined);
 const mockLastAgent = jest.fn<Promise<AgentId>, []>(async () => 'codex');
 const mockRememberAgent = jest.fn();
+jest.mock('../remote/agent-preferences', () => ({ readPreferredAgent: () => mockLastAgent(),
+  rememberPreferredAgent: (_scope: unknown, agent: AgentId) => { mockRememberAgent(agent); return Promise.resolve(); } }));
 const mockExplorer = jest.fn();
 jest.mock('../remote/project-browser', () => ({ ...jest.requireActual('../remote/project-browser'), projectBrowserRequest: (_transport: string, _device: string, tool: string, mode: string) => (input: unknown) => mockExplorer(tool, mode, input) }));
 const mockSetApi = jest.fn();
@@ -216,7 +218,7 @@ beforeEach(() => {
 
 test('restores the chosen direct computer instead of the previous Hub or another native connection', async()=>{
   mockSavedComputer={kind:'direct',deviceId:'direct-B'};
-  mockDirectPeers=[{deviceId:'direct-B',deviceName:'书房电脑 B',endpoint:'wss://192.168.1.8/direct',pairedAt:1}];
+  mockDirectPeers=[{deviceId:'direct-B',deviceName:'书房电脑 B',endpoint:'wss://192.168.1.8/direct',pairedAt:1,pairingScope:'direct:binding-b'}];
   mockDirectState={status:'connected',deviceId:'direct-C',deviceName:'电脑 C'};
   const view=await render(<RemoteScreen visible/>);
   expect(view.getByLabelText('连接电脑').props.accessibilityHint).toContain('书房电脑 B');
@@ -244,7 +246,7 @@ test('phone switches relay A to Bot B to direct C and back to relay A with isola
   const first=readyState(), bot={id:'bot-B',deviceId:'B',deviceName:'Bot 电脑 B',hubUrl:'https://bot.example/v1',botGroupId:'group-B',pairedAt:2};
   const connections=[...first.connections,bot];
   mockRemote={...first,connections};
-  mockDirectPeers=[{deviceId:'direct-C',deviceName:'直连电脑 C',endpoint:'wss://192.168.1.8/direct',pairedAt:1}];
+  mockDirectPeers=[{deviceId:'direct-C',deviceName:'直连电脑 C',endpoint:'wss://192.168.1.8/direct',pairedAt:1,pairingScope:'direct:binding-c'}];
   mockUseConnection.mockImplementation(async(id:string)=>{
     if(id==='paired'){mockRemote={...first,connections};return;}
     mockRemote={...first,connections,connectionId:bot.id,selectedHubUrl:bot.hubUrl,
@@ -253,21 +255,21 @@ test('phone switches relay A to Bot B to direct C and back to relay A with isola
   });
   const view=await render(<RemoteScreen visible/>);
   await fireEvent.press(view.getByLabelText('连接电脑'));
-  await fireEvent.press(view.getByLabelText('切换到Bot Bot 电脑 B'));
+  await fireEvent.press(view.getByLabelText('选择电脑 Bot 电脑 B'));
   expect(view.getByLabelText('连接电脑').props.accessibilityHint).toContain('Bot 电脑 B');
   expect(mockSaveComputer).toHaveBeenLastCalledWith({kind:'bot',connectionId:'bot-B',deviceId:'B'});
   await fireEvent.press(view.getByLabelText('API 管理'));
   expect(view.getByText('当前电脑 API：B')).toBeTruthy();
   await fireEvent.press(view.getByLabelText('返回 API 资源库'));
   await fireEvent.press(view.getByLabelText('连接电脑'));
-  await fireEvent.press(view.getByLabelText('切换到直连 直连电脑 C'));
+  await fireEvent.press(view.getByLabelText(/^选择直连电脑 直连电脑 C /));
   expect(view.getByText('直连工作区 direct-C')).toBeTruthy();
   expect(mockSaveComputer).toHaveBeenLastCalledWith({kind:'direct',deviceId:'direct-C'});
   await fireEvent.press(view.getByLabelText('返回'));
   expect(view.queryByLabelText('API 管理')).toBeNull();
   expect(view.queryByText('修复购物车')).toBeNull();
   await fireEvent.press(view.getByLabelText('连接电脑'));
-  await fireEvent.press(view.getByLabelText('切换到中转站 工作电脑'));
+  await fireEvent.press(view.getByLabelText('选择电脑 工作电脑'));
   expect(view.getByLabelText('连接电脑').props.accessibilityHint).toContain('工作电脑');
   expect(mockSaveComputer).toHaveBeenLastCalledWith({kind:'relay',connectionId:'paired',deviceId:'pc-1'});
   expect(view.getByText('修复购物车')).toBeTruthy();
@@ -771,12 +773,10 @@ test('late saved Agent restoration cannot overwrite a user-selected home card', 
   expect(mockThreadProps.agent?.id).toBe('claude');
 });
 
-test('a focused Desktop session takes precedence over late saved Agent restoration', async () => {
-  let resolveAgent!: (id: AgentId) => void;
-  mockLastAgent.mockImplementation(() => new Promise((resolve) => { resolveAgent = resolve; }));
+test('a focused Desktop session opens its exact Agent without reading a saved directory preference', async () => {
   mockRemote.focus = { deviceId: 'pc-1', sessionKey: 'claude:desktop' };
   await render(<RemoteScreen visible />);
-  await act(async () => resolveAgent('codex'));
+  expect(mockLastAgent).not.toHaveBeenCalled();
   expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'claude:desktop', deviceId: 'pc-1' });
   expect(mockThreadProps.agent?.id).toBe('claude-desktop');
   expect(mockSetApi).not.toHaveBeenCalled();
@@ -876,12 +876,10 @@ test('a station handover with a new credential-scoped device id follows the new 
   expect(view.getByText('修复购物车')).toBeTruthy();
 });
 
-test('cold focused Desktop session loads metadata before entering and ignores a late saved Agent', async () => {
+test('cold focused Desktop session loads metadata without reading a saved directory Agent', async () => {
   let complete!: () => void;
-  let resolveAgent!: (id: AgentId) => void;
   mockRemote.agents = {};
   mockRemote.focus = { deviceId: 'pc-1', sessionKey: 'claude:desktop' };
-  mockLastAgent.mockImplementation(() => new Promise((resolve) => { resolveAgent = resolve; }));
   mockLoadAgents.mockImplementation(() => new Promise((resolve) => { complete = () => {
     mockRemote.agents = readyState().agents;
     resolve();
@@ -889,7 +887,8 @@ test('cold focused Desktop session loads metadata before entering and ignores a 
   const view = await render(<RemoteScreen visible />);
   expect(mockLoadAgents).toHaveBeenCalledWith('pc-1');
   expect(mockThreadProps).toMatchObject({ visible: true, verifying: true });
-  await act(async () => { complete(); resolveAgent('codex'); });
+  expect(mockLastAgent).not.toHaveBeenCalled();
+  await act(async () => { complete(); });
   await view.rerender(<RemoteScreen visible />);
   expect(mockThreadProps).toMatchObject({ visible: true, sessionKey: 'claude:desktop' });
   expect(mockThreadProps.agent).toMatchObject({ id: 'claude-desktop', api: { source: 'computer' } });

@@ -43,7 +43,12 @@ internal object SalcaraWatchVault {
     }
   }
 
-  @Synchronized fun load(context: Context): JSONObject? {
+  @Synchronized fun load(context: Context): JSONObject? = read(context, true)
+
+  /** Getter callers must not clear, renew or consume the recovery checkpoint. */
+  @Synchronized fun peek(context: Context): JSONObject? = read(context, false)
+
+  private fun read(context: Context, clearInvalid: Boolean): JSONObject? {
     return try {
       val bytes = file(context).openRead().use { input ->
         val buffer = java.io.ByteArrayOutputStream()
@@ -57,8 +62,8 @@ internal object SalcaraWatchVault {
         buffer.toByteArray()
       }
       val snapshot = JSONObject(String(SalcaraWatchCipher.decrypt(bytes, key(false) ?: throw IllegalStateException("Missing watch key")), Charsets.UTF_8))
-      SalcaraWatchRecovery.validate(snapshot, System.currentTimeMillis()).also { if (it == null) clear(context) }
-    } catch (_: Exception) { clear(context); null }
+      SalcaraWatchRecovery.validate(snapshot, System.currentTimeMillis()).also { if (it == null && clearInvalid) clear(context) }
+    } catch (_: Exception) { if (clearInvalid) clear(context); null }
   }
 
   @Synchronized fun clear(context: Context) {
