@@ -151,7 +151,7 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
   const profile = remote.connections.find((item) => item.id === remote.connectionId);
   const directTarget = directChoice ?? (directConnection.deviceId ? {deviceId:directConnection.deviceId,deviceName:directConnection.deviceName} : null);
   const directSelected = Boolean(directTarget && (selectedTransport === 'direct' || selectedTransport === null && !profile));
-  const relayBackground = !directSelected && !profile?.botGroupId;
+  const relayBackground = !directSelected;
   const homeDirect = directTarget ? { ...directTarget, connected: directConnection.deviceId === directTarget.deviceId && directConnection.status === 'connected',
     status: directConnection.deviceId === directTarget.deviceId ? directConnection.status : 'closed' as const } : undefined;
   const device = remote.devices.find((item) => item.deviceId === deviceId);
@@ -654,28 +654,28 @@ export function RemoteScreen({ visible = true }: { visible?: boolean }) {
             <Icon name="alarm" size={17} color={dk.text2} /><Text style={styles.menuText}>任务通知</Text>
             <View style={[styles.toggle, notify && styles.toggleOn]}><View style={[styles.knob, notify && styles.knobOn]} /></View>
           </Pressable>
+          {Platform.OS === 'ios' && push.pendingCleanup > 0 ? <View style={styles.menuNote}><Icon name="info" size={14} color={dk.muted} /><Text style={styles.menuNoteText}>旧推送登记尚未清理，联网后会重试；系统仍可能收到旧提醒</Text></View> : null}
           {notify && (!notifyPermission || push.status === 'permission') ? <Pressable accessibilityRole="button" accessibilityLabel="打开系统通知设置" onPress={() => void openSystemPermissionSettings()} style={styles.menuNote}>
             <Icon name="info" size={14} color={dk.muted} /><Text style={styles.menuNoteText}>系统通知未允许 · 去设置</Text></Pressable> : null}
           {notify && !directSelected && notifyPermission && push.status === 'fcm' ? <View style={styles.menuNote}><Icon name="checkCircle" size={14} color={dk.ok} />
-            <Text style={styles.menuNoteText}>推送已登记，送达仍受网络和系统限制</Text></View> : null}
+            <Text style={styles.menuNoteText}>此连接的推送已登记，送达仍受网络和系统限制</Text></View> : null}
           {notify && !directSelected && Platform.OS === 'ios' && push.status !== 'fcm' && push.status !== 'unpaired' && push.status !== 'permission' ? <View style={styles.menuNote}><Icon name={push.status === 'error' ? 'alert' : 'info'} size={14} color={push.status === 'error' ? dk.bad : dk.muted} />
             <Text style={styles.menuNoteText}>{push.status === 'unconfigured' ? '此版本尚未配置 iOS 推送' : push.status === 'hub-off' ? '中转站尚未启用推送' : '推送连接暂时不可用'}</Text></View> : null}
-          {notify && relayBackground && notifyPermission && Platform.OS === 'android' && push.status !== 'fcm' && push.status !== 'unsupported' && push.status !== 'unpaired' && push.status !== 'permission' ? <Pressable accessibilityRole="switch" accessibilityState={{ checked: push.standby }}
+          {notify && relayBackground && notifyPermission && Platform.OS === 'android' && push.status !== 'unsupported' && push.status !== 'unpaired' && push.status !== 'permission' ? <Pressable accessibilityRole="switch" accessibilityState={{ checked: push.standby }}
             accessibilityLabel="后台待命" accessibilityHint="在系统允许时保持后台连接；强行停止后需要重新打开 App" onPress={() => void setStandbyEnabled(!push.standby)} style={({ pressed }) => [styles.menuItem, styles.menuDetailedItem, pressed && styles.menuPressed]}>
             <Icon name="bolt" size={17} color={dk.text2} />
             <View style={{ flex: 1, gap: 3 }}><Text style={[styles.menuText, { flex: 0 }]}>后台待命</Text>
-              <Text style={styles.menuNoteText}>{push.status === 'error' ? '推送连接暂时不可用' : push.status === 'no-google' ? '这台手机收不到推送，开启后保持连接' : '中转站未开启推送，开启后保持连接'}</Text></View>
+              <Text style={styles.menuNoteText}>保持已绑定电脑的后台连接，会增加耗电</Text></View>
             <View style={[styles.toggle, push.standby && styles.toggleOn]}><View style={[styles.knob, push.standby && styles.knobOn]} /></View>
           </Pressable> : null}
-          {notify && relayBackground && notifyPermission && Platform.OS === 'android' && push.standby && push.status !== 'fcm' && watchStatus ? <View style={styles.menuNote}>
+          {notify && relayBackground && notifyPermission && Platform.OS === 'android' && (push.standby || watchStatus?.reason) && watchStatus ? <View style={styles.menuNote}>
             <Icon name={watchStatus.running && watchStatus.standby ? 'checkCircle' : 'info'} size={14} color={watchStatus.running && watchStatus.standby ? dk.ok : dk.muted} />
-            <Text style={styles.menuNoteText}>{watchStatus.running && watchStatus.standby ? watchStatus.reason === 'storage' ? '后台待命运行中，但本机恢复存储未就绪；系统回收后请重新打开 App' : '后台待命运行中，退到后台后继续关注任务' : watchStatus.reason === 'authentication' ? '后台连接凭据已失效，请重新连接电脑' : watchStatus.reason === 'expired' ? '后台待命已到期，重新开启后继续接收提醒' : watchStatus.reason === 'restricted' ? '系统限制了后台运行，请检查设置后重试' : '后台待命尚未运行，可重试或检查系统设置'}</Text>
+            <Text style={styles.menuNoteText}>{watchStatus.reason === 'partial' ? `${watchStatus.unavailableConnections} 条后台连接暂不可用，请检查对应电脑或重连` : watchStatus.reason === 'capacity' ? '连接数量超出后台容量，请减少绑定或使用服务端推送' : watchStatus.reason === 'storage' ? '后台恢复状态未保存，请保持 App 打开并重试' : watchStatus.reason === 'authentication' ? '部分后台连接授权失效，请检查对应电脑' : watchStatus.reason === 'expired' ? '后台观察已到期，打开任务或重新连接提醒' : watchStatus.reason === 'restricted' ? '系统限制了后台运行，请检查设置后重试' : watchStatus.running ? '后台观察运行中，切换电脑不会停止其他已绑定连接' : '后台观察尚未运行，可重试或检查系统设置'}</Text>
           </View> : null}
-          {notify && relayBackground && notifyPermission && Platform.OS === 'android' && push.standby && push.status !== 'fcm' && watchStatus && !watchStatus.running ? <Pressable accessibilityRole="button" accessibilityLabel="重新连接任务提醒" onPress={() => void retryBackgroundNotifications()} style={({ pressed }) => [styles.menuItem, pressed && styles.menuPressed]}>
+          {notify && relayBackground && notifyPermission && Platform.OS === 'android' && watchStatus && (!watchStatus.running || watchStatus.reason) ? <Pressable accessibilityRole="button" accessibilityLabel="重新连接任务提醒" onPress={() => void retryBackgroundNotifications()} style={({ pressed }) => [styles.menuItem, pressed && styles.menuPressed]}>
             <Icon name="regenerate" size={17} color={dk.text2} /><Text style={styles.menuText}>重新连接任务提醒</Text>
           </Pressable> : null}
           {notify && directSelected ? <View style={styles.menuNote}><Icon name="info" size={14} color={dk.muted} /><Text style={styles.menuNoteText}>电脑直连没有服务端推送，请保持 App 打开查看任务进展。</Text></View> : null}
-          {notify && !directSelected && profile?.botGroupId && Platform.OS === 'android' && push.status !== 'fcm' ? <View style={styles.menuNote}><Icon name="info" size={14} color={dk.muted}/><Text style={styles.menuNoteText}>Bot 暂不支持后台待命，请返回 App 查看任务进展。</Text></View> : null}
           {notify && relayBackground && Platform.OS === 'android' ? <Pressable accessibilityRole="button" accessibilityLabel="让提醒更及时" onPress={menuAction(() => setBackgroundHelp(true))} style={({ pressed }) => [styles.menuItem, pressed && styles.menuPressed]}>
             <Icon name="lock" size={17} color={dk.text2} /><Text style={styles.menuText}>让提醒更及时</Text></Pressable> : null}
         </> : <View style={styles.menuNote}><Text style={styles.menuNoteText}>当前版本不支持系统任务通知。</Text></View>}

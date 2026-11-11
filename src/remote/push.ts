@@ -2,8 +2,11 @@ import { useSyncExternalStore } from 'react';
 import { AppState, Platform } from 'react-native';
 import { requireOptionalNativeModule } from 'expo';
 
-import { registerPushToken, type Hub } from './client';
-import { hubSupportsPush, onRemoteChange, pushTarget } from './store';
+import { registerPushToken } from './client';
+import { getRemoteState, onRemoteChange, pushTarget } from './store';
+import { notificationScopeFor } from './notification-scope';
+import { currentNoticeTarget, notificationTargets, publishNotificationTargets, type NoticeTarget } from './notification-targets';
+import { onConnectionBindingsChange } from './connections';
 import { loadNotificationPreference, onNotificationPreferenceChange, remoteNotificationsEnabled } from './notification-preferences';
 
 /**
@@ -47,84 +50,82 @@ let standbyRevision = 0;
 let standbyWrites: Promise<void> = Promise.resolve();
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((listener) => listener());
-let registered = '';
-// Kept in memory only. It lets a Hub switch explicitly unregister the old
-// target before the same FCM token is registered on the new station.
-let registeredTarget: { hub: Hub; deviceId: string; token: string } | null = null;
+const registered = new Map<string, { target: NoticeTarget; token: string }>();
+const pendingRemoval = new Map<string, NoticeTarget>();
+const targetStatuses = new Map<string, PushStatus>();
 let syncing: Promise<void> | null = null;
 let again = false;
-const sameTarget = (a: { hub: Hub; deviceId: string } | null, b: { hub: Hub; deviceId: string }) =>
-  a?.deviceId === b.deviceId && a.hub.url === b.hub.url && a.hub.pairToken === b.hub.pairToken && a.hub.botToken === b.hub.botToken && a.hub.key === b.hub.key;
-
-async function unregisterOldTarget(next?: { hub: Hub; deviceId: string }): Promise<void> {
-  const old = registeredTarget;
-  if (!old || (next && sameTarget(old, next))) return;
-  registeredTarget = null;
-  registered = '';
-  if (status === 'fcm') { status = 'unpaired'; emit(); }
-  try { await registerPushToken(old.hub, old.deviceId, '', currentPlatform() ?? 'android'); } catch { /* revoked/old stations may already be gone */ }
+function refreshStatus(fallback: PushStatus = 'unpaired') {
+  const current = pushTarget();
+  const scope = current && notificationScopeFor(current.hub, current.deviceId);
+  status = scope ? targetStatuses.get(scope) ?? fallback : fallback;
+  emit();
+}
+async function removeTarget(target: NoticeTarget) {
+  const scope = target.notificationScope;
+  registered.delete(scope); targetStatuses.delete(scope);
+  pendingRemoval.set(scope, target);
+  try {
+    await registerPushToken(target.hub, target.deviceId, '', currentPlatform() ?? 'android');
+    pendingRemoval.delete(scope);
+  } catch { /* Keep exact old ownership for a later cleanup; native allowlist already excludes it. */ }
 }
 
 async function sync(): Promise<void> {
   const platform = currentPlatform();
   if (!native?.pushToken || !platform) return;
   await loadNotificationPreference();
-  if (!remoteNotificationsEnabled()) {
-    await unregisterOldTarget();
-    if (status !== 'unpaired') { status = 'unpaired'; emit(); }
-    return;
-  }
-  const target = pushTarget();
-  if (!target) { await unregisterOldTarget(); if (status !== 'unpaired') { status = 'unpaired'; emit(); } return; }
-  await unregisterOldTarget(target);
-  const stillCurrent = () => remoteNotificationsEnabled() && sameTarget(pushTarget(), target) && hubSupportsPush();
-  if (!hubSupportsPush()) { await unregisterOldTarget(); if (status !== 'hub-off') { status = 'hub-off'; emit(); } return; }
-  if (!stillCurrent()) { again = true; return; }
+  const targets = remoteNotificationsEnabled() ? await notificationTargets() : [];
+  publishNotificationTargets(targets);
+  const wanted = new Set(targets.map(target => target.notificationScope));
+  for (const [scope, item] of registered) if (!wanted.has(scope)) pendingRemoval.set(scope, item.target);
+  for (const target of [...pendingRemoval.values()]) await removeTarget(target);
+  if (!remoteNotificationsEnabled() || !targets.length) { targetStatuses.clear(); refreshStatus(); return; }
   let permitted = true;
   try { if (native.canNotify) permitted = native.canNotify(); } catch { permitted = false; }
   if (!permitted) {
-    await unregisterOldTarget();
-    if (status !== 'permission') { status = 'permission'; emit(); }
+    publishNotificationTargets([]);
+    for (const item of [...registered.values()]) await removeTarget(item.target);
+    for (const target of targets) targetStatuses.set(target.notificationScope, 'permission');
+    refreshStatus('permission');
     return;
   }
   let token: string | null = null;
   try { token = await native.pushToken(); } catch { token = null; }
-  if (!stillCurrent()) { again = true; return; }
   if (!token) {
     const unavailable: PushStatus = platform === 'ios' ? 'unconfigured' : 'no-google';
-    if (status !== unavailable) { status = unavailable; emit(); }
+    for (const item of [...registered.values()]) await removeTarget(item.target);
+    for (const target of targets) targetStatuses.set(target.notificationScope, unavailable);
+    refreshStatus(unavailable);
     return;
   }
-  const key = `${target.hub.url}|${target.deviceId}|${token}`;
-  if (key === registered && status === 'fcm') return;
-  try {
-    const result = await registerPushToken(target.hub, target.deviceId, token, platform);
-    if (!stillCurrent()) {
-      // Registration can finish after disabling notifications or switching
-      // station/credentials. Retire that exact old target, never the new one.
-      try { await registerPushToken(target.hub, target.deviceId, '', platform); } catch { /* native preference still gates delivery */ }
-      registered = ''; registeredTarget = null; again = true;
-      return;
+  const register = async (target: NoticeTarget) => {
+    const scope = target.notificationScope;
+    const valid = async () => remoteNotificationsEnabled() && await currentNoticeTarget(target);
+    if (!await valid()) { again = true; return; }
+    if (registered.get(scope)?.token === token) return;
+    try {
+      // Ask this target, never infer B's capability from A's current UI state.
+      const result = await registerPushToken(target.hub, target.deviceId, token!, platform);
+      if (!await valid()) { await removeTarget(target); again = true; return; }
+      if (result === 'fcm') { registered.set(scope, { target, token: token! }); pendingRemoval.delete(scope); }
+      else registered.delete(scope);
+      targetStatuses.set(scope, result === 'fcm' ? 'fcm' : 'hub-off');
+    } catch {
+      // A lost response may still have registered the token remotely.
+      if (!await valid()) { await removeTarget(target); again = true; }
+      else { registered.delete(scope); targetStatuses.set(scope, 'error'); }
     }
-    registered = result === 'fcm' ? key : '';
-    registeredTarget = result === 'fcm' ? { hub: target.hub, deviceId: target.deviceId, token } : null;
-    status = result === 'fcm' ? 'fcm' : 'hub-off';
-  } catch {
-    registered = ''; registeredTarget = null;
-    if (stillCurrent()) status = 'error'; else again = true;
-    // Retried on the next change or when the app comes back. Never retain an
-    // old station's success while the current registration is unconfirmed.
-  }
-  emit();
+  };
+  for (let i = 0; i < targets.length; i += 2) await Promise.all(targets.slice(i, i + 2).map(register));
+  refreshStatus();
 }
 
 /** Re-checks registration; overlapping calls collapse into one follow-up run. */
 export function syncPush(): Promise<void> {
   if (syncing) { again = true; return syncing; }
-  syncing = sync().finally(() => {
-    syncing = null;
-    if (again) { again = false; void syncPush(); }
-  });
+  syncing = (async () => { do { again = false; await sync(); } while (again); })()
+    .catch(() => { refreshStatus('error'); }).finally(() => { syncing = null; });
   return syncing;
 }
 
@@ -139,26 +140,26 @@ export function startRemotePush(): () => void {
     if (!alive || readRevision !== standbyRevision) return;
     standby = value === '1'; emit();
   }).catch(() => undefined);
-  let lastTarget: { hub: Hub; deviceId: string } | null = null;
-  let lastSupportsPush = false;
+  let lastTargets = '';
   const changeSub = onRemoteChange(() => {
     const target = pushTarget();
-    const supportsPush = hubSupportsPush();
-    if ((target ? !sameTarget(lastTarget, target) : lastTarget !== null) || supportsPush !== lastSupportsPush) {
-      lastTarget = target ? { deviceId: target.deviceId, hub: { ...target.hub } } : null;
-      lastSupportsPush = supportsPush;
+    const signature = JSON.stringify([target && notificationScopeFor(target.hub, target.deviceId), getRemoteState().connections]);
+    if (signature !== lastTargets) {
+      lastTargets = signature;
       void syncPush();
     }
   });
-  const tokenSub = native?.addListener?.('onPushToken', () => { registered = ''; void syncPush(); });
+  const tokenSub = native?.addListener?.('onPushToken', () => { void syncPush(); });
   const permissionSub = native?.addListener?.('onPermissionChange', () => { void syncPush(); });
-  const preferenceSub = onNotificationPreferenceChange(() => { void syncPush(); });
+  const preferenceSub = onNotificationPreferenceChange(() => { if (!remoteNotificationsEnabled()) publishNotificationTargets([]); void syncPush(); });
+  const bindingSub = onConnectionBindingsChange(() => { void syncPush(); });
   const appSub = AppState.addEventListener('change', (next) => { if (next === 'active') void syncPush(); });
   void syncPush();
-  return () => { alive = false; started = false; changeSub(); tokenSub?.remove(); permissionSub?.remove(); preferenceSub(); appSub.remove(); };
+  return () => { alive = false; started = false; changeSub(); bindingSub(); tokenSub?.remove(); permissionSub?.remove(); preferenceSub(); appSub.remove(); };
 }
 
 export function pushStatus(): PushStatus { return status; }
+export function pushStatusFor(scope: string): PushStatus { return targetStatuses.get(scope) ?? 'unpaired'; }
 export function standbyEnabled(): boolean { return standby; }
 
 /** 后台待命: only offered when push cannot reach this phone. */
@@ -170,11 +171,11 @@ export async function setStandbyEnabled(value: boolean): Promise<void> {
   await standbyWrites;
 }
 
-export function usePushStatus(): { status: PushStatus; standby: boolean } {
+export function usePushStatus(): { status: PushStatus; standby: boolean; pendingCleanup: number } {
   const snapshot = useSyncExternalStore((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    () => `${status}|${standby}`, () => `${status}|${standby}`);
-  const [s, b] = snapshot.split('|');
-  return { status: s as PushStatus, standby: b === 'true' };
+    () => `${status}|${standby}|${pendingRemoval.size}`, () => `${status}|${standby}|${pendingRemoval.size}`);
+  const [s, b, cleanup] = snapshot.split('|');
+  return { status: s as PushStatus, standby: b === 'true', pendingCleanup: Number(cleanup) };
 }
 
 /** Subscribe outside React (notifications.ts starts / stops the standby service). */

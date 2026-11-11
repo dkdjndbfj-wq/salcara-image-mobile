@@ -99,6 +99,10 @@ test('an old but still valid question is not discarded by the normal freshness w
   });
 });
 
+test('an explicit zero expiry is expired rather than an absent deadline', () => {
+  expect(taskNoticeKind(approval({ expiresAt: 0 }), now)).toBeNull();
+});
+
 test.each(['completed', 'failed'] as const)('an older %s result remains available for an offline digest', status => {
   expect(createTaskNotificationPolicy().observe(turn(status, { ts: now - 20 * 60_000 }), scope, now))
     .toMatchObject({ kind: status, urgent: status === 'failed', stale: true });
@@ -124,6 +128,26 @@ test('replaying the same started event does not reset a delivered legacy turn', 
   expect(policy.observe(reply({ turnId: undefined, seq: 2 }), scope, now + 1)).not.toBeNull();
   policy.observe(started, scope, now + 2);
   expect(policy.observe(turn('completed', { turnId: undefined, seq: 3 }), scope, now + 3)).toBeNull();
+});
+
+test('a missing later start cannot merge independent outcomes into an old started turn forever', () => {
+  const policy = createTaskNotificationPolicy();
+  policy.observe(turn('started', { turnId: undefined, seq: 1 }), scope, now);
+  const first = policy.observe(reply({ turnId: undefined, seq: 2 }), scope, now + 1)!;
+  expect(policy.observe(turn('completed', { turnId: undefined, seq: 3 }), scope, now + 2)).toBeNull();
+  const next = policy.observe(reply({ turnId: undefined, seq: 4, id: 'new-result' }), scope, now + 3)!;
+  expect(next.id).not.toBe(first.id);
+  expect(policy.observe(reply({ turnId: undefined, seq: 99, id: 'reply-a' }), scope, now + 4)).toBeNull();
+});
+
+test('a replayed old start cannot reset the current legacy boundary', () => {
+  const policy = createTaskNotificationPolicy();
+  const start = turn('started', { turnId: undefined, seq: 1 });
+  policy.observe(start, scope, now);
+  policy.observe(reply({ turnId: undefined, seq: 2 }), scope, now + 1);
+  const next = policy.observe(reply({ turnId: undefined, seq: 3, id: 'new-result' }), scope, now + 2)!;
+  policy.observe(start, scope, now + 3);
+  expect(policy.observe(turn('failed', { turnId: undefined, seq: 4 }), scope, now + 4)).toMatchObject({ id: next.id, upgrade: true });
 });
 
 test.each(['reply-first', 'complete-first'] as const)('without turnId or started, complementary legacy events merge: %s', order => {

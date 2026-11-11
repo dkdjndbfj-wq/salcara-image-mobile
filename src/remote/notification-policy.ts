@@ -5,7 +5,7 @@ export type ForegroundTaskNotice = { text: string; icon: 'checkCircle' | 'alert'
 
 /** Events worth interrupting the user for outside the currently open thread. */
 export function taskNoticeKind(event: HubEvent, now = Date.now()): TaskNoticeKind | null {
-  if (event.type === 'approval.request' && (!event.expiresAt || event.expiresAt > now)) return event.kind === 'question' ? 'question' : 'approval';
+  if (event.type === 'approval.request' && (event.expiresAt === undefined || event.expiresAt > now)) return event.kind === 'question' ? 'question' : 'approval';
   if (event.type === 'turn' && !event.parentId && event.status === 'completed') return 'completed';
   if (event.type === 'turn' && !event.parentId && event.status === 'failed') return 'failed';
   if (event.type === 'message' && event.role === 'assistant' && event.final
@@ -62,6 +62,9 @@ export function createTaskNotificationPolicy(options: { maxEntries?: number; ret
       const session = JSON.stringify([scope, event.deviceId, event.sessionKey]);
       const marker = String(event.seq ?? event.ts);
       if (event.type === 'turn' && event.status === 'started' && !event.parentId) {
+        const startKey = `start:${session}:${marker}`;
+        if (events.has(startKey)) return null;
+        remember(events, startKey, { scope, at: now });
         const previous = legacy.get(session);
         // A replay of the same start cannot reopen a result that was already shown.
         if (previous?.marker !== marker) remember(legacy, session, { scope, at: now, ref: `legacy:${marker}`, started: true, marker, kinds: new Set<TaskNoticeKind>() });
@@ -87,7 +90,7 @@ export function createTaskNotificationPolicy(options: { maxEntries?: number; ret
           const identity = event.seq ?? ('id' in event ? event.id : marker);
           current = { scope, at: now, ref: `legacy:${identity}`, started: false, kinds: new Set() };
         }
-        current.kinds.add(kind); current.at = now;
+        current.kinds.add(kind); current.at = now; current.started = false;
         remember(legacy, session, current);
         ref = current.ref;
       }

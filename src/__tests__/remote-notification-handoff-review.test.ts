@@ -15,6 +15,7 @@ jest.mock('react-native', () => ({
   AppState: { currentState: 'active', addEventListener: () => ({ remove: jest.fn() }) },
 }));
 jest.mock('../remote/client', () => ({ adoptRecoveredHubIngress: (...args: unknown[]) => mockAdoptIngress(...args) }));
+jest.mock('../remote/connections', () => ({ onConnectionBindingsChange: () => () => undefined, loadNotificationTargets: async () => [], resolveNotificationTarget: async () => null }));
 jest.mock('../remote/notification-preferences', () => ({
   remoteNotificationsEnabled: () => true, loadNotificationPreference: async () => undefined,
   onNotificationPreferenceChange: () => () => undefined,

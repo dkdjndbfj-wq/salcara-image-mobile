@@ -10,6 +10,7 @@ const mockNative = {
   canNotify: jest.fn(() => true), requestPermission: jest.fn(async () => undefined), stopWatch: jest.fn(async () => undefined), startWatch: jest.fn(), startStandby: jest.fn(),
   configureWatch: jest.fn(), consumeLaunchPayload: jest.fn(() => null), watchStatus: jest.fn(),
   recoveredIngress: jest.fn(),
+  setNotificationTargets: jest.fn(),
   notify: jest.fn(async (_id: string, _title: string, _body: string, _payload: string) => undefined),
 };
 const mockGetSetting = jest.fn();
@@ -17,6 +18,8 @@ const mockSetSetting = jest.fn();
 const mockRegister = jest.fn();
 const mockAdoptIngress = jest.fn();
 const mockSetFocus = jest.fn();
+const mockUseSaved = jest.fn();
+let mockSavedTargets: import('../remote/connections').NotificationTarget[] = [];
 let mockRemoteState: { phase: string; signingIn: string | null; sessions: Record<string, unknown>; focus?: { deviceId: string; sessionKey: string } | { home: true } | null };
 const mockRemoteListeners = new Set<() => void>();
 let mockTarget: { hub: { url: string; pairToken: string; botToken?: string }; deviceId: string } | null;
@@ -33,11 +36,17 @@ jest.mock('react-native', () => ({
 }));
 jest.mock('../storage/database', () => ({ getSetting: (...args: unknown[]) => mockGetSetting(...args), setSetting: (...args: unknown[]) => mockSetSetting(...args) }));
 jest.mock('../remote/client', () => ({ registerPushToken: (...args: unknown[]) => mockRegister(...args), adoptRecoveredHubIngress: (...args: unknown[]) => mockAdoptIngress(...args) }));
+jest.mock('../remote/connections', () => ({
+  onConnectionBindingsChange: () => () => undefined,
+  loadNotificationTargets: async () => mockSavedTargets,
+  resolveNotificationTarget: async (scope: string, device: string) => mockSavedTargets.find(target => target.notificationScope === scope && target.deviceId === device) ?? null,
+}));
 jest.mock('../remote/store', () => ({
   pushTarget: () => mockTarget, hubSupportsPush: () => mockSupports,
   onRemoteChange: (callback: () => void) => { mockRemoteListeners.add(callback); mockRemoteChange = () => mockRemoteListeners.forEach(listener => listener()); return () => mockRemoteListeners.delete(callback); },
   getRemoteState: () => mockRemoteState, onRemoteEvent: (callback: typeof mockRemoteEvent) => { mockRemoteEvent = callback; return () => { mockRemoteEvent = undefined; }; }, setRemoteFocus: (...args: unknown[]) => mockSetFocus(...args),
   sessionCursor: () => 0, hubSupportsWait: () => true, watchCredentials: () => mockTarget?.hub,
+  useSavedConnection: (...args: unknown[]) => mockUseSaved(...args),
 }));
 
 function deferred<T>() {
@@ -53,6 +62,7 @@ const modules = () => ({
 
 beforeEach(() => {
   jest.resetModules(); jest.clearAllMocks();
+  mockSavedTargets = [];
   mockGetSetting.mockResolvedValue('1'); mockSetSetting.mockResolvedValue(undefined);
   mockRegister.mockResolvedValue('fcm'); mockNative.pushToken.mockResolvedValue('synthetic-token');
   mockNative.canNotify.mockReturnValue(true); mockNative.requestPermission.mockResolvedValue(undefined);
@@ -109,14 +119,14 @@ test.each(extensionAgents)('running %s keeps its name before and after the sessi
   try {
     notifications.noteTaskSent('pc-a', sessionKey); await flush();
     expect(mockNative.startWatch).toHaveBeenLastCalledWith(`${agent} 正在运行`, '远程任务');
-    mockAppChange?.('background');
+    require('react-native').AppState.currentState = 'background'; mockAppChange?.('background'); await flush();
     const handoff = JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0]);
-    expect(handoff).toMatchObject({ follow: true, sessions: [{ deviceId: 'pc-a', sessionKey, agent, title: '远程任务' }] });
+    expect(handoff).toMatchObject({ schema: 2, follow: true, connections: [{ sessions: [{ deviceId: 'pc-a', sessionKey, agent, title: '远程任务' }] }] });
     mockRemoteState.sessions['pc-a'] = { list: [{ sessionKey, tool, client: '', title: '测试任务', cwd: '', updatedAt: Date.now(), status: 'running', controllable: true }] };
-    mockAppChange?.('active'); await flush();
+    require('react-native').AppState.currentState = 'active'; mockAppChange?.('active'); await flush();
     expect(mockNative.startWatch).toHaveBeenLastCalledWith(`${agent} 正在运行`, '测试任务');
-    mockAppChange?.('background');
-    expect(JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0])).toMatchObject({ follow: true, sessions: [{ deviceId: 'pc-a', sessionKey, agent, title: '测试任务' }] });
+    require('react-native').AppState.currentState = 'background'; mockAppChange?.('background'); await flush();
+    expect(JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0])).toMatchObject({ follow: true, connections: [{ sessions: [{ deviceId: 'pc-a', sessionKey, agent, title: '测试任务' }] }] });
   } finally { stop(); }
 });
 
@@ -150,12 +160,88 @@ test.each(extensionAgents.flatMap(([tool, agent]) => [false, true].flatMap(known
     const title = known ? '测试任务' : '远程任务';
     expect(mockNative.notify).toHaveBeenCalledTimes(1);
     expect(mockNative.notify).toHaveBeenCalledWith(expect.any(String), `${agent} ${suffix}`, kind === 'reply' ? `${title} · 点开查看` : title, expect.any(String));
-    expect(JSON.parse(mockNative.notify.mock.calls[0][3])).toEqual({ deviceId: 'pc-a', sessionKey, notificationScope: targetScope(mockTarget!) });
+    expect(JSON.parse(mockNative.notify.mock.calls[0][3])).toMatchObject({ deviceId: 'pc-a', sessionKey, notificationScope: targetScope(mockTarget!), eventTs: base.ts });
+    expect(mockNative.notify.mock.calls[0][3]).not.toContain('"text"');
   } finally { stop(); }
 });
 
 const targetScope = (target: NonNullable<typeof mockTarget>) => `ns1_${require('node:crypto').createHash('sha256')
-  .update(JSON.stringify(['salcara-notification-scope-v1', target.hub.url, target.deviceId, target.hub.pairToken])).digest('hex')}`;
+  .update(JSON.stringify([target.hub.botToken ? 'salcara-notification-bot-scope-v1' : 'salcara-notification-scope-v1', target.hub.url, target.deviceId, target.hub.botToken ?? target.hub.pairToken])).digest('hex')}`;
+
+test('switching the visible computer keeps both saved push subscriptions and reports each target separately', async () => {
+  const first = mockTarget!;
+  const second = { deviceId: 'pc-b', hub: { url: 'https://b.example.test', pairToken: 'second' } };
+  mockSavedTargets = [first, second].map((target, index) => ({ ...target, connectionId: `saved-${index}`, notificationScope: targetScope(target) }));
+  const { push } = modules();
+  mockRegister.mockImplementation(async (_hub, device) => device === 'pc-a' ? 'fcm' : 'off');
+  await push.syncPush();
+  expect(mockRegister).toHaveBeenCalledTimes(2);
+  expect(push.pushStatus()).toBe('fcm');
+  mockTarget = second; await push.syncPush();
+  expect(push.pushStatus()).toBe('hub-off');
+  expect(mockRegister.mock.calls.filter(call => call[2] === '')).toEqual([]);
+  expect(push.pushStatusFor(targetScope(first))).toBe('fcm');
+});
+
+test('more than four active tasks are all handed off with a device-level cursor and retained identities', async () => {
+  const { prefs } = modules(); await prefs.loadNotificationPreference();
+  mockRemoteState.sessions['pc-a'] = { list: Array.from({ length: 7 }, (_, index) => ({ sessionKey: `hermes:${index}`, tool: 'hermes', title: `任务${index}`, status: 'running', updatedAt: Date.now() })) };
+  const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
+  const stop = notifications.startRemoteNotifications(jest.fn());
+  try {
+    await flush();
+    require('react-native').AppState.currentState = 'background'; mockAppChange?.('background'); await flush();
+    const connection = JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0]).connections[0];
+    expect(connection.sessions).toHaveLength(7);
+    expect(connection).toMatchObject({ deviceMode: true, standby: false, devices: [{ deviceId: 'pc-a' }] });
+  } finally { stop(); }
+});
+
+test('a terminal result retires a watch even when the running directory snapshot is stale', async () => {
+  const { prefs } = modules(); await prefs.loadNotificationPreference();
+  const now = Date.now();
+  mockRemoteState.sessions['pc-a'] = { list: [{ sessionKey: 'hermes:a', tool: 'hermes', title: '任务', status: 'running', updatedAt: now - 100 }] };
+  const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
+  const stop = notifications.startRemoteNotifications(jest.fn());
+  try {
+    await flush(); mockNative.stopWatch.mockClear();
+    mockRemoteEvent?.({ type: 'turn', status: 'completed', deviceId: 'pc-a', sessionKey: 'hermes:a', tool: 'hermes', ts: now, turnId: 'done' });
+    await flush(); expect(mockNative.stopWatch).toHaveBeenCalled();
+    mockNative.startWatch.mockClear();
+    notifications.noteTaskSent('pc-a', 'hermes:a'); await flush();
+    expect(mockNative.startWatch).toHaveBeenCalled();
+  } finally { stop(); }
+});
+
+test('removing one saved target gates old notifications immediately and retries its failed unregister', async () => {
+  const first = mockTarget!;
+  const second = { deviceId: 'pc-b', hub: { url: 'https://b.example.test', pairToken: 'second' } };
+  mockSavedTargets = [first, second].map((target, index) => ({ ...target, connectionId: `saved-${index}`, notificationScope: targetScope(target) }));
+  const { push } = modules(); await push.syncPush();
+  mockTarget = second; mockSavedTargets = mockSavedTargets.slice(1);
+  mockRegister.mockRejectedValueOnce(new Error('offline'));
+  await push.syncPush();
+  expect(JSON.parse(mockNative.setNotificationTargets.mock.calls.at(-1)![0])).toEqual([{ deviceId: second.deviceId, notificationScope: targetScope(second) }]);
+  expect(push.pushStatus()).toBe('fcm');
+  await push.syncPush();
+  expect(mockRegister.mock.calls.filter(call => call[2] === '').map(call => call[1])).toEqual(['pc-a', 'pc-a']);
+});
+
+test('a cross-computer notification only selects locally, revalidates scope and opens a summary as the list', async () => {
+  const second = { deviceId: 'pc-b', hub: { url: 'https://b.example.test', pairToken: 'second' } };
+  mockSavedTargets = [{ ...second, connectionId: 'saved-b', notificationScope: targetScope(second) }];
+  mockUseSaved.mockImplementation(async () => { mockTarget = second; });
+  const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
+  const open = jest.fn(), stop = notifications.startRemoteNotifications(open);
+  try {
+    const callback = mockNative.addListener.mock.calls.find(call => call[0] === 'onOpen')![1];
+    callback({ payload: JSON.stringify({ deviceId: 'pc-b', sessionKey: 'hermes:b', notificationScope: targetScope(second), notificationCount: '3' }) });
+    await flush();
+    expect(mockUseSaved).toHaveBeenCalledWith('saved-b', true, { skipHandover: true, stillWanted: expect.any(Function) });
+    expect(mockSetFocus).toHaveBeenLastCalledWith({ home: true });
+    expect(open).toHaveBeenCalledTimes(1);
+  } finally { stop(); }
+});
 
 test.each(['old-station', 'old-credential', 'legacy'] as const)('notification open never resolves an unrelated source against the current connection: %s', async source => {
   jest.useFakeTimers();
@@ -167,6 +253,7 @@ test.each(['old-station', 'old-credential', 'legacy'] as const)('notification op
   const open = jest.fn(), stop = notifications.startRemoteNotifications(open);
   const callback = mockNative.addListener.mock.calls.find(call => call[0] === 'onOpen')![1];
   callback({ payload: JSON.stringify({ deviceId: old.deviceId, sessionKey: 'codex:shared-id', ...(source === 'legacy' ? {} : { notificationScope }) }) });
+  await flush();
   expect(mockSetFocus).toHaveBeenLastCalledWith({ home: true });
   expect(mockSetFocus).not.toHaveBeenCalledWith(expect.objectContaining({ sessionKey: 'codex:shared-id' }));
   expect(open).toHaveBeenCalledTimes(1);
@@ -184,18 +271,20 @@ test('a current scoped notification opens its exact task after cold-start pairin
   callback({ payload: JSON.stringify({ deviceId: saved.deviceId, sessionKey: 'codex:original', notificationScope }) });
   expect(mockSetFocus).not.toHaveBeenCalled();
   mockRemoteState.phase = 'ready'; mockTarget = saved; mockRemoteChange?.();
+  await flush();
   expect(mockSetFocus).toHaveBeenLastCalledWith({ deviceId: saved.deviceId, sessionKey: 'codex:original' });
   expect(open).toHaveBeenCalledTimes(1);
   stop(); jest.clearAllTimers(); jest.useRealTimers();
 });
 
-test('renewed credentials invalidate a notification focus before the screen consumes it', () => {
+test('renewed credentials invalidate a notification focus before the screen consumes it', async () => {
   jest.useFakeTimers();
   const saved = mockTarget!;
   const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
   const stop = notifications.startRemoteNotifications(jest.fn());
   const callback = mockNative.addListener.mock.calls.find(call => call[0] === 'onOpen')![1];
   callback({ payload: JSON.stringify({ deviceId: saved.deviceId, sessionKey: 'codex:old-pair', notificationScope: targetScope(saved) }) });
+  await flush();
   expect(mockRemoteState.focus).toEqual({ deviceId: saved.deviceId, sessionKey: 'codex:old-pair' });
   mockTarget = { ...saved, hub: { ...saved.hub, pairToken: 'synthetic-new-pairing' } };
   mockRemoteChange?.();
@@ -251,7 +340,7 @@ test('iOS registers FCM for APNs delivery without starting an Android background
   reactNative.Platform.OS = 'android';
 });
 
-test('iOS notifications use FCM/APNs in background and suppress system banners in foreground (source contract)', () => {
+test('iOS uses APNs and gates foreground banners by binding and exact visible thread (source contract)', () => {
   const module = readFileSync(join(__dirname, '../../modules/salcara-notify/ios/SalcaraNotifyModule.swift'), 'utf8');
   const podspec = readFileSync(join(__dirname, '../../modules/salcara-notify/ios/SalcaraNotify.podspec'), 'utf8');
   expect(module).toContain('FirebaseApp.configure(options: options)');
@@ -259,6 +348,10 @@ test('iOS notifications use FCM/APNs in background and suppress system banners i
   expect(module).toContain('MessagingDelegate');
   expect(module).toContain('UIApplication.shared.registerForRemoteNotifications()');
   expect(module).toContain('completionHandler([])');
+  expect(module).toContain('completionHandler([.banner, .list, .sound])');
+  expect(module).toContain('visibleScope == (value["notificationScope"]');
+  expect(module).toContain('Function("admitNotification")');
+  expect(module).toContain('userInfo["notificationCount"]');
   expect(module).toContain('userInfo["notificationScope"]');
   expect(readFileSync(join(__dirname, '../remote/notifications.ts'), 'utf8')).toContain('if (Platform.OS === \'ios\') return;');
   expect(podspec).toContain("s.dependency 'Firebase/Messaging'");
@@ -357,10 +450,11 @@ test('changing Pair to Bot authentication retires the former push registration e
 
 test('Hub without push support settles without a retry loop', async () => {
   mockSupports = false;
+  mockRegister.mockResolvedValue('off');
   const { push } = modules(); await push.syncPush(); await flush();
   expect(push.pushStatus()).toBe('hub-off');
-  expect(mockNative.pushToken).not.toHaveBeenCalled();
-  expect(mockRegister).not.toHaveBeenCalled();
+  expect(mockNative.pushToken).toHaveBeenCalledTimes(1);
+  expect(mockRegister).toHaveBeenCalledTimes(1);
 });
 
 test('slow watch start cannot re-enable native following after notifications are disabled', async () => {
@@ -390,12 +484,12 @@ test.each(['task', 'standby'] as const)('a slow native %s start hands over its c
   require('react-native').AppState.currentState = 'background'; mockAppChange?.('background');
   expect(JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0]).follow).toBe(false);
   start.resolve(true); await flush();
-  expect(JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0])).toMatchObject({ follow: true,
-    hubUrl: mockTarget!.hub.url, pairToken: mockTarget!.hub.pairToken, navigationScope: targetScope(mockTarget!) });
+  expect(JSON.parse(mockNative.configureWatch.mock.calls.at(-1)![0])).toMatchObject({ follow: true, connections: [{
+    hubUrl: mockTarget!.hub.url, pairToken: mockTarget!.hub.pairToken, navigationScope: targetScope(mockTarget!) }] });
   stop();
 });
 
-test.each(['task','standby'] as const)('Bot %s never starts or supplies credentials to the Pair-only native watcher', async mode => {
+test.each(['task','standby'] as const)('Bot %s supplies only Bot authentication to its scoped native watcher', async mode => {
   mockTarget = { hub: { url: 'https://bot.example/salcara-hub/v1', pairToken: 'bot-secret', botToken: 'bot-secret' }, deviceId: 'pc-a' };
   const { prefs,push } = modules(); await prefs.loadNotificationPreference();
   if(mode==='standby')await push.setStandbyEnabled(true);
@@ -403,10 +497,11 @@ test.each(['task','standby'] as const)('Bot %s never starts or supplies credenti
   const stop = notifications.startRemoteNotifications(() => undefined); await flush();
   notifications.noteTaskSent('pc-a', 'codex:fixture'); await flush();
   require('react-native').AppState.currentState = 'background'; mockAppChange?.('background');
+  await flush();
   const configurations = mockNative.configureWatch.mock.calls.map(call => JSON.parse(call[0]));
   expect(configurations.length).toBeGreaterThan(0);
-  expect(configurations.every(config => config.follow === false && !config.pairToken && !config.botToken)).toBe(true);
-  expect(mockNative.startWatch).not.toHaveBeenCalled();expect(mockNative.startStandby).not.toHaveBeenCalled();
+  expect(configurations.at(-1)).toMatchObject({ schema: 2, follow: true, connections: [{ botToken: 'bot-secret' }] });
+  expect(configurations.at(-1).connections[0]).not.toHaveProperty('pairToken');
   stop();
 });
 
@@ -456,21 +551,26 @@ test('Android notification entry points share the persisted gate and bind action
   expect(module).toContain('synchronized(notificationLock)');
   expect(module).toContain('org.json.JSONObject(json)');
   expect(module).not.toContain('UUID.randomUUID()');
-  expect(watch).toContain('current.optString("navigationScope")');
-  expect(watch).toContain('if (SalcaraPushService.inForeground(this)) return');
-  expect(push).toContain('if (!SalcaraNotifyModule.notificationsAllowed(this)) return');
-  expect(push).toContain('if (inForeground(this)) return');
-  expect(push).toContain('SalcaraNotifyModule.postTaskNotification(this');
+  const center = source('SalcaraNotificationCenter.kt');
+  const identity = source('SalcaraNotificationIdentity.kt');
+  expect(module).toContain('Function("setNotificationTargets")');
+  expect(module).toContain('Function("admitNotification")');
+  expect(center).toContain('allowed[scope]');
+  expect(center).toContain('policy.decide(');
+  expect(center).toContain('policy.resolve(');
+  expect(center).toContain('visibleScope == scope');
+  expect(watch).toContain('SalcaraNotificationCenter.submit(this');
+  expect(push).toContain('SalcaraNotificationCenter.submit(this');
+  expect(push).not.toContain('if (inForeground(this)) return');
   expect(push).not.toContain('manager.notify(');
   expect(push).toContain('"reply" ->');
   expect(push).not.toContain('"ask" ->');
-  expect(push).not.toContain('"question" ->');
-  expect(watch.match(/config !== current \|\| !SalcaraNotifyModule.notificationsAllowed\(this\)/g)?.length).toBeGreaterThanOrEqual(3);
-  expect(watch).toContain('"message" -> if (event.optString("role") == "assistant"');
-  expect(watch).not.toContain('"approval.request" ->');
+  expect(push).toContain('"question" ->');
+  expect(watch).toContain('authorized(state)');
+  expect(watch).toContain('"approval.request"');
   expect(watch).not.toContain('ACTION_DECIDE');
   expect(watch).not.toContain('manager.notify(');
-  expect(watch).toContain('event.optString("messagePhase") != "commentary"');
+  expect(identity).toContain('event.optString("messagePhase") != "commentary"');
 });
 
 test('a denied Android notification permission never starts a background watcher', async () => {

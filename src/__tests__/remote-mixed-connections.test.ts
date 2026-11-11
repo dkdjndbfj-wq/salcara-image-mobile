@@ -1,5 +1,5 @@
 import { bindBotPhone, botBindingEndpoint, devices, parseBotBindingPackage, setHubFetch as setRawHubFetch, type FetchLike } from '../remote/client';
-import { botConnectionId, botGroupId, confirmLegacyBotGroupPin, getBotGroup, connectionId, connectionToken, loadConnections, saveBotConnections as saveLegacyBotConnections, saveConnection, selectedConnection, type RemoteConnection } from '../remote/connections';
+import { botConnectionId, botGroupId, confirmLegacyBotGroupPin, getBotGroup, connectionId, connectionToken, loadConnections, loadNotificationTargets, resolveNotificationTarget, onConnectionBindingsChange, forgetConnection, saveBotConnections as saveLegacyBotConnections, saveConnection, selectedConnection, type RemoteConnection } from '../remote/connections';
 import { botStationFixture } from './fixtures/bot-station';
 import { bootRemote, getRemoteState, probeSavedConnections, refreshDevices, reloadSavedConnections, resetRemoteForTests, revokeRemoteConnectionById, useSavedConnection, watchCredentials } from '../remote/store';
 
@@ -64,6 +64,24 @@ test('Bot import retains verified computer identities with identical display nam
   expect(getRemoteState().connections.map(item => item.computerId).sort()).toEqual(['physical-a', 'physical-b']);
   expect(await connectionToken(profiles[0])).toBe(botToken);
   expect(await connectionToken(profiles[1])).toBe(botToken);
+});
+
+test('notification target snapshots separate Pair/Bot identities and re-pair removes the old scope', async () => {
+  const changed = jest.fn(), stop = onConnectionBindingsChange(changed);
+  try {
+    await saveMixed();
+    const targets = await loadNotificationTargets();
+    expect(targets).toHaveLength(3);
+    expect(new Set(targets.map(target => target.notificationScope)).size).toBe(3);
+    const oldPair = targets.find(target => !target.hub.botToken)!;
+    expect(targets.filter(target => target.hub.botToken).every(target => target.hub.botToken === botToken)).toBe(true);
+    await saveConnection(profile('a', undefined, 'physical-a'), 'f'.repeat(64));
+    expect(await resolveNotificationTarget(oldPair.notificationScope, 'a')).toBeNull();
+    expect((await loadNotificationTargets()).filter(target => target.hub.botToken)).toHaveLength(2);
+    await forgetConnection(profile('b', 'group', 'physical-b'), botToken);
+    expect(await loadNotificationTargets()).toHaveLength(2);
+    expect(changed).toHaveBeenCalledTimes(5);
+  } finally { stop(); }
 });
 
 test('different proven computers may share a device ID across separate Hubs without a station handover', async () => {

@@ -4,10 +4,12 @@ import { AppState, Linking } from 'react-native';
 import { showToast } from '../components/ui';
 import { useApp } from '../state/AppContext';
 import type { HubEvent } from './client';
-import { bootRemote, getRemoteState, loadSessions, onApprovalAlert, onRemoteChange, onRemoteEvent, pushTarget, remoteDeliveryScope, setRemoteFocus, setRemoteForeground, syncSessionEvents } from './store';
-import { isVisibleThread, startRemoteNotifications } from './notifications';
+import { bootRemote, getRemoteState, loadSessions, onRemoteChange, onRemoteEvent, pushTarget, remoteDeliveryScope, setRemoteFocus, setRemoteForeground, syncSessionEvents } from './store';
+import { admitForegroundNotification, isVisibleThread, startRemoteNotifications } from './notifications';
 import { startRemotePush } from './push';
-import { foregroundTaskNotice } from './notification-policy';
+import { createTaskNotificationPolicy, foregroundTaskNotice, type TaskNotificationDecision } from './notification-policy';
+import { createNotificationDispatcher } from './notification-dispatch';
+import { remoteNotificationsEnabled } from './notification-preferences';
 import { parseSalcaraThreadLink } from './remote-links';
 import { nextBackgroundSyncBatch } from './background-sync';
 import { sessionAgentDisplayName } from './agent-catalog';
@@ -50,51 +52,48 @@ export function useRemoteLink(onOpen: () => void) {
     return () => { active = false; queued = undefined; subscription.remove(); remoteSub(); };
   }, []);
   useEffect(() => startRemotePush(), []);
-  // Approval requests are actionable in the assistant/chat spaces. The
-  // programming space renders them inline and must not also show a global
-  // toast that can steal attention from its composer.
+  // One policy owns foreground results and actionable requests. A short batch
+  // window reduces noise without swallowing a failure behind a final reply.
   useEffect(() => {
-    if (space === 'remote') return undefined;
-    return onApprovalAlert((approval) => {
-      if (AppState.currentState !== 'active') return;
-      const scope = remoteDeliveryScope();
-      const session = getRemoteState().sessions[approval.deviceId]?.list.find(item => item.sessionKey === approval.sessionKey);
-      showToast(`电脑上的 ${sessionAgentDisplayName(session, approval.tool)} 需要批准：${approval.title}`, 'code', () => {
-        setRemoteFocus(scope === remoteDeliveryScope() ? { deviceId: approval.deviceId, sessionKey: approval.sessionKey } : { home: true });
+    const policy = createTaskNotificationPolicy();
+    const admissions = new WeakMap<TaskNotificationDecision, boolean>();
+    const dispatcher = createNotificationDispatcher<{ event: HubEvent; decision: TaskNotificationDecision }>(batch => {
+      const items = batch.filter(item => {
+        const { decision, event } = item.value;
+        if (!admissions.has(decision)) admissions.set(decision, admitForegroundNotification(item.id, event, decision.kind));
+        return admissions.get(decision);
+      });
+      if (!items.length) return;
+      const first = items[0];
+      const { event } = first.value;
+      const session = getRemoteState().sessions[event.deviceId]?.list.find(item => item.sessionKey === event.sessionKey);
+      const notice = foregroundTaskNotice(event, session?.title?.trim() || '远程任务', false, sessionAgentDisplayName(session, event.tool));
+      if (!notice) return;
+      const failed = items.filter(item => item.value.decision.kind === 'failed').length;
+      const requests = items.filter(item => ['approval', 'question'].includes(item.value.decision.kind)).length;
+      const text = items.length === 1 ? notice.text : [failed && `${failed} 项任务失败`, requests && `${requests} 项需要你处理`,
+        items.length - failed - requests > 0 && `${items.length - failed - requests} 项任务有更新`].filter(Boolean).join(' · ');
+      showToast(text, failed ? 'alert' : requests ? 'code' : notice.icon, () => {
+        setRemoteFocus(items.length === 1 && first.scope === remoteDeliveryScope()
+          ? { deviceId: event.deviceId, sessionKey: event.sessionKey } : { home: true });
         openRef.current();
       });
     });
-  }, [space]);
-  // The programming thread already renders its own live status. Other spaces
-  // get only terminal events or a completed assistant reply, never tool noise,
-  // intermediate tokens, approvals, or generic error banners.
-  useEffect(() => {
-    const seen = new Map<string, number>();
-    const lastNoticeAt = new Map<string, number>();
     const label = (event: HubEvent) => {
-      const session = getRemoteState().sessions[event.deviceId]?.list.find(item => item.sessionKey === event.sessionKey);
-      const name = session?.title?.trim() || '远程任务';
-      const agent = sessionAgentDisplayName(session, event.tool);
-      const notice = foregroundTaskNotice(event, name, isVisibleThread(event.deviceId, event.sessionKey), agent);
-      if (!notice) return;
-      const sessionId = `${event.deviceId}|${event.sessionKey}`;
-      const eventId = 'id' in event ? event.id : 'seq' in event ? event.seq ?? event.ts : event.ts;
-      const id = `${sessionId}|${event.turnId ?? `${event.type}:${eventId}`}`;
-      const now = Date.now();
-      if (seen.has(id) || now - event.ts > 10 * 60_000 || now - (lastNoticeAt.get(sessionId) ?? 0) < 8_000) return;
-      seen.set(id, now);
-      lastNoticeAt.set(sessionId, now);
-      if (seen.size > 200) seen.delete(seen.keys().next().value as string);
-      if (lastNoticeAt.size > 200) lastNoticeAt.delete(lastNoticeAt.keys().next().value as string);
-      if (AppState.currentState === 'active') {
-        const scope = remoteDeliveryScope();
-        showToast(notice.text, notice.icon, () => {
-          setRemoteFocus(scope === remoteDeliveryScope() ? { deviceId: event.deviceId, sessionKey: event.sessionKey } : { home: true });
-          openRef.current();
-        });
-      }
+      const scope = remoteDeliveryScope();
+      if (!scope) return;
+      const decision = policy.observe(event, scope);
+      if (event.type === 'approval.resolved') dispatcher.cancel(scope, `${scope}:approval:${event.deviceId}:${event.sessionKey}:${event.approvalId}`);
+      if (!decision) return;
+      const isCurrent = () => remoteNotificationsEnabled() && AppState.currentState === 'active' && scope === remoteDeliveryScope()
+        && !isVisibleThread(event.deviceId, event.sessionKey)
+        && (event.type !== 'approval.request' || Object.values(getRemoteState().approvals).some(approval => approval.deviceId === event.deviceId
+          && approval.sessionKey === event.sessionKey && approval.approvalId === event.approvalId));
+      if (!isCurrent()) return;
+      dispatcher.enqueue({ ...decision, value: { event, decision }, isCurrent });
     };
-    return onRemoteEvent(label);
+    const unsubscribe = onRemoteEvent(label);
+    return () => { unsubscribe(); dispatcher.dispose(); };
   }, []);
 
   // Keep a small, cancellable foreground window across spaces. The visible
