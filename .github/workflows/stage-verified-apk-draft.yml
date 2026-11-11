@@ -1,0 +1,39 @@
+# REVIEW-ONLY QA CANDIDATE. Not installed, pushed, or dispatched.
+# If approved, install this as .github/workflows/stage-verified-apk-draft.yml
+# and the adjacent stage_verified_apk_draft.py as scripts/stage_verified_apk_draft.py.
+name: Stage exact verified Android 1.8.5 draft
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: android-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    if: github.repository == 'dkdjndbfj-wq/salcara-image-mobile' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 0ac29da63fd6f9049ecb0da011faf19361dda73e
+          path: tested-source
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Verify original bytes and stage only the exact existing-tag draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/stage_verified_apk_draft.py
