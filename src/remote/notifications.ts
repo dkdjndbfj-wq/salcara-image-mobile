@@ -18,8 +18,8 @@ import { sessionKeyAgentId } from './projection';
  *
  * While a task runs, Android shows a quiet "Codex 正在运行…" notification (a
  * foreground service) so the app may keep one long-poll open in background;
- * when the turn finishes, fails or returns a final reply a normal notification is
- * posted and the watch ends. Nothing runs when no task is running.
+ * actionable requests and results share the same durable notification ledger.
+ * Terminal events drain their trailing pages before the task watch ends.
  *
  * A fully closed app is reached by push from the Hub (push.ts, Firebase) or,
  * where Firebase cannot reach the phone, by 后台待命: the same service kept
@@ -171,7 +171,7 @@ function onEvent(event: HubEvent) {
 // Android: a quiet foreground service keeps a "正在运行" notification while a task
 // runs. When the app goes to background, the service follows the running
 // sessions natively (JS timers pause there, and the JS runtime may be gone after
-// a swipe-away) and posts completion, failure, or final-reply notifications.
+// a swipe-away) and posts requests, failures, and batched ordinary results.
 
 type Running = { deviceId: string; session: Pick<SessionInfo, 'sessionKey' | 'title' | 'updatedAt'> & Partial<Pick<SessionInfo, 'tool' | 'client'>> };
 const recentlySent = new Map<string, { deviceId: string; sessionKey: string; at: number; scope: string }>();

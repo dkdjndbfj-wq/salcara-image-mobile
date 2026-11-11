@@ -18,8 +18,8 @@ import { loadNotificationPreference, onNotificationPreferenceChange, remoteNotif
  *    and the native receiver shows a generic notification. iOS uses the same
  *    FCM token routed through APNs and presents a generic system alert.
  * 2. Otherwise (common on phones sold in mainland China, or a Hub without a key)
- *    the person can turn on 后台待命: a quiet foreground service keeps one
- *    connection to the Hub open and posts the same notifications itself.
+ *    the person can turn on 后台待命: a quiet foreground service follows the
+ *    saved connections with a bounded worker pool and posts the same notices.
  */
 type Native = {
   pushToken?(): Promise<string | null>;
@@ -40,7 +40,7 @@ export type PushStatus =
   | 'error'        // registration on the current station is not confirmed
   | 'permission'   // system notification permission is denied
   | 'unpaired'     // nothing to register yet
-  | 'unsupported'; // iOS / no native module
+  | 'unsupported'; // no compatible native module
 
 type PushPlatform = 'android' | 'ios';
 const currentPlatform = (): PushPlatform | null => Platform.OS === 'android' || Platform.OS === 'ios' ? Platform.OS : null;
@@ -162,7 +162,7 @@ export function pushStatus(): PushStatus { return status; }
 export function pushStatusFor(scope: string): PushStatus { return targetStatuses.get(scope) ?? 'unpaired'; }
 export function standbyEnabled(): boolean { return standby; }
 
-/** 后台待命: only offered when push cannot reach this phone. */
+/** 后台待命 is an explicit battery tradeoff, including mixed push capabilities. */
 export async function setStandbyEnabled(value: boolean): Promise<void> {
   standbyRevision++; standby = value; emit();
   standbyWrites = standbyWrites.then(async () => {
