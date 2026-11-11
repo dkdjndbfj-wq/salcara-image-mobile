@@ -168,13 +168,21 @@ test('notification menu distinguishes saved standby from native service failure 
     expect(view.getByText('系统限制了后台运行，请检查设置后重试')).toBeTruthy();
     await fireEvent.press(view.getByLabelText('重新连接任务提醒'));
     expect(mockRetryNotifications).toHaveBeenCalledTimes(1);
-    mockWatchStatus = { ...mockWatchStatus, running: true, standby: true, reason: '' };
+    mockWatchStatus = { ...mockWatchStatus, running: true, standby: true, recoveryReady: true, notificationStorageReady: true, reason: '' };
     await view.rerender(<RemoteScreen/>);
-    expect(view.getByText('后台待命运行中，退到后台后继续关注任务')).toBeTruthy();
+    expect(view.getByText('后台观察运行中，切换电脑不会停止其他已绑定连接')).toBeTruthy();
     expect(view.queryByLabelText('重新连接任务提醒')).toBeNull();
-    mockWatchStatus = { ...mockWatchStatus, reason: 'storage' };
+    mockWatchStatus = { ...mockWatchStatus, recoveryReady: false, notificationStorageReady: false, reason: 'storage' };
     await view.rerender(<RemoteScreen/>);
-    expect(view.getByText('后台待命运行中，但本机恢复存储未就绪；系统回收后请重新打开 App')).toBeTruthy();
+    expect(view.getByText('后台恢复状态未保存，请保持 App 打开并重试')).toBeTruthy();
+    expect(view.queryByText('后台观察运行中，切换电脑不会停止其他已绑定连接')).toBeNull();
+    await fireEvent.press(view.getByLabelText('重新连接任务提醒'));
+    expect(mockRetryNotifications).toHaveBeenCalledTimes(2);
+    mockWatchStatus = { ...mockWatchStatus, recoveryReady: true, notificationStorageReady: true, reason: 'partial', unavailableConnections: 1 };
+    await view.rerender(<RemoteScreen/>);
+    expect(view.getByText('1 条后台连接暂不可用，请检查对应电脑或重连')).toBeTruthy();
+    expect(view.queryByText('后台观察运行中，切换电脑不会停止其他已绑定连接')).toBeNull();
+    expect(view.getByLabelText('重新连接任务提醒')).toBeTruthy();
   } finally { await view?.unmount(); Object.assign(mockRemote, previousRemote); platform.restore(); }
 });
 
