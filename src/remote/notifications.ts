@@ -12,6 +12,7 @@ import { notificationTargets, publishNotificationTargets, currentNoticeTarget, t
 import { onConnectionBindingsChange, resolveNotificationTarget } from './connections';
 import { sessionAgentDisplayName } from './agent-catalog';
 import { sessionKeyAgentId } from './projection';
+import { parseIngressManifest } from './ingress';
 
 /**
  * Task notifications for the 编程 space.
@@ -174,6 +175,35 @@ function onEvent(event: HubEvent) {
 // a swipe-away) and posts requests, failures, and batched ordinary results.
 
 type Running = { deviceId: string; session: Pick<SessionInfo, 'sessionKey' | 'title' | 'updatedAt'> & Partial<Pick<SessionInfo, 'tool' | 'client'>> };
+type NotificationBotPin = { instanceId: string; publicKey: string };
+type PinnedWatchHub = NoticeTarget['hub'] & { botPin?: NotificationBotPin };
+
+/** This anchor is copied only from the saved Bot binding, never learned from a shared URL cache. */
+function savedBotPin(hub: PinnedWatchHub): NotificationBotPin | null {
+  const pin = hub.botPin;
+  if (!pin || typeof pin !== 'object' || Array.isArray(pin)
+    || typeof pin.instanceId !== 'string' || !/^[a-f0-9]{32}$/.test(pin.instanceId)
+    || typeof pin.publicKey !== 'string' || !/^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/.test(pin.publicKey)) return null;
+  return { instanceId: pin.instanceId, publicKey: pin.publicKey };
+}
+
+/** Pure handoff builder: an unpinned legacy Bot remains saved but gets no native credential handoff. */
+export function nativeNotificationWatchAuthority(hub: PinnedWatchHub) {
+  if (!hub.botToken) return { hubUrl: hub.url, pairToken: hub.pairToken, ingressManifest: hubIngressSnapshot?.(hub.url) };
+  const botPin = savedBotPin(hub);
+  if (!botPin) return null;
+  let ingressManifest: ReturnType<typeof parseIngressManifest> | undefined;
+  try {
+    const cached = hubIngressSnapshot?.(hub.url);
+    if (cached?.signed_payload && cached.signature) {
+      // Parse verifies the signed payload, ignoring forged unsigned outer fields.
+      // An expired same-pin envelope is a discovery hint, never token authority.
+      const verified = parseIngressManifest(cached, hub.url, Date.now(), true, false);
+      if (verified.hub_instance_id === botPin.instanceId && verified.identity_public_key === botPin.publicKey) ingressManifest = verified;
+    }
+  } catch { /* Native can discover anonymously using the durable pin alone. */ }
+  return { hubUrl: hub.url, botToken: hub.botToken, botPin, ...(ingressManifest ? { ingressManifest } : {}) };
+}
 const recentlySent = new Map<string, { deviceId: string; sessionKey: string; at: number; scope: string }>();
 const finishedTasks = new Map<string, number>();
 const runningByScope = new Map<string, { tasks: Running[]; at: number }>();
@@ -209,7 +239,7 @@ const runningSessions = (): Running[] => {
   return live.length ? live : old && Date.now() - old.at <= 30_000 ? old.tasks : [];
 };
 async function refreshTargets(): Promise<void> {
-  const targets = await notificationTargets();
+  const targets = (await notificationTargets()).filter(target => !target.hub.botToken || savedBotPin(target.hub));
   knownTargets = targets;
   publishNotificationTargets(targets);
   const valid = new Set(targets.map(target => target.notificationScope));
@@ -323,6 +353,9 @@ function captureRecoveredIngress() {
 }
 function restoreRecoveredIngress() {
   const credentials = watchCredentials(), scope = currentNotificationScope();
+  // The current import API writes the URL-shared router, not a particular Bot
+  // binding. Preserve its durable pin and let native rediscover; do not overwrite
+  // another binding's global cache with this Bot's hand-back.
   if (!credentials || credentials.botToken || !scope) return;
   const entry = recoveredIngress.get(scope);
   if (!entry || entry.hubUrl !== credentials.url || recoveringIngress.has(scope) || entry.retryAt > Date.now()) return;
@@ -359,12 +392,12 @@ function configureNative(follow: boolean) {
     const connections = knownTargets.flatMap(target => {
       const tasks = runningByScope.get(target.notificationScope)?.tasks ?? [];
       if (!standing && !tasks.length) return [];
+      const authority = nativeNotificationWatchAuthority(target.hub);
+      if (!authority) return [];
       const deviceWide = standing || tasks.length > 4;
-      return [{ version, follow: true, standby: standing, hubUrl: target.hub.url,
-        ...(target.hub.botToken ? { botToken: target.hub.botToken } : { pairToken: target.hub.pairToken }),
+      return [{ version, follow: true, standby: standing, ...authority,
         wait: target.notificationScope === activeScope ? hubSupportsWait() : true,
         navigationScope: target.notificationScope,
-        ...(!target.hub.botToken ? { ingressManifest: hubIngressSnapshot?.(target.hub.url) } : {}),
         ...(deviceWide ? { devices: [{ deviceId: target.deviceId }] } : {}),
         ...(!standing && deviceWide ? { deviceMode: true } : {}),
         sessions: tasks.map(({ deviceId, session }) => ({ deviceId, sessionKey: session.sessionKey,

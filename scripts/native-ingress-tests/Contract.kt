@@ -10,6 +10,7 @@ import java.net.CookieManager
 import java.net.URL
 import java.net.URLStreamHandler
 import java.security.KeyPairGenerator
+import java.security.KeyPair
 import java.security.Signature
 import java.util.Base64
 import java.util.concurrent.CancellationException
@@ -21,6 +22,11 @@ private const val migrated = "https://new.example/salcara-hub/v1"
 private val key = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
 private val hubId = "a".repeat(32)
 private val publicKey = Base64.getEncoder().encodeToString(key.public.encoded.takeLast(32).toByteArray())
+private val otherKey = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+private val otherId = "b".repeat(32)
+private val otherPublicKey = Base64.getEncoder().encodeToString(otherKey.public.encoded.takeLast(32).toByteArray())
+private fun botPin() = JSONObject().put("instanceId", hubId).put("publicKey", publicKey)
+private fun otherBotPin() = JSONObject().put("instanceId", otherId).put("publicKey", otherPublicKey)
 private val calls = mutableListOf<String>()
 private var response: (String) -> Pair<Int, String> = { throw IOException("offline") }
 private val scope = "ns1_" + "a".repeat(64)
@@ -35,19 +41,19 @@ private fun manifest(expires: Long = System.currentTimeMillis() + 86_400_000, re
   .put("endpoints", JSONArray().also { rows -> entries.forEachIndexed { index, url -> rows.put(JSONObject()
     .put("id", if (url == logical) "canonical" else "entry-$index").put("url", url).put("priority", if (url == logical) 100 else 50)) } })
 
-private fun signed(value: JSONObject): JSONObject {
+private fun signed(value: JSONObject, signingKey: KeyPair = key): JSONObject {
   val payload = value.toString().toByteArray(Charsets.UTF_8)
-  val signer = Signature.getInstance("Ed25519").apply { initSign(key.private); update("salcara-ingress-manifest-v1\n".toByteArray() + payload) }
+  val signer = Signature.getInstance("Ed25519").apply { initSign(signingKey.private); update("salcara-ingress-manifest-v1\n".toByteArray() + payload) }
   return JSONObject().put("signed_payload", Base64.getEncoder().encodeToString(payload)).put("signature", Base64.getEncoder().encodeToString(signer.sign()))
 }
 
-private fun proof(url: String, wrongNonce: Boolean = false, stale: Boolean = false, forged: Boolean = false, now: Long = System.currentTimeMillis()): JSONObject {
+private fun proof(url: String, wrongNonce: Boolean = false, stale: Boolean = false, forged: Boolean = false, now: Long = System.currentTimeMillis(), identity: String = hubId, signingKey: KeyPair = key): JSONObject {
   val nonce = if (wrongNonce) "f".repeat(64) else url.substringAfter("nonce=")
   val issued = now - if (stale) 90_000 else 0
   val expires = issued + 30_000
-  val signer = Signature.getInstance("Ed25519").apply { initSign(key.private); update("salcara-ingress-proof-v1\n$hubId\n$nonce\n$issued\n$expires".toByteArray()) }
+  val signer = Signature.getInstance("Ed25519").apply { initSign(signingKey.private); update("salcara-ingress-proof-v1\n$identity\n$nonce\n$issued\n$expires".toByteArray()) }
   val signature = if (forged) ByteArray(64) else signer.sign()
-  return JSONObject().put("version", 1).put("hub_instance_id", hubId).put("nonce", nonce)
+  return JSONObject().put("version", 1).put("hub_instance_id", identity).put("nonce", nonce)
     .put("issued_at", issued).put("expires_at", expires).put("signature", Base64.getEncoder().encodeToString(signature))
 }
 
@@ -55,6 +61,18 @@ private fun blocked(action: () -> Unit) {
   var rejected = false
   try { action() } catch (_: IllegalArgumentException) { rejected = true } catch (_: IllegalStateException) { rejected = true }
   check(rejected) { "Pinned authority must not fall back to an unverified credential destination" }
+}
+
+private fun identityBlocked(action: () -> Unit) {
+  var rejected = false
+  try { action() } catch (_: SalcaraBotIdentityUnavailable) { rejected = true }
+  check(rejected) { "Bot identity failure must be explicit and cannot become a legacy fallback" }
+}
+
+private fun temporarilyUnavailable(action: () -> Unit) {
+  var rejected = false
+  try { action() } catch (_: SalcaraIngressUnavailable) { rejected = true }
+  check(rejected) { "Expired verification or transport loss must remain retryable" }
 }
 
 fun main() {
@@ -420,6 +438,223 @@ fun main() {
     check(!public.toString().contains("synthetic-private") && !public.has("sessions") && !public.has("expiresAt"))
     val invalid = watchConfig(JSONObject(fresh.toString()).put("signature", Base64.getEncoder().encodeToString(ByteArray(64))))
     check(router.publicRecoverySnapshot(invalid) == null)
+  }
+  test("Bot cold discovery uses its independent durable pin and checks dispatch") {
+    val m = signed(manifest()); network(m)
+    val router = SalcaraIngressRouter()
+    check(router.resolve(canonical, null, scope, botPin()) { true } == backup)
+    router.assertDispatch(canonical, scope, backup, botPin()) { true }
+    identityBlocked { router.assertDispatch(canonical, scope, backup, otherBotPin()) { true } }
+    identityBlocked { router.assertDispatch(canonical, "other-scope", backup, botPin()) { true } }
+    identityBlocked { router.assertDispatch(canonical, scope, migrated, botPin()) { true } }
+    identityBlocked { router.assertDispatch(canonical, scope, backup, null) { true } }
+  }
+  test("Bot rejects another signed identity at cold and warm handoff before network") {
+    val m = signed(manifest())
+    val changed = signed(manifest().put("hub_instance_id", otherId).put("identity_public_key", otherPublicKey), otherKey)
+    network(m)
+    identityBlocked { SalcaraIngressRouter().resolve(canonical, changed, scope, botPin()) { true } }
+    check(calls.isEmpty())
+    val router = SalcaraIngressRouter(); router.resolve(canonical, m, scope, botPin()) { true }
+    calls.clear()
+    identityBlocked { router.resolve(canonical, changed, scope, botPin()) { true } }
+    check(calls.isEmpty())
+  }
+  test("Bot rejects unsigned handoff and discovery even when fields match") {
+    val unsigned = manifest(); network(unsigned)
+    identityBlocked { SalcaraIngressRouter().resolve(canonical, unsigned, scope, botPin()) { true } }
+    check(calls.isEmpty())
+    identityBlocked { SalcaraIngressRouter().resolve(canonical, null, scope, botPin()) { true } }
+    check(calls == listOf("$canonical/ingress/manifest"))
+    val router = SalcaraIngressRouter(); val m = signed(manifest()); network(m)
+    router.resolve(canonical, m, scope, botPin()) { true }; calls.clear()
+    identityBlocked { router.resolve(canonical, unsigned, scope, botPin()) { true } }
+    check(calls.isEmpty())
+  }
+  test("Bot cannot enroll a replacement global identity through public discovery") {
+    val changed = signed(manifest().put("hub_instance_id", otherId).put("identity_public_key", otherPublicKey), otherKey)
+    network(changed)
+    identityBlocked { SalcaraIngressRouter().resolve(canonical, null, scope, botPin()) { true } }
+    check(calls == listOf("$canonical/ingress/manifest"))
+  }
+  test("Bot missing ingress never falls back while valid Pair legacy behavior is retained") {
+    response = { 404 to "{}" }
+    identityBlocked { SalcaraIngressRouter().resolve(canonical, null, scope, botPin()) { true } }
+    check(SalcaraIngressRouter().resolve(canonical, null, scope) { true } == canonical)
+  }
+  test("Bot warm authority cannot turn a later 404 into a legacy dispatch") {
+    var now = System.currentTimeMillis()
+    val m = signed(manifest(now + 86_400_000)); network(m) { proof(it, now = now) }
+    val router = SalcaraIngressRouter(clock = { now })
+    router.resolve(canonical, m, scope, botPin()) { true }
+    now += 10_001; response = { 404 to "{}" }
+    identityBlocked { router.resolve(canonical, null, scope, botPin()) { true } }
+    temporarilyUnavailable { router.assertDispatch(canonical, scope, backup, botPin()) { true } }
+  }
+  test("changing Bot pin clears old manifests and leases even within one scope") {
+    val m = signed(manifest()); network(m); val router = SalcaraIngressRouter()
+    router.resolve(canonical, m, scope, botPin()) { true }; calls.clear()
+    identityBlocked { router.resolve(canonical, m, scope, otherBotPin()) { true } }
+    identityBlocked { router.assertDispatch(canonical, scope, backup, botPin()) { true } }
+    check(calls.isEmpty())
+    val replacement = signed(manifest().put("hub_instance_id", otherId).put("identity_public_key", otherPublicKey), otherKey)
+    network(replacement) { proof(it, identity = otherId, signingKey = otherKey) }
+    check(router.resolve(canonical, replacement, scope, otherBotPin()) { true } == backup)
+    check(calls.any { it.contains("/identity?") })
+    router.assertDispatch(canonical, scope, backup, otherBotPin()) { true }
+  }
+  test("a Pair lease cannot be reused by a newly supplied Bot pin") {
+    val m = signed(manifest()); network(m); val router = SalcaraIngressRouter()
+    router.resolve(canonical, m, scope) { true }; calls.clear()
+    check(router.resolve(canonical, m, scope, botPin()) { true } == backup)
+    check(calls.any { it.contains("/identity?") })
+  }
+  test("Bot pin parser requires exact string instance and canonical 32-byte Ed25519 key") {
+    val invalid = listOf(
+      botPin().put("instanceId", hubId.uppercase()), botPin().put("instanceId", "a".repeat(31)),
+      botPin().put("instanceId", 123), botPin().put("publicKey", publicKey + "="),
+      botPin().put("publicKey", publicKey.trimEnd('=')), botPin().put("publicKey", Base64.getEncoder().encodeToString(ByteArray(31))),
+      botPin().put("publicKey", Base64.getEncoder().encodeToString(ByteArray(33))),
+      botPin().put("publicKey", "A".repeat(42) + "B="), botPin().put("extra", true), JSONObject()
+    )
+    for (pin in invalid) identityBlocked { SalcaraIngressRouter().resolve(canonical, null, scope, pin) { true } }
+    check(calls.isEmpty())
+  }
+  test("Bot export without an old envelope still requires a matching signed identity") {
+    val m = signed(manifest()); network(m); val router = SalcaraIngressRouter()
+    router.resolve(canonical, null, scope, botPin()) { true }
+    check(router.recoverySnapshot(canonical, scope, null, botPin = botPin())?.getString("signature") == m.getString("signature"))
+    check(router.recoverySnapshot(canonical, scope, null, botPin = otherBotPin()) == null)
+    check(router.recoverySnapshot(canonical, "other-scope", null, botPin = botPin()) == null)
+    val persisted = watchConfig(m).put("botToken", "synthetic-bot-token").put("botPin", botPin())
+    val cold = SalcaraIngressRouter()
+    check(cold.recoverySnapshot(canonical, scope, null, persisted, botPin())?.getString("signature") == m.getString("signature"))
+    check(cold.recoverySnapshot(canonical, scope, null, persisted, otherBotPin()) == null)
+    check(cold.publicRecoverySnapshot(persisted) != null)
+    persisted.put("botPin", otherBotPin())
+    check(cold.publicRecoverySnapshot(persisted) == null)
+    persisted.remove("botPin")
+    check(cold.publicRecoverySnapshot(persisted) == null)
+    persisted.put("botPin", botPin()).put("ingressManifest", manifest())
+    check(cold.recoverySnapshot(canonical, scope, null, persisted, botPin()) == null)
+    check(cold.publicRecoverySnapshot(watchConfig(m).put("botPin", otherBotPin())) != null)
+  }
+  test("cold Bot pin alone accepts a same-identity signed migration that retired its logical URL") {
+    val fresh = signed(manifest(revision = 4, logical = migrated, entries = listOf(migrated)))
+    response = { url -> when {
+      url == "$canonical/ingress/manifest" -> 200 to fresh.toString()
+      url.startsWith("$migrated/ingress/identity?") -> 200 to proof(url).toString()
+      else -> error("Unexpected migration destination")
+    } }
+    val router = SalcaraIngressRouter()
+    check(router.resolve(canonical, null, scope, botPin()) { true } == migrated)
+    router.assertDispatch(canonical, scope, migrated, botPin()) { true }
+    check(router.recoverySnapshot(canonical, scope, null, botPin = botPin())?.getString("signature") == fresh.getString("signature"))
+    check(calls.size == 2)
+  }
+  test("Bot checkpoint keeps its pin through a same-identity signed endpoint migration") {
+    val now = System.currentTimeMillis()
+    val old = signed(manifest(now - 1))
+    val fresh = signed(manifest(revision = 4, logical = migrated, entries = listOf(migrated)))
+    response = { url -> when {
+      url == "$backup/ingress/manifest" || url == "$migrated/ingress/manifest" -> 200 to fresh.toString()
+      url.startsWith("$migrated/ingress/identity?") -> 200 to proof(url).toString()
+      else -> throw IOException("old domain offline")
+    } }
+    val config = watchConfig(old).put("botToken", "synthetic-bot-token").put("botPin", botPin())
+    val router = SalcaraIngressRouter()
+    check(router.resolve(canonical, old, scope, botPin()) { true } == migrated)
+    val envelope = router.recoverySnapshot(canonical, scope, old, botPin = botPin())!!
+    val checkpoint = SalcaraWatchRecovery.create(config, now - 60_000, false, now)!!
+    val updated = SalcaraWatchRecovery.withIngressManifest(checkpoint, config, config, envelope, now)!!
+    check(updated.getLong("expiresAt") == checkpoint.getLong("expiresAt"))
+    val restored = SalcaraWatchRecovery.validate(JSONObject(updated.toString()), now)!!.getJSONObject("config")
+    check(restored.getJSONObject("botPin").toString() == botPin().toString())
+    check(SalcaraIngressRouter().resolve(canonical, restored.getJSONObject("ingressManifest"), scope, restored.getJSONObject("botPin")) { true } == migrated)
+  }
+  test("Bot final dispatch rejects expired lease and manifest as retryable and observes cancellation") {
+    var now = System.currentTimeMillis()
+    val m = signed(manifest(now + 20_000)); network(m) { proof(it, now = now) }
+    val router = SalcaraIngressRouter(clock = { now })
+    router.resolve(canonical, m, scope, botPin()) { true }
+    var canceled = false
+    try { router.assertDispatch(canonical, scope, backup, botPin()) { false } } catch (_: CancellationException) { canceled = true }
+    check(canceled)
+    now += 10_001
+    temporarilyUnavailable { router.assertDispatch(canonical, scope, backup, botPin()) { true } }
+    now += 10_000
+    temporarilyUnavailable { router.assertDispatch(canonical, scope, backup, botPin()) { true } }
+  }
+  test("Bot discovery and proof transport loss remain retryable without legacy fallback") {
+    response = { throw IOException("offline") }
+    temporarilyUnavailable { SalcaraIngressRouter().resolve(canonical, null, scope, botPin()) { true } }
+    temporarilyUnavailable { SalcaraIngressRouter().resolve(canonical, signed(manifest()), scope, botPin()) { true } }
+    val expired = signed(manifest(System.currentTimeMillis() - 1)); network(expired)
+    temporarilyUnavailable { SalcaraIngressRouter().resolve(canonical, expired, scope, botPin()) { true } }
+  }
+  test("Bot cold expired public authority stays retryable and cannot authorize dispatch") {
+    network(signed(manifest(System.currentTimeMillis() - 1)))
+    val router = SalcaraIngressRouter()
+    temporarilyUnavailable { router.resolve(canonical, null, scope, botPin()) { true } }
+    check(calls == listOf("$canonical/ingress/manifest"))
+    identityBlocked { router.assertDispatch(canonical, scope, canonical, botPin()) { true } }
+  }
+  test("Bot expired public candidate cannot hide a later fresh matching recovery") {
+    val old = signed(manifest(System.currentTimeMillis() - 1))
+    val fresh = signed(manifest(revision = 4))
+    response = { url -> when {
+      url == "$canonical/ingress/manifest" -> 200 to old.toString()
+      url == "$backup/ingress/manifest" -> 200 to fresh.toString()
+      url.startsWith("$backup/ingress/identity?") -> 200 to proof(url).toString()
+      else -> error("Unexpected expired-cache recovery destination")
+    } }
+    val router = SalcaraIngressRouter()
+    check(router.resolve(canonical, old, scope, botPin()) { true } == backup)
+    router.assertDispatch(canonical, scope, backup, botPin()) { true }
+    check(calls.take(2) == listOf("$canonical/ingress/manifest", "$backup/ingress/manifest"))
+  }
+  test("Bot correctly signed stale proof stays retryable without granting a lease") {
+    val m = signed(manifest()); network(m) { proof(it, stale = true) }
+    val router = SalcaraIngressRouter()
+    temporarilyUnavailable { router.resolve(canonical, m, scope, botPin()) { true } }
+    temporarilyUnavailable { router.assertDispatch(canonical, scope, backup, botPin()) { true } }
+    check(calls.count { it.contains("/identity?") } == 2)
+  }
+  test("Bot proof expiring during its response can use another fresh same-pin endpoint") {
+    var now = System.currentTimeMillis()
+    val m = signed(manifest(now + 86_400_000))
+    response = { url -> when {
+      url.endsWith("/manifest") -> 200 to m.toString()
+      url.startsWith("$backup/ingress/identity?") -> {
+        val delayed = proof(url, now = now); now += 30_001; 200 to delayed.toString()
+      }
+      url.startsWith("$canonical/ingress/identity?") -> 200 to proof(url, now = now).toString()
+      else -> error("Unexpected proof expiry destination")
+    } }
+    val router = SalcaraIngressRouter(clock = { now })
+    check(router.resolve(canonical, m, scope, botPin()) { true } == canonical)
+    router.assertDispatch(canonical, scope, canonical, botPin()) { true }
+    temporarilyUnavailable { router.assertDispatch(canonical, scope, backup, botPin()) { true } }
+  }
+  test("Bot expired forged proof and nonce mismatch remain identity failures") {
+    val m = signed(manifest())
+    network(m) { proof(it, stale = true, forged = true) }
+    identityBlocked { SalcaraIngressRouter().resolve(canonical, m, scope, botPin()) { true } }
+    network(m) { proof(it, wrongNonce = true) }
+    identityBlocked { SalcaraIngressRouter().resolve(canonical, m, scope, botPin()) { true } }
+  }
+  test("Bot rejected candidate cannot hide a healthy same-pin member") {
+    val m = signed(manifest())
+    val changed = signed(manifest().put("hub_instance_id", otherId).put("identity_public_key", otherPublicKey), otherKey)
+    response = { url -> when {
+      url == "$canonical/ingress/manifest" -> 200 to changed.toString()
+      url == "$backup/ingress/manifest" -> 200 to m.toString()
+      url.startsWith("$backup/ingress/identity?") -> 200 to proof(url).toString()
+      else -> error("Unexpected Bot destination")
+    } }
+    val router = SalcaraIngressRouter()
+    check(router.resolve(canonical, m, scope, botPin()) { true } == backup)
+    router.assertDispatch(canonical, scope, backup, botPin()) { true }
   }
   println("$passed native ingress contract checks passed")
 }

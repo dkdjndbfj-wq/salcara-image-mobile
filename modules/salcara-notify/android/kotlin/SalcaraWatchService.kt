@@ -62,7 +62,7 @@ class SalcaraWatchService : Service() {
       if (!SalcaraNotifyModule.notificationsAllowed(this)) { clearConfiguration(this, "permission"); stopSelf(); return START_NOT_STICKY }
       if (intent == null) {
         val restored = SalcaraWatchVault.load(this)
-        if (restored == null) { clearConfiguration(this, "expired"); stopSelf(); return START_NOT_STICKY }
+        if (restored == null) { clearConfiguration(this, SalcaraWatchVault.lastReadFailure.ifEmpty { "expired" }); stopSelf(); return START_NOT_STICKY }
         snapshot = restored; config = restored.getJSONObject("config"); startedAt = restored.getLong("startedAt")
         standby = restored.optBoolean("standby"); recoveryReady = true; bindLease(restored)
       } else {
@@ -71,7 +71,7 @@ class SalcaraWatchService : Service() {
       }
       val current = config
       if (current?.optBoolean("follow") == true && !SalcaraWatchRecovery.validConfig(current)) {
-        clearConfiguration(this, "configuration"); stopSelf(); return START_NOT_STICKY
+        clearConfiguration(this, if (SalcaraWatchRecovery.needsBotIdentity(current)) "identity" else "configuration"); stopSelf(); return START_NOT_STICKY
       }
       if (startedAt == 0L) startedAt = System.currentTimeMillis()
       latestStartId = startId
@@ -118,10 +118,16 @@ class SalcaraWatchService : Service() {
     val current = config ?: return@synchronized
     if (!active || !running || !current.optBoolean("follow")) return@synchronized
     states = SalcaraWatchRecovery.connections(current).map { ConnectionState(current, it) }
+    SalcaraWatchRecovery.identityBlocked(current).forEach { blocked ->
+      val devices = blocked.getJSONArray("deviceIds")
+      for (index in 0 until devices.length()) SalcaraNotificationCenter.observationStopped(this, blocked.getString("navigationScope"), devices.getString(index), "identity")
+    }
     states.forEach { state -> if (!authorized(state)) { state.retired = true; state.reason = "authorization" } else schedule(state, 0) }
     saveCheckpoint(current); updateOngoing()
-    if (states.none { !it.retired }) finish("authorization", false)
+    if (states.none { !it.retired }) finish(stoppedReason(), false)
   }
+  private fun stoppedReason() = states.firstOrNull { it.reason.isNotEmpty() && it.reason != "completed" }?.reason
+    ?: if (config?.let { SalcaraWatchRecovery.identityBlocked(it).isNotEmpty() } == true) "identity" else "completed"
   private fun current(state: ConnectionState) = active && running && !state.retired && config === state.owner && !Thread.currentThread().isInterrupted
   private fun authorized(state: ConnectionState) = state.deviceIds().isNotEmpty() && state.deviceIds().all { SalcaraNotificationCenter.permits(this, state.scope, it) }
   private fun schedule(state: ConnectionState, delay: Long) {
@@ -153,6 +159,7 @@ class SalcaraWatchService : Service() {
       }
       state.reason = ""; saveCheckpoint(state.owner); updateOngoing()
     } catch (_: AuthError) { retire(state, "authentication", true); return }
+    catch (_: SalcaraBotIdentityUnavailable) { retire(state, "identity", true); return }
     catch (_: Exception) { if (current(state)) { state.reason = "connection"; delay = 10_000 } }
     schedule(state, delay)
   }
@@ -165,7 +172,7 @@ class SalcaraWatchService : Service() {
     state.reason = reason; state.retired = true; state.connection?.disconnect()
     if (notify) state.deviceIds().forEach { SalcaraNotificationCenter.observationStopped(this, state.scope, it, reason) }
     saveCheckpoint(state.owner)
-    handler.post { if (active && config === state.owner && states.none { !it.retired }) finish(if (states.all { it.reason == "completed" }) "completed" else reason, false) else updateOngoing() }
+    handler.post { if (active && config === state.owner && states.none { !it.retired }) finish(stoppedReason(), false) else updateOngoing() }
   }
   private fun finish(reason: String, notify: Boolean) = synchronized(configLock) {
     if (activeService !== this || !active) return@synchronized
@@ -179,14 +186,14 @@ class SalcaraWatchService : Service() {
     val value = state.value; val hub = value.getString("hubUrl").trimEnd('/')
     val ownerGeneration = generation
     try {
-      return state.ingress.resolve(hub, value.optJSONObject("ingressManifest"), state.scope) {
+      return state.ingress.resolve(hub, value.optJSONObject("ingressManifest"), state.scope, botPin(value)) {
         current(state) && generation == ownerGeneration && authorized(state) && SalcaraNotifyModule.notificationsAllowed(this)
       }
     } finally { persistIngress(state, ownerGeneration) }
   }
   private fun persistIngress(state: ConnectionState, ownerGeneration: Long) = synchronized(configLock) {
     if (!current(state) || generation != ownerGeneration) return@synchronized
-    val envelope = state.ingress.recoverySnapshot(state.value.optString("hubUrl").trimEnd('/'), state.scope, state.value.optJSONObject("ingressManifest")) ?: return@synchronized
+    val envelope = state.ingress.recoverySnapshot(state.value.optString("hubUrl").trimEnd('/'), state.scope, state.value.optJSONObject("ingressManifest"), botPin = botPin(state.value)) ?: return@synchronized
     val stored = snapshot ?: SalcaraWatchRecovery.create(state.owner, startedAt, standby, System.currentTimeMillis()) ?: return@synchronized
     val merged = SalcaraWatchRecovery.withConnectionIngressManifest(stored, state.owner, state.value, envelope, System.currentTimeMillis()) ?: return@synchronized
     // Only update the already-verified public locator; retain progressed cursors and original deadline.
@@ -224,9 +231,14 @@ class SalcaraWatchService : Service() {
     state.connection = connection
     connection.instanceFollowRedirects = false; connection.connectTimeout = 15_000; connection.readTimeout = if (wait) 45_000 else 20_000
     connection.setRequestProperty("Accept", "application/json")
-    SalcaraWatchRecovery.requestHeaders(state.value).forEach { (name, value) -> connection.setRequestProperty(name, value) }
     try {
-      if (!current(state) || !authorized(state)) return
+      if (!current(state) || !authorized(state) || !SalcaraNotifyModule.notificationsAllowed(this)) return
+      if (state.value.optString("botToken").isNotEmpty()) {
+        state.ingress.assertDispatch(state.value.optString("hubUrl").trimEnd('/'), state.scope, hub, botPin(state.value)) {
+          current(state) && authorized(state) && SalcaraNotifyModule.notificationsAllowed(this)
+        }
+      }
+      SalcaraWatchRecovery.requestHeaders(state.value).forEach { (name, value) -> connection.setRequestProperty(name, value) }
       val status = connection.responseCode
       if (pairingRejected(connection, status)) throw AuthError()
       if (status !in 200..299) { if (status in 300..399 || status in listOf(502, 503, 504)) state.ingress.fail(hub); throw IllegalStateException("Events temporarily unavailable") }
@@ -315,6 +327,7 @@ class SalcaraWatchService : Service() {
     @Volatile var lastTitle = "Salcara"
     @Volatile var lastBody = "正在关注电脑上的任务"
     @Volatile var standby = false
+    private fun botPin(value: JSONObject): JSONObject? = if (value.optString("botToken").isNotEmpty()) value.optJSONObject("botPin") else null
     fun prepareStart(intent: Intent) = synchronized(configLock) { intent.putExtra("watchGeneration", generation) }
     fun configure(context: Context, value: JSONObject?) = synchronized(configLock) {
       if (value == null) { clearConfiguration(context, "configuration"); activeService?.stopSelf(); return@synchronized }
@@ -328,12 +341,15 @@ class SalcaraWatchService : Service() {
         return@synchronized
       }
       val normalized = SalcaraWatchRecovery.normalized(value)
-      if (normalized == null) { activeService?.finish("configuration", true); clearConfiguration(context, "configuration"); return@synchronized }
+      if (normalized == null) {
+        val reason = if (SalcaraWatchRecovery.needsBotIdentity(value)) "identity" else "configuration"
+        activeService?.finish(reason, true); clearConfiguration(context, reason); return@synchronized
+      }
       val persisted = (snapshot?.takeIf { SalcaraWatchRecovery.validate(it, System.currentTimeMillis()) != null } ?: SalcaraWatchVault.peek(context))?.optJSONObject("config")
       for (item in SalcaraWatchRecovery.connections(normalized)) {
         val old = persisted?.let { SalcaraWatchRecovery.connections(it).firstOrNull { candidate -> SalcaraWatchRecovery.sameAuthority(candidate, item) } }
         val router = activeService?.states?.firstOrNull { SalcaraWatchRecovery.sameAuthority(it.value, item) }?.ingress ?: SalcaraIngressRouter()
-        router.recoverySnapshot(item.optString("hubUrl").trimEnd('/'), item.optString("navigationScope"), item.optJSONObject("ingressManifest"), old)?.let { item.put("ingressManifest", it) }
+        router.recoverySnapshot(item.optString("hubUrl").trimEnd('/'), item.optString("navigationScope"), item.optJSONObject("ingressManifest"), old, botPin(item))?.let { item.put("ingressManifest", it) }
       }
       val wasStandby = standby
       standby = normalized.optBoolean("standby")
@@ -374,9 +390,11 @@ class SalcaraWatchService : Service() {
     }
     fun status(): Map<String, Any> = synchronized(configLock) {
       val values = activeService?.states ?: emptyList()
+      val blocked = config?.let(SalcaraWatchRecovery::identityBlocked) ?: emptyList()
       mapOf("running" to running, "standby" to standby, "recoveryReady" to recoveryReady, "notificationStorageReady" to SalcaraNotificationCenter.storageReady,
-        "expiresAt" to (snapshot?.optLong("expiresAt") ?: 0L), "reason" to stopReason, "connectionCount" to values.size,
-        "connections" to values.map { mapOf("notificationScope" to it.scope, "running" to !it.retired, "reason" to it.reason, "deviceMode" to SalcaraWatchRecovery.deviceMode(it.value)) })
+        "expiresAt" to (snapshot?.optLong("expiresAt") ?: 0L), "reason" to stopReason, "connectionCount" to values.size + blocked.size,
+        "connections" to (values.map { mapOf("notificationScope" to it.scope, "running" to !it.retired, "reason" to it.reason, "deviceMode" to SalcaraWatchRecovery.deviceMode(it.value)) }
+          + blocked.map { mapOf("notificationScope" to it.getString("navigationScope"), "running" to false, "reason" to "identity", "deviceMode" to true) }))
     }
     fun recoveredIngress(context: Context): String? = synchronized(configLock) {
       if (!SalcaraNotifyModule.notificationsAllowed(context)) return@synchronized null
@@ -387,7 +405,7 @@ class SalcaraWatchService : Service() {
         if (current != null && SalcaraWatchRecovery.connections(current).none { SalcaraWatchRecovery.sameAuthority(it, item) }) continue
         val router = activeService?.states?.firstOrNull { SalcaraWatchRecovery.sameAuthority(it.value, item) }?.ingress ?: SalcaraIngressRouter()
         val publicConfig = JSONObject(item.toString())
-        router.recoverySnapshot(item.optString("hubUrl").trimEnd('/'), item.optString("navigationScope"), item.optJSONObject("ingressManifest"))?.let { publicConfig.put("ingressManifest", it) }
+        router.recoverySnapshot(item.optString("hubUrl").trimEnd('/'), item.optString("navigationScope"), item.optJSONObject("ingressManifest"), botPin = botPin(item))?.let { publicConfig.put("ingressManifest", it) }
         router.publicRecoverySnapshot(publicConfig)?.let { values.put(it) }
       }
       if (saved.optInt("schema") == 2) JSONObject().put("schema", 2).put("connections", values).toString() else values.optJSONObject(0)?.toString()

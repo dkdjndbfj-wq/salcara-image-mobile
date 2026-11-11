@@ -6,14 +6,15 @@ import org.json.JSONObject
 /** No network, platform keystore or service scheduling is exercised by these recording fixtures. */
 internal object SalcaraWatchVault {
   var saved: JSONObject? = null
-  fun load(context: Context) = saved?.let { JSONObject(it.toString()) }
-  fun peek(context: Context) = load(context)
+  var lastReadFailure = ""
+  fun load(context: Context): JSONObject? {
+    lastReadFailure = ""
+    val value = saved?.let { JSONObject(it.toString()) } ?: return null
+    return SalcaraWatchRecovery.restore(value, System.currentTimeMillis()).also {
+      if (it == null) { if (value.optJSONObject("config")?.let(SalcaraWatchRecovery::needsBotIdentity) == true) lastReadFailure = "identity"; saved = null }
+    }
+  }
+  fun peek(context: Context) = saved?.let { SalcaraWatchRecovery.restore(JSONObject(it.toString()), System.currentTimeMillis()) }
   fun save(context: Context, value: JSONObject): Boolean { saved = JSONObject(value.toString()); return true }
   fun clear(context: Context) { saved = null }
-}
-internal class SalcaraIngressRouter {
-  fun resolve(url: String, handed: JSONObject?, scope: String, active: () -> Boolean): String { check(active()); return url }
-  fun fail(url: String) { }
-  fun recoverySnapshot(url: String, scope: String, handed: JSONObject?, persisted: JSONObject? = null): JSONObject? = null
-  fun publicRecoverySnapshot(value: JSONObject): JSONObject? = null
 }

@@ -3,6 +3,8 @@ package expo.modules.salcaranotify
 import com.google.crypto.tink.subtle.Base64
 import com.google.crypto.tink.subtle.Ed25519Verify
 import org.json.JSONObject
+import org.json.JSONException
+import java.io.IOException
 import java.net.CookieHandler
 import java.net.HttpURLConnection
 import java.net.URI
@@ -11,6 +13,7 @@ import java.security.SecureRandom
 import java.util.concurrent.CancellationException
 
 internal class SalcaraIngressUnavailable(message: String) : IllegalStateException(message)
+internal class SalcaraBotIdentityUnavailable(message: String) : IllegalStateException(message)
 
 /** Worker-thread transport selection. Pairing and event cursors stay on the saved logical Hub. */
 internal class SalcaraIngressRouter(
@@ -19,9 +22,12 @@ internal class SalcaraIngressRouter(
 ) {
   private data class Endpoint(val id: String, val url: String, val priority: Int)
   private data class Manifest(val hubId: String, val key: String, val revision: Long, val expires: Long, val endpoints: List<Endpoint>, val signed: Boolean, val envelope: String)
+  private data class BotPin(val instanceId: String, val publicKey: String)
+  private class PublicStatus(val status: Int) : IOException("Public Hub response unavailable")
   private data class RecoveryAuthority(val logicalUrl: String, val scope: String, val manifest: Manifest)
   private var canonical = ""
   private var credentialScope = ""
+  private var expectedBotPin: BotPin? = null
   private var manifest: Manifest? = null
   private var refreshAt = 0L
   private var lastSuccessfulEndpoint: String? = null
@@ -43,20 +49,29 @@ internal class SalcaraIngressRouter(
   // The notification worker normally calls serially. The monitor also merges
   // concurrent callers into the same refresh result/backoff rather than scans.
   @Synchronized
-  fun resolve(url: String, handedOver: JSONObject?, pairingScope: String = "", active: () -> Boolean): String {
+  fun resolve(url: String, handedOver: JSONObject?, pairingScope: String = "", botPin: JSONObject? = null, active: () -> Boolean): String {
     if (!active()) throw CancellationException()
-    if (canonical != url || credentialScope != pairingScope) { canonical = url; credentialScope = pairingScope; manifest = null; recoveryAuthority = null; refreshAt = 0; lastSuccessfulEndpoint = null; discoveryCursor = 0; proofCursor = 0; failed.clear(); leases.clear() }
-    if (!validUrl(url)) return url
+    val expected = botPin?.let { parseBotPin(it) }
+    if (canonical != url || credentialScope != pairingScope || expectedBotPin != expected) {
+      canonical = url; credentialScope = pairingScope; expectedBotPin = expected
+      manifest = null; recoveryAuthority = null; refreshAt = 0; lastSuccessfulEndpoint = null; discoveryCursor = 0; proofCursor = 0; failed.clear(); leases.clear()
+    }
+    if (!validUrl(url)) {
+      if (expected != null) throw SalcaraBotIdentityUnavailable("Bot Hub address cannot be verified")
+      return url
+    }
     val now = clock()
     val deadline = monotonicClock() + 12_000
     // JS hands over a previously pinned authority. Expired signed endpoints
     // remain anonymous discovery hints, never authorization to send a token.
     try { if (handedOver != null) accept(parse(handedOver, url, now, true, false)) }
     catch (error: Exception) {
+      if (expected != null) throw SalcaraBotIdentityUnavailable("Saved Bot identity does not match the credential")
       // A corrupt saved pin is not an opt-out from identity verification.
       if (manifest == null) throw IllegalStateException("Saved Hub identity could not be verified", error)
     }
     if (!active()) throw CancellationException()
+    var identityFailure = false
     if (refreshAt <= now) {
       refreshAt = now + 60_000
       val pinned = manifest
@@ -72,7 +87,16 @@ internal class SalcaraIngressRouter(
         val hintIndex = hints.indexOf(candidate)
         if (hintIndex >= 0) discoveryCursor = (hintIndex + 1) % hints.size
         try {
-          val next = parse(publicJson("$candidate/ingress/manifest", active, deadline), url, clock(), requireLogicalMembership = pinned == null)
+          val public = publicJson("$candidate/ingress/manifest", active, deadline)
+          // The durable Bot pin already anchors identity even without a cached
+          // directory; a signed migration may have retired the old logical URL.
+          val next = try { parse(public, url, clock(), allowExpired = expected != null, requireLogicalMembership = pinned == null && expected == null) }
+          catch (error: Exception) {
+            if (expected != null) throw SalcaraBotIdentityUnavailable("Bot Hub manifest could not be verified")
+            throw error
+          }
+          requireBotIdentity(next, expected)
+          if (next.expires <= clock()) throw SalcaraIngressUnavailable("Public Hub authority has expired")
           // An invalid/changed candidate never replaces the pin or prevents
           // another signed-cache entry from refreshing the same identity.
           val previous = manifest
@@ -83,12 +107,25 @@ internal class SalcaraIngressRouter(
             if (previous == null || next.revision > previous.revision || next.expires > previous.expires || next.signed && !previous.signed) break
           }
         } catch (error: CancellationException) { throw error }
+        catch (_: SalcaraBotIdentityUnavailable) { identityFailure = true }
+        catch (error: PublicStatus) { if (error.status == 404) identityFailure = true }
+        catch (_: JSONException) { identityFailure = true }
         catch (_: Exception) { }
       }
     }
     if (!active()) throw CancellationException()
-    val authority = manifest ?: return url
-    if (authority.expires <= clock()) throw SalcaraIngressUnavailable("Hub authority must be refreshed before sending pairing credentials")
+    val authority = manifest ?: run {
+      if (expected != null) {
+        if (identityFailure) throw SalcaraBotIdentityUnavailable("No signed authority matches the Bot credential")
+        throw SalcaraIngressUnavailable("Bot Hub authority is temporarily unavailable")
+      }
+      return url
+    }
+    requireBotIdentity(authority, expected)
+    if (authority.expires <= clock()) {
+      if (expected != null && identityFailure) throw SalcaraBotIdentityUnavailable("Bot Hub identity could not be refreshed")
+      throw SalcaraIngressUnavailable("Hub authority must be refreshed before sending pairing credentials")
+    }
     val proofHints = authority.endpoints.sortedBy { it.priority }
     // A still-valid member lease must not be hidden behind this round's
     // bounded attempts at higher-priority, previously unavailable endpoints.
@@ -115,12 +152,18 @@ internal class SalcaraIngressRouter(
         val issued = number(proof, "issued_at")
         val expires = number(proof, "expires_at")
         require(number(proof, "version") == 1L && proof.getString("hub_instance_id") == authority.hubId && proof.getString("nonce") == nonce)
-        require(issued in (checkedAt - 30_000)..(checkedAt + 30_000) && expires > checkedAt && expires > issued && expires - issued <= 30_000)
+        require(expires > issued && expires - issued <= 30_000)
         val message = "salcara-ingress-proof-v1\n${authority.hubId}\n$nonce\n$issued\n$expires".toByteArray(Charsets.UTF_8)
         // Tink provides Ed25519 on supported Android versions without depending
         // on a platform provider. Any parsing or verification failure stays closed.
         Ed25519Verify(bytes(authority.key, 32)).verify(bytes(proof.getString("signature"), 64), message)
         if (!active()) throw CancellationException()
+        // A genuinely signed proof can age out during a slow response or clock
+        // correction. Retry it; only mismatched identity/nonce/signature is an
+        // identity failure that should retire this Bot watcher.
+        if (issued !in (checkedAt - 30_000)..(checkedAt + 30_000) || expires <= checkedAt) {
+          throw SalcaraIngressUnavailable("Hub identity proof is outside its verification window")
+        }
         if (authority.expires <= clock() || expires <= clock()) throw SalcaraIngressUnavailable("Hub verification expired before the endpoint could be used")
         leases[endpoint.url] = minOf(expires, authority.expires, checkedAt + 10_000)
         failed.remove(endpoint.url)
@@ -128,30 +171,57 @@ internal class SalcaraIngressRouter(
         proofCursor = 0
         return endpoint.url
       } catch (error: CancellationException) { throw error }
-      catch (error: SalcaraIngressUnavailable) { throw error }
-      catch (_: Exception) { fail(endpoint.url) }
+      catch (error: SalcaraIngressUnavailable) {
+        if (authority.expires <= clock()) throw error
+        fail(endpoint.url)
+      }
+      catch (error: Exception) {
+        if (error !is IOException || error is PublicStatus && error.status == 404) identityFailure = true
+        fail(endpoint.url)
+      }
     }
     if (!active()) throw CancellationException()
+    if (expected != null && identityFailure) throw SalcaraBotIdentityUnavailable("No reachable endpoint proves the Bot credential identity")
     throw SalcaraIngressUnavailable("No currently reachable verified Hub endpoint")
+  }
+
+  /** The worker calls this after all preparation, immediately before opening the
+   * credential-bearing connection. A resolve result is not a permanent lease. */
+  @Synchronized
+  fun assertDispatch(url: String, pairingScope: String, endpoint: String, botPin: JSONObject?, active: () -> Boolean) {
+    if (!active()) throw CancellationException()
+    val expected = botPin?.let { parseBotPin(it) }
+      ?: throw SalcaraBotIdentityUnavailable("Bot credential has no confirmed identity")
+    if (canonical != url || credentialScope != pairingScope || expectedBotPin != expected) {
+      throw SalcaraBotIdentityUnavailable("Bot credential owner changed before dispatch")
+    }
+    val authority = manifest ?: throw SalcaraBotIdentityUnavailable("Bot credential has no signed authority")
+    requireBotIdentity(authority, expected)
+    if (authority.endpoints.none { it.url == endpoint }) throw SalcaraBotIdentityUnavailable("Bot endpoint is not a member of the confirmed authority")
+    if (authority.expires <= clock() || (leases[endpoint] ?: 0) <= clock()) {
+      throw SalcaraIngressUnavailable("Bot endpoint verification expired before dispatch")
+    }
   }
 
   /** Non-blocking, public-only export. The exact caller namespace and pinned
    * identity must match; the original signed payload is never reconstructed. */
-  fun recoverySnapshot(url: String, pairingScope: String, expected: JSONObject?, persistedConfig: JSONObject? = null): JSONObject? {
-    if (expected == null) return null
+  fun recoverySnapshot(url: String, pairingScope: String, expected: JSONObject?, persistedConfig: JSONObject? = null, botPin: JSONObject? = null): JSONObject? {
+    if (expected == null && botPin == null) return null
     return try {
-      val prior = parse(expected, url, clock(), true, false)
+      val pin = botPin?.let { parseBotPin(it) }
+      val prior = expected?.let { parse(it, url, clock(), true, false).also { value -> requireBotIdentity(value, pin) } }
       val candidates = mutableListOf<Manifest>()
       recoveryAuthority?.takeIf { it.logicalUrl == url && it.scope == pairingScope }?.let { candidates.add(it.manifest) }
       if (persistedConfig?.optString("hubUrl")?.trimEnd('/') == url && persistedConfig.optString("navigationScope") == pairingScope) {
         try { persistedConfig.optJSONObject("ingressManifest")?.let { candidates.add(parse(it, url, clock(), true, false)) } }
         catch (_: Exception) { /* A damaged persisted candidate cannot hide a valid live same-pin authority. */ }
       }
-      val next = candidates.filter { it.signed && it.hubId == prior.hubId && it.key == prior.key
-        && (it.revision > prior.revision || it.revision == prior.revision && it.expires >= prior.expires) }
+      val next = candidates.filter { it.signed && (pin == null || it.hubId == pin.instanceId && it.key == pin.publicKey)
+        && (prior == null || it.hubId == prior.hubId && it.key == prior.key
+        && (it.revision > prior.revision || it.revision == prior.revision && it.expires >= prior.expires)) }
         .maxWithOrNull(compareBy<Manifest> { it.revision }.thenBy { it.expires }) ?: return null
       val envelope = JSONObject(next.envelope)
-      if (expected.optString("signed_payload") == envelope.optString("signed_payload")
+      if (expected != null && expected.optString("signed_payload") == envelope.optString("signed_payload")
         && expected.optString("signature") == envelope.optString("signature")) return null
       envelope
     } catch (_: Exception) { null }
@@ -161,17 +231,29 @@ internal class SalcaraIngressRouter(
   fun publicRecoverySnapshot(config: JSONObject): JSONObject? {
     return try {
       val result = SalcaraWatchRecovery.publicIngressInfo(config) ?: return null
-      if (!parse(result.getJSONObject("manifest"), result.getString("hubUrl"), clock(), true, false).signed) null else result
+      val authority = parse(result.getJSONObject("manifest"), result.getString("hubUrl"), clock(), true, false)
+      val isBot = config.optString("botToken").isNotEmpty()
+      val pin = if (isBot) config.optJSONObject("botPin")?.let { parseBotPin(it) } else null
+      if (isBot && pin == null) return null
+      requireBotIdentity(authority, pin)
+      if (!authority.signed) null else result
     } catch (_: Exception) { null }
   }
 
   private fun accept(next: Manifest): Boolean {
+    requireBotIdentity(next, expectedBotPin)
     val previous = manifest
     if (previous != null && (previous.hubId != next.hubId || previous.key != next.key || previous.revision > next.revision || previous.signed && !next.signed)) return false
     if (previous != null && previous.revision == next.revision && previous.expires >= next.expires && (!next.signed || previous.signed)) return true
     manifest = next; recoveryAuthority = RecoveryAuthority(canonical, credentialScope, next)
     refreshAt = minOf(refreshAt, next.expires); leases.clear(); failed.clear()
     return true
+  }
+
+  private fun requireBotIdentity(value: Manifest, pin: BotPin?) {
+    if (pin != null && (!value.signed || value.hubId != pin.instanceId || value.key != pin.publicKey)) {
+      throw SalcaraBotIdentityUnavailable("Hub manifest does not match the Bot credential identity")
+    }
   }
 
   private fun parse(input: JSONObject, url: String, now: Long, allowExpired: Boolean = false, requireLogicalMembership: Boolean = true): Manifest {
@@ -220,7 +302,7 @@ internal class SalcaraIngressRouter(
     require(CookieHandler.getDefault() == null) { "Anonymous Hub discovery cannot use a global cookie handler" }
     val deadline = minOf(roundDeadline, monotonicClock() + 2500)
     val remaining = deadline - monotonicClock()
-    require(remaining > 0) { "Hub discovery timed out" }
+    if (remaining <= 0) throw IOException("Hub discovery timed out")
     val connection = URL(url).openConnection() as HttpURLConnection
     connection.instanceFollowRedirects = false
     connection.useCaches = false
@@ -229,7 +311,9 @@ internal class SalcaraIngressRouter(
     connection.readTimeout = maxOf(1, (remaining / 2).toInt())
     connection.setRequestProperty("Accept", "application/json")
     try {
-      require(connection.responseCode in 200..299 && connection.url.toString() == url)
+      val status = connection.responseCode
+      if (status !in 200..299) throw PublicStatus(status)
+      require(connection.url.toString() == url)
       require(connection.contentLengthLong <= 16_384)
       val body = connection.inputStream.use { input ->
         val output = java.io.ByteArrayOutputStream()
@@ -237,7 +321,7 @@ internal class SalcaraIngressRouter(
         while (true) {
           if (!active()) throw CancellationException()
           val bodyRemaining = deadline - monotonicClock()
-          require(bodyRemaining > 0) { "Hub discovery timed out" }
+          if (bodyRemaining <= 0) throw IOException("Hub discovery timed out")
           connection.readTimeout = bodyRemaining.toInt()
           val count = input.read(buffer)
           if (count < 0) break
@@ -251,6 +335,15 @@ internal class SalcaraIngressRouter(
   }
 
   companion object {
+    private fun parseBotPin(value: JSONObject): BotPin = try {
+      require(value.length() == 2)
+      val instanceId = value.opt("instanceId") as? String ?: error("Missing Bot instance")
+      val publicKey = value.opt("publicKey") as? String ?: error("Missing Bot key")
+      require(instanceId.matches(Regex("[a-f0-9]{32}")))
+      bytes(publicKey, 32)
+      BotPin(instanceId, publicKey)
+    } catch (_: Exception) { throw SalcaraBotIdentityUnavailable("Bot credential identity is invalid") }
+
     private fun number(value: JSONObject, key: String): Long {
       val result = value.get(key)
       require(result is Int || result is Long)

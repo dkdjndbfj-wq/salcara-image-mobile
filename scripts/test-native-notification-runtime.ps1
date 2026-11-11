@@ -15,9 +15,10 @@ $coroutines = Jar 'org.jetbrains.kotlinx\kotlinx-coroutines-core-jvm\1.8.0'
 $trove = Jar 'org.jetbrains.intellij.deps\trove4j\1.0.20200330'
 $annotations = Jar 'org.jetbrains\annotations\13.0'
 $json = Jar 'org.json\json\20180813'
-$classpath = "$stdlib;$json"
+$tink = Jar 'com.google.crypto.tink\tink-android\1.15.0'
+$classpath = "$stdlib;$json;$tink"
 $root = Join-Path $PSScriptRoot '..\modules\salcara-notify\android\kotlin'
-$sources = @('SalcaraNotificationPolicy.kt', 'SalcaraNotificationIdentity.kt', 'SalcaraNotificationCenter.kt', 'SalcaraWatchDrain.kt', 'SalcaraWatchRecovery.kt', 'SalcaraWatchService.kt', 'SalcaraRemoteErrors.kt') | ForEach-Object { Join-Path $root $_ }
+$sources = @('SalcaraNotificationPolicy.kt', 'SalcaraNotificationIdentity.kt', 'SalcaraNotificationCenter.kt', 'SalcaraWatchDrain.kt', 'SalcaraWatchRecovery.kt', 'SalcaraWatchService.kt', 'SalcaraRemoteErrors.kt', 'SalcaraIngressRouter.kt') | ForEach-Object { Join-Path $root $_ }
 $sources += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'native-notification-policy-tests\runtime') -Filter '*.kt' | Select-Object -ExpandProperty FullName
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 & (Join-Path $JavaDirectory 'java.exe') '-Xmx768m' '-cp' "$compiler;$stdlib;$reflect;$trove;$annotations;$coroutines" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -no-stdlib -no-reflect -classpath $classpath -d $OutputDirectory @sources

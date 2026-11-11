@@ -16,6 +16,16 @@ internal object SalcaraWatchRecovery {
   const val MAX_SESSIONS = 512
   private val scopePattern = Regex("ns1_[a-f0-9]{64}")
 
+  /** A Bot credential belongs to this durable identity, not a shared URL cache. */
+  fun validBotPin(pin: JSONObject?): Boolean = pin != null && pin.length() == 2 &&
+    (pin.opt("instanceId") as? String)?.matches(Regex("[a-f0-9]{32}")) == true &&
+    // Thirty-two bytes in canonical Base64; the unused low bits must be zero.
+    (pin.opt("publicKey") as? String)?.matches(Regex("[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=")) == true
+
+  fun needsBotIdentity(config: JSONObject): Boolean = connections(config).any {
+    it.optString("botToken").isNotEmpty() && !validBotPin(it.optJSONObject("botPin"))
+  }
+
   /** Progress belongs to a particular handoff, not merely matching device IDs. */
   fun checkpointConfig(current: JSONObject, cursorOwner: JSONObject? = null, cursors: Map<String, Long> = emptyMap()): JSONObject {
     val result = JSONObject(current.toString())
@@ -80,7 +90,9 @@ internal object SalcaraWatchRecovery {
     return snapshot
   }
 
-  fun validConfig(config: JSONObject): Boolean {
+  fun validConfig(config: JSONObject): Boolean = validConfig(config, true)
+
+  private fun validConfig(config: JSONObject, requireBotPin: Boolean): Boolean {
     if (config.has("schema") && config.optInt("schema") !in listOf(1, 2)) return false
     if (config.optInt("schema") == 2) {
       if (!config.optBoolean("follow") || config.toString().toByteArray(Charsets.UTF_8).size > MAX_BYTES - 1024) return false
@@ -89,7 +101,21 @@ internal object SalcaraWatchRecovery {
       val scopes = mutableSetOf<String>()
       for (index in 0 until items.length()) {
         val item = items.optJSONObject(index) ?: return false
-        if (item.optInt("schema") == 2 || !validConfig(item) || item.optBoolean("standby") != config.optBoolean("standby") || !scopes.add(item.optString("navigationScope"))) return false
+        if (item.optInt("schema") == 2 || !validConfig(item, requireBotPin) || item.optBoolean("standby") != config.optBoolean("standby") || !scopes.add(item.optString("navigationScope"))) return false
+      }
+      if (config.has("identityBlocked")) {
+        val blocked = config.optJSONArray("identityBlocked") ?: return false
+        if (blocked.length() + items.length() > MAX_CONNECTIONS) return false
+        for (index in 0 until blocked.length()) {
+          val item = blocked.optJSONObject(index) ?: return false
+          val scope = item.optString("navigationScope")
+          val devices = item.optJSONArray("deviceIds") ?: return false
+          if (item.length() != 2 || !scopePattern.matches(scope) || !scopes.add(scope) || devices.length() !in 1..64) return false
+          for (deviceIndex in 0 until devices.length()) {
+            val device = devices.opt(deviceIndex) as? String ?: return false
+            if (!Regex("[A-Za-z0-9._-]{1,128}").matches(device)) return false
+          }
+        }
       }
       return true
     }
@@ -102,6 +128,7 @@ internal object SalcaraWatchRecovery {
     val botToken = config.optString("botToken")
     if (pairToken.isBlank() && key.isBlank() && botToken.isBlank()) return false
     if (listOf(pairToken, key, botToken).any { it.length > 8192 || it.any { ch -> ch < ' ' || ch == '\u007f' } }) return false
+    if (requireBotPin && botToken.isNotEmpty() && !validBotPin(config.optJSONObject("botPin"))) return false
     val items = if (config.optBoolean("standby")) config.optJSONArray("devices") else config.optJSONArray("sessions")
     if (items == null || items.length() !in 1..(if (config.optBoolean("standby")) 64 else MAX_SESSIONS)) return false
     for (index in 0 until items.length()) {
@@ -126,7 +153,10 @@ internal object SalcaraWatchRecovery {
 
   fun requestHeaders(config: JSONObject): Map<String, String> {
     val bot = config.optString("botToken")
-    if (bot.isNotEmpty()) return mapOf("X-Salcara-Bot-Token" to bot)
+    if (bot.isNotEmpty()) {
+      require(validBotPin(config.optJSONObject("botPin"))) { "Bot identity must be confirmed before sending credentials" }
+      return mapOf("X-Salcara-Bot-Token" to bot)
+    }
     return config.optString("pairToken").takeIf { it.isNotEmpty() }?.let { mapOf("X-Salcara-Pair-Token" to it) } ?: emptyMap()
   }
 
@@ -148,16 +178,53 @@ internal object SalcaraWatchRecovery {
     return (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
   }
 
+  fun identityBlocked(config: JSONObject): List<JSONObject> {
+    val rows = config.optJSONArray("identityBlocked") ?: return emptyList()
+    return (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
+  }
+
+  /** Old multi-connection checkpoints must not take a healthy Pair down with an
+   * unpinned Bot. Retain only public stopped-scope metadata, never its secret. */
+  private fun isolateUnpinnedBots(config: JSONObject): JSONObject? {
+    if (validConfig(config)) return config
+    if (config.optInt("schema") != 2 || !needsBotIdentity(config) || !validConfig(config, false)) return null
+    val copy = JSONObject(config.toString())
+    val active = JSONArray(); val blocked = copy.optJSONArray("identityBlocked") ?: JSONArray()
+    for (item in connections(copy)) {
+      if (item.optString("botToken").isEmpty() || validBotPin(item.optJSONObject("botPin"))) active.put(item)
+      else {
+        val rows = if (deviceMode(item)) item.optJSONArray("devices") ?: item.optJSONArray("sessions") else item.optJSONArray("sessions")
+        val devices = (0 until (rows?.length() ?: 0)).map { rows!!.getJSONObject(it).getString("deviceId") }.distinct()
+        blocked.put(JSONObject().put("navigationScope", item.getString("navigationScope")).put("deviceIds", JSONArray(devices)))
+      }
+    }
+    if (active.length() == 0) return null
+    copy.put("connections", active).put("identityBlocked", blocked)
+    return copy.takeIf { validConfig(it) }
+  }
+
+  /** Identity-only legacy quarantine never renews the lease or rewinds cursors. */
+  fun restore(snapshot: JSONObject, now: Long): JSONObject? {
+    val config = snapshot.optJSONObject("config") ?: return null
+    val isolated = isolateUnpinnedBots(config) ?: return null
+    val copy = JSONObject(snapshot.toString()).put("config", JSONObject(isolated.toString()))
+    return validate(copy, now)
+  }
+
   fun sameAuthority(a: JSONObject, b: JSONObject): Boolean =
     listOf("navigationScope", "pairToken", "key", "botToken").all { a.optString(it) == b.optString(it) } &&
-      a.optString("hubUrl").trimEnd('/') == b.optString("hubUrl").trimEnd('/')
+      a.optString("hubUrl").trimEnd('/') == b.optString("hubUrl").trimEnd('/') &&
+      (a.optString("botToken").isEmpty() || sameBotPin(a.optJSONObject("botPin"), b.optJSONObject("botPin")))
+
+  private fun sameBotPin(a: JSONObject?, b: JSONObject?): Boolean = validBotPin(a) && validBotPin(b) &&
+    a!!.getString("instanceId") == b!!.getString("instanceId") && a.getString("publicKey") == b.getString("publicKey")
 
   fun deviceMode(config: JSONObject) = config.optBoolean("standby") || config.optBoolean("deviceMode") || (config.optJSONArray("sessions")?.length() ?: 0) > 4
 
   /** A device poll replaces a large session fan-out, never truncates its tail. */
   fun normalized(config: JSONObject): JSONObject? {
-    if (!validConfig(config)) return null
-    val result = JSONObject(config.toString())
+    val safe = isolateUnpinnedBots(config) ?: return null
+    val result = JSONObject(safe.toString())
     for (item in connections(result)) if (deviceMode(item) && !item.optBoolean("standby")) {
       item.put("deviceMode", true)
       val cursors = LinkedHashMap<String, Long>()

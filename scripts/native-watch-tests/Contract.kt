@@ -5,6 +5,7 @@ import org.json.JSONObject
 import javax.crypto.KeyGenerator
 
 private val now = 1_800_000_000_000L
+private fun botPin(instance: String = "a".repeat(32), publicKey: String = "A".repeat(43) + "=") = JSONObject().put("instanceId", instance).put("publicKey", publicKey)
 private fun config(standby: Boolean = false) = JSONObject().put("follow", true).put("version", 1)
   .put("hubUrl", "https://hub.example.test/salcara-hub/v1").put("pairToken", "synthetic-credential")
   .put("navigationScope", "ns1_" + "a".repeat(64)).put("standby", standby)
@@ -77,7 +78,7 @@ fun main() {
   }
   test("schema two retains distinct Bot and relay authority, cursors and bounded lease") {
     val relay = config(true)
-    val bot = config(true).put("navigationScope", "ns1_" + "b".repeat(64)).put("pairToken", "").put("botToken", "synthetic-bot")
+    val bot = config(true).put("navigationScope", "ns1_" + "b".repeat(64)).put("pairToken", "").put("botToken", "synthetic-bot").put("botPin", botPin())
     bot.getJSONArray("devices").getJSONObject(0).put("after", 900)
     val multi = JSONObject().put("schema", 2).put("version", 133).put("follow", true).put("standby", true).put("connections", JSONArray().put(relay).put(bot))
     check(SalcaraWatchRecovery.validConfig(multi))
@@ -133,7 +134,7 @@ fun main() {
     check(SalcaraWatchRecovery.withIngressManifest(stored, current, current, envelope, now + SalcaraWatchRecovery.TASK_TTL) == null)
   }
   test("multi-target ingress handoff preserves both computers' cursors and rejects foreign Bot credentials") {
-    val a = config(true); val b = config(true).put("navigationScope", "ns1_" + "b".repeat(64)).put("pairToken", "").put("botToken", "synthetic-bot")
+    val a = config(true); val b = config(true).put("navigationScope", "ns1_" + "b".repeat(64)).put("pairToken", "").put("botToken", "synthetic-bot").put("botPin", botPin())
     val multi = JSONObject().put("schema", 2).put("follow", true).put("standby", true).put("connections", JSONArray().put(a).put(b))
     val stored = SalcaraWatchRecovery.create(multi, now - 10, true, now)!!
     SalcaraWatchRecovery.connections(stored.getJSONObject("config"))[1].getJSONArray("devices").getJSONObject(0).put("after", 900)
@@ -164,6 +165,69 @@ fun main() {
     check(SalcaraWatchRecovery.agentDisplayName("new-tool") == "Agent")
   }
   val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+  test("legacy Bot credentials cannot create, restore or build credential headers without a durable pin") {
+    val legacy = config().put("botToken", "synthetic-bot")
+    check(!SalcaraWatchRecovery.validConfig(legacy) && SalcaraWatchRecovery.needsBotIdentity(legacy))
+    check(SalcaraWatchRecovery.create(legacy, now, false, now) == null)
+    rejects { SalcaraWatchRecovery.requestHeaders(legacy) }
+    val oldSnapshot = SalcaraWatchRecovery.create(config(), now, false, now)!!
+    oldSnapshot.put("config", legacy)
+    check(SalcaraWatchRecovery.validate(oldSnapshot, now) == null)
+    check(legacy.getString("botToken") == "synthetic-bot")
+  }
+  test("malformed, noncanonical and coerced Bot pins are rejected") {
+    val invalid = listOf(botPin("b"), botPin(publicKey = "A".repeat(42) + "B="), botPin(publicKey = "A".repeat(43)),
+      botPin().put("instanceId", 1), botPin().put("publicKey", JSONObject.NULL), botPin().put("extra", "ignored"))
+    invalid.forEach { check(!SalcaraWatchRecovery.validConfig(config().put("botToken", "bot").put("botPin", it))) }
+  }
+  test("Bot identity participates in checkpoint ownership even at the same URL token and scope") {
+    val current = config().put("botToken", "bot").put("botPin", botPin())
+    val snapshot = SalcaraWatchRecovery.create(current, now, false, now)!!
+    check(SalcaraWatchRecovery.sameAuthority(current, JSONObject(current.toString())))
+    for (pin in listOf(botPin("b".repeat(32)), botPin(publicKey = "B".repeat(42) + "A="))) {
+      val changed = JSONObject(current.toString()).put("botPin", pin)
+      check(!SalcaraWatchRecovery.sameAuthority(current, changed))
+      check(SalcaraWatchRecovery.withIngressManifest(snapshot, changed, changed, envelope, now) == null)
+    }
+    check(SalcaraWatchRecovery.sameAuthority(config(), config().put("botPin", JSONObject())))
+  }
+  test("encrypted Bot restart retains the exact durable identity and lease") {
+    val stored = SalcaraWatchRecovery.create(config().put("botToken", "bot").put("botPin", botPin()), now - 100, false, now)!!
+    val encrypted = SalcaraWatchCipher.encrypt(stored.toString().toByteArray(), key)
+    val restored = SalcaraWatchRecovery.validate(JSONObject(String(SalcaraWatchCipher.decrypt(encrypted, key))), now + 1)!!
+    check(restored.getLong("expiresAt") == stored.getLong("expiresAt"))
+    check(restored.getJSONObject("config").getJSONObject("botPin").toString() == botPin().toString())
+  }
+  test("mixed legacy recovery quarantines only the unpinned Bot without renewing healthy work") {
+    val pair = config(true)
+    val bot = config(true).put("navigationScope", "ns1_" + "b".repeat(64)).put("botToken", "legacy-secret").put("botPin", botPin())
+    val multi = JSONObject().put("schema", 2).put("follow", true).put("standby", true).put("connections", JSONArray().put(pair).put(bot))
+    val old = SalcaraWatchRecovery.create(multi, now - 1000, true, now)!!
+    old.getJSONObject("config").getJSONArray("connections").getJSONObject(1).remove("botPin")
+    check(SalcaraWatchRecovery.validate(old, now) == null)
+    val restored = SalcaraWatchRecovery.restore(old, now)!!
+    check(restored.getLong("expiresAt") == old.getLong("expiresAt") && restored.getLong("startedAt") == old.getLong("startedAt"))
+    val safe = restored.getJSONObject("config")
+    check(SalcaraWatchRecovery.connections(safe).size == 1 && SalcaraWatchRecovery.identityBlocked(safe).size == 1)
+    check(SalcaraWatchRecovery.connections(safe).single().getJSONArray("devices").getJSONObject(0).getLong("after") == 12L)
+    check(!safe.toString().contains("legacy-secret") && old.toString().contains("legacy-secret"))
+    check(SalcaraWatchRecovery.restore(old, now + SalcaraWatchRecovery.STANDBY_TTL) == null)
+  }
+  test("legacy quarantine still rejects duplicate scope or malformed healthy siblings") {
+    val pair = config(true); val bot = config(true).put("botToken", "legacy-secret")
+    val multi = JSONObject().put("schema", 2).put("follow", true).put("standby", true).put("connections", JSONArray().put(pair).put(bot))
+    check(SalcaraWatchRecovery.normalized(multi) == null)
+    bot.put("navigationScope", "ns1_" + "b".repeat(64)); pair.put("hubUrl", "file:///bad")
+    check(SalcaraWatchRecovery.normalized(multi) == null)
+  }
+  test("legacy quarantine public metadata never accepts copied credentials") {
+    val multi = JSONObject().put("schema", 2).put("follow", true).put("standby", true).put("connections", JSONArray().put(config(true)))
+    val blocked = JSONObject().put("navigationScope", "ns1_" + "b".repeat(64)).put("deviceIds", JSONArray().put("pc-b"))
+    multi.put("identityBlocked", JSONArray().put(blocked))
+    check(SalcaraWatchRecovery.validConfig(multi))
+    blocked.put("botToken", "must-not-store")
+    check(!SalcaraWatchRecovery.validConfig(multi))
+  }
   val plaintext = SalcaraWatchRecovery.create(config(), now, false, now)!!.toString().toByteArray()
   test("device-key encryption round trips without readable credentials") {
     val encrypted = SalcaraWatchCipher.encrypt(plaintext, key)

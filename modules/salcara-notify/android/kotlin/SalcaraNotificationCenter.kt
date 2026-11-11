@@ -152,6 +152,7 @@ internal object SalcaraNotificationCenter {
     if (!permits(context, scope, device) || !SalcaraNotifyModule.notificationsAllowed(context)) return
     val body = when (reason) {
       "authentication" -> "连接授权已失效，请打开应用重新连接。这台电脑的后台提醒已暂停。"
+      "identity" -> "Bot 服务身份需要重新确认，请打开应用检查绑定。该连接的后台提醒已暂停，其他连接不受影响。"
       "expired" -> "本次后台观察已到时限，请打开应用继续关注任务。"
       "configuration", "capacity" -> "后台连接配置超出可用范围，请打开应用检查通知状态。"
       "storage" -> "后台恢复状态未能保存，应用关闭后可能无法继续提醒。"

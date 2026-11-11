@@ -13,6 +13,8 @@ import javax.crypto.SecretKey
 /** Device-bound, app-private storage. noBackupFilesDir excludes Android cloud/device transfer backups. */
 internal object SalcaraWatchVault {
   private const val ALIAS = "salcara.remote.watch.v1"
+  @Volatile var lastReadFailure = ""
+    private set
   private fun file(context: Context) = AtomicFile(File(context.noBackupFilesDir, "remote-watch-v1.enc"))
   private fun key(create: Boolean): SecretKey? {
     val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -43,7 +45,7 @@ internal object SalcaraWatchVault {
     }
   }
 
-  @Synchronized fun load(context: Context): JSONObject? = read(context, true)
+  @Synchronized fun load(context: Context): JSONObject? { lastReadFailure = ""; return read(context, true) }
 
   /** Getter callers must not clear, renew or consume the recovery checkpoint. */
   @Synchronized fun peek(context: Context): JSONObject? = read(context, false)
@@ -62,7 +64,12 @@ internal object SalcaraWatchVault {
         buffer.toByteArray()
       }
       val snapshot = JSONObject(String(SalcaraWatchCipher.decrypt(bytes, key(false) ?: throw IllegalStateException("Missing watch key")), Charsets.UTF_8))
-      SalcaraWatchRecovery.validate(snapshot, System.currentTimeMillis()).also { if (it == null && clearInvalid) clear(context) }
+      SalcaraWatchRecovery.restore(snapshot, System.currentTimeMillis()).also {
+        if (it == null && clearInvalid) {
+          if (snapshot.optJSONObject("config")?.let(SalcaraWatchRecovery::needsBotIdentity) == true) lastReadFailure = "identity"
+          clear(context)
+        }
+      }
     } catch (_: Exception) { if (clearInvalid) clear(context); null }
   }
 

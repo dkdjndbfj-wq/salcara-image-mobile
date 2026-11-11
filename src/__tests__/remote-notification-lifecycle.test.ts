@@ -22,7 +22,7 @@ const mockUseSaved = jest.fn();
 let mockSavedTargets: import('../remote/connections').NotificationTarget[] = [];
 let mockRemoteState: { phase: string; signingIn: string | null; sessions: Record<string, unknown>; focus?: { deviceId: string; sessionKey: string } | { home: true } | null };
 const mockRemoteListeners = new Set<() => void>();
-let mockTarget: { hub: { url: string; pairToken: string; botToken?: string }; deviceId: string } | null;
+let mockTarget: { hub: { url: string; pairToken: string; botToken?: string; botPin?: { instanceId: string; publicKey: string } }; deviceId: string } | null;
 let mockSupports = true;
 let mockRemoteChange: (() => void) | undefined;
 let mockAppChange: ((state: string) => void) | undefined;
@@ -490,7 +490,8 @@ test.each(['task', 'standby'] as const)('a slow native %s start hands over its c
 });
 
 test.each(['task','standby'] as const)('Bot %s supplies only Bot authentication to its scoped native watcher', async mode => {
-  mockTarget = { hub: { url: 'https://bot.example/salcara-hub/v1', pairToken: 'bot-secret', botToken: 'bot-secret' }, deviceId: 'pc-a' };
+  const botPin = { instanceId: 'a'.repeat(32), publicKey: Buffer.alloc(32, 1).toString('base64') };
+  mockTarget = { hub: { url: 'https://bot.example/salcara-hub/v1', pairToken: 'bot-secret', botToken: 'bot-secret', botPin }, deviceId: 'pc-a' };
   const { prefs,push } = modules(); await prefs.loadNotificationPreference();
   if(mode==='standby')await push.setStandbyEnabled(true);
   const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
@@ -500,9 +501,34 @@ test.each(['task','standby'] as const)('Bot %s supplies only Bot authentication 
   await flush();
   const configurations = mockNative.configureWatch.mock.calls.map(call => JSON.parse(call[0]));
   expect(configurations.length).toBeGreaterThan(0);
-  expect(configurations.at(-1)).toMatchObject({ schema: 2, follow: true, connections: [{ botToken: 'bot-secret' }] });
+  expect(configurations.at(-1)).toMatchObject({ schema: 2, follow: true, connections: [{ botToken: 'bot-secret', botPin }] });
   expect(configurations.at(-1).connections[0]).not.toHaveProperty('pairToken');
   stop();
+});
+
+test('legacy Bot without a saved pin never hands its token to the native watcher', async () => {
+  mockTarget = { hub: { url: 'https://bot.example/salcara-hub/v1', pairToken: 'old-bot-secret', botToken: 'old-bot-secret' }, deviceId: 'pc-a' };
+  const original = JSON.stringify(mockTarget);
+  const { prefs } = modules(); await prefs.loadNotificationPreference();
+  const notifications = require('../remote/notifications') as typeof import('../remote/notifications');
+  const stop = notifications.startRemoteNotifications(() => undefined);
+  try {
+    notifications.noteTaskSent('pc-a', 'codex:fixture'); await flush();
+    require('react-native').AppState.currentState = 'background'; mockAppChange?.('background'); await flush();
+    expect(mockNative.configureWatch.mock.calls.every(call => !call[0].includes('old-bot-secret'))).toBe(true);
+    expect(mockNative.configureWatch.mock.calls.map(call => JSON.parse(call[0])).every(value => !value.follow)).toBe(true);
+    expect(JSON.stringify(mockTarget)).toBe(original);
+  } finally { stop(); }
+});
+
+test('Bot recovery hand-back never overwrites the shared URL router or its saved binding pin', async () => {
+  const botPin = { instanceId: 'a'.repeat(32), publicKey: Buffer.alloc(32, 1).toString('base64') };
+  mockTarget = { hub: { url: 'https://bot.example/salcara-hub/v1', pairToken: 'bot-secret', botToken: 'bot-secret', botPin }, deviceId: 'pc-a' };
+  mockNative.recoveredIngress.mockReturnValue(JSON.stringify({ hubUrl: mockTarget.hub.url,
+    navigationScope: targetScope(mockTarget), manifest: { signed_payload: 'native-cache', signature: 'native-signature' } }));
+  const stop = require('../remote/notifications').startRemoteNotifications(() => undefined);
+  try { await flush(); expect(mockAdoptIngress).not.toHaveBeenCalled(); expect(mockTarget.hub.botPin).toEqual(botPin); }
+  finally { stop(); }
 });
 
 test('a late standby preference read and slow earlier write cannot revive a disabled standby service', async () => {
