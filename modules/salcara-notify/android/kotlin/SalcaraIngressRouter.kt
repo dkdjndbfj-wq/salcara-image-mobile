@@ -36,11 +36,14 @@ internal class SalcaraIngressRouter(
   @Volatile private var recoveryAuthority: RecoveryAuthority? = null
   private val failed = HashMap<String, Long>()
   private val leases = HashMap<String, Long>()
+  // Explicit proof rejection is evidence only for this authority and while its
+  // short endpoint cooldown is live. A skipped/untried/I/O-failed route is unknown.
+  private val proofIdentityRejections = HashMap<String, Long>()
   private val random = SecureRandom()
 
   @Synchronized
   fun fail(endpoint: String) {
-    failed[endpoint] = clock() + 30_000; leases.remove(endpoint)
+    failed[endpoint] = clock() + 30_000; leases.remove(endpoint); proofIdentityRejections.remove(endpoint)
     // Transport loss may mean the signed catalog changed. Retry discovery
     // after the endpoint cooldown, not six hours later or on every event poll.
     refreshAt = minOf(refreshAt, clock() + 30_000)
@@ -54,7 +57,7 @@ internal class SalcaraIngressRouter(
     val expected = botPin?.let { parseBotPin(it) }
     if (canonical != url || credentialScope != pairingScope || expectedBotPin != expected) {
       canonical = url; credentialScope = pairingScope; expectedBotPin = expected
-      manifest = null; recoveryAuthority = null; refreshAt = 0; lastSuccessfulEndpoint = null; discoveryCursor = 0; proofCursor = 0; failed.clear(); leases.clear()
+      manifest = null; recoveryAuthority = null; refreshAt = 0; lastSuccessfulEndpoint = null; discoveryCursor = 0; proofCursor = 0; failed.clear(); leases.clear(); proofIdentityRejections.clear()
     }
     if (!validUrl(url)) {
       if (expected != null) throw SalcaraBotIdentityUnavailable("Bot Hub address cannot be verified")
@@ -71,7 +74,7 @@ internal class SalcaraIngressRouter(
       if (manifest == null) throw IllegalStateException("Saved Hub identity could not be verified", error)
     }
     if (!active()) throw CancellationException()
-    var identityFailure = false
+    var discoveryRejectedAll = false
     if (refreshAt <= now) {
       refreshAt = now + 60_000
       val pinned = manifest
@@ -79,6 +82,7 @@ internal class SalcaraIngressRouter(
       val hints = if (pinned?.signed == true) pinned.endpoints.sortedBy { it.priority }.map { it.url }.filterNot { it in preferred } else emptyList()
       val start = if (hints.isEmpty()) 0 else discoveryCursor % hints.size
       val candidates = preferred + (hints.drop(start) + hints.take(start)).take(8 - preferred.size)
+      val rejected = HashSet<String>()
       for (candidate in candidates) {
         if (!active()) throw CancellationException()
         if (monotonicClock() >= deadline) break
@@ -107,23 +111,27 @@ internal class SalcaraIngressRouter(
             if (previous == null || next.revision > previous.revision || next.expires > previous.expires || next.signed && !previous.signed) break
           }
         } catch (error: CancellationException) { throw error }
-        catch (_: SalcaraBotIdentityUnavailable) { identityFailure = true }
-        catch (error: PublicStatus) { if (error.status == 404) identityFailure = true }
-        catch (_: JSONException) { identityFailure = true }
+        catch (_: SalcaraBotIdentityUnavailable) { rejected.add(candidate) }
+        catch (error: PublicStatus) { if (error.status == 404) rejected.add(candidate) }
+        catch (_: JSONException) { rejected.add(candidate) }
         catch (_: Exception) { }
       }
+      // Judge the whole known candidate set, not just the capped/time-bounded
+      // slice. Discovery evidence is fresh for this round only; backoff itself
+      // never implies a missing identity, nor does an unreachable/expired hint.
+      discoveryRejectedAll = (preferred + hints).all { it in rejected }
     }
     if (!active()) throw CancellationException()
     val authority = manifest ?: run {
       if (expected != null) {
-        if (identityFailure) throw SalcaraBotIdentityUnavailable("No signed authority matches the Bot credential")
+        if (discoveryRejectedAll) throw SalcaraBotIdentityUnavailable("No signed authority matches the Bot credential")
         throw SalcaraIngressUnavailable("Bot Hub authority is temporarily unavailable")
       }
       return url
     }
     requireBotIdentity(authority, expected)
     if (authority.expires <= clock()) {
-      if (expected != null && identityFailure) throw SalcaraBotIdentityUnavailable("Bot Hub identity could not be refreshed")
+      if (expected != null && discoveryRejectedAll) throw SalcaraBotIdentityUnavailable("Bot Hub identity could not be refreshed")
       throw SalcaraIngressUnavailable("Hub authority must be refreshed before sending pairing credentials")
     }
     val proofHints = authority.endpoints.sortedBy { it.priority }
@@ -144,6 +152,7 @@ internal class SalcaraIngressRouter(
       // apart than the cooldown. Rotate the bounded nonce attempts as well.
       val proofIndex = proofHints.indexOf(endpoint)
       if (proofIndex >= 0) proofCursor = (proofIndex + 1) % proofHints.size
+      proofIdentityRejections.remove(endpoint.url)
       try {
         val nonce = ByteArray(32).also { random.nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 255) }
         val proof = publicJson("${endpoint.url}/ingress/identity?nonce=$nonce", active, deadline)
@@ -176,12 +185,19 @@ internal class SalcaraIngressRouter(
         fail(endpoint.url)
       }
       catch (error: Exception) {
-        if (error !is IOException || error is PublicStatus && error.status == 404) identityFailure = true
         fail(endpoint.url)
+        if (error !is IOException || error is PublicStatus && error.status == 404) {
+          proofIdentityRejections[endpoint.url] = failed.getValue(endpoint.url)
+        }
       }
     }
     if (!active()) throw CancellationException()
-    if (expected != null && identityFailure) throw SalcaraBotIdentityUnavailable("No reachable endpoint proves the Bot credential identity")
+    // Three failed probes cannot retire a scope while a fourth route may work.
+    // Carry only explicit, still-current rejections across bounded rounds; an
+    // expired rejection or any transient/untested route keeps the scope retryable.
+    if (expected != null && proofHints.all { (proofIdentityRejections[it.url] ?: 0) > clock() }) {
+      throw SalcaraBotIdentityUnavailable("Every known endpoint rejected the Bot credential identity")
+    }
     throw SalcaraIngressUnavailable("No currently reachable verified Hub endpoint")
   }
 
@@ -246,7 +262,7 @@ internal class SalcaraIngressRouter(
     if (previous != null && (previous.hubId != next.hubId || previous.key != next.key || previous.revision > next.revision || previous.signed && !next.signed)) return false
     if (previous != null && previous.revision == next.revision && previous.expires >= next.expires && (!next.signed || previous.signed)) return true
     manifest = next; recoveryAuthority = RecoveryAuthority(canonical, credentialScope, next)
-    refreshAt = minOf(refreshAt, next.expires); leases.clear(); failed.clear()
+    refreshAt = minOf(refreshAt, next.expires); leases.clear(); failed.clear(); proofIdentityRejections.clear()
     return true
   }
 

@@ -53,6 +53,9 @@ private object NetworkFixture {
   var serviceKey = botKeyA
   var manifestMode = "signed"
   var eventResponse: Pair<Int, String>? = null
+  var directoryOverride: JSONObject? = null
+  var proofOverride: ((URL) -> JSONObject)? = null
+  val publicUrls = mutableListOf<String>()
   var beforeEvents: (() -> Unit)? = null
   val publicHeaders = mutableListOf<Map<String, String>>()
   fun install() {
@@ -65,9 +68,11 @@ private object NetworkFixture {
         override fun setRequestProperty(key: String, value: String) { sent[key] = value }
         override fun getResponseCode(): Int {
           if (url.path.contains("/ingress/")) {
+            publicUrls.add(url.toString())
             publicHeaders.add(sent.toMap()); check(sent.keys.all { it == "Accept" })
             if (manifestMode == "missing") return 404
-            body = if (url.path.endsWith("/manifest")) serviceManifest(serviceKey, manifestMode != "unsigned").toString() else serviceProof(url, serviceKey).toString()
+            body = if (url.path.endsWith("/manifest")) (directoryOverride ?: serviceManifest(serviceKey, manifestMode != "unsigned")).toString()
+              else (proofOverride?.invoke(url) ?: serviceProof(url, serviceKey)).toString()
           } else {
             calls++; headers.add(sent.toMap())
             eventResponse?.let { body = it.second; return it.first }
@@ -110,6 +115,7 @@ private inline fun serviceFixture(block: (SalcaraWatchService, RecordedExecutor)
   NetworkFixture.pages.clear(); NetworkFixture.headers.clear(); NetworkFixture.calls = 0
   NetworkFixture.publicHeaders.clear(); NetworkFixture.serviceKey = botKeyA; NetworkFixture.manifestMode = "signed"; NetworkFixture.beforeEvents = null
   NetworkFixture.eventResponse = null
+  NetworkFixture.directoryOverride = null; NetworkFixture.proofOverride = null; NetworkFixture.publicUrls.clear()
   try { block(service, executor) } finally { SalcaraWatchService.clearConfiguration(service); service.onDestroy(); executor.shutdownNow(); android.os.Handler.flush(); android.os.Handler.delayed.clear() }
 }
 
@@ -356,6 +362,37 @@ fun serviceContracts(): Int {
         check(executor.pending.isEmpty() && SalcaraWatchVault.saved == null)
         check(service.manager.posts.count { it.tag == "$serviceScope:watch-status" } == 1)
       }
+    }
+  }
+  // Same signed four-endpoint trigger as the independent bac8208 review;
+  // retain the per-round limit but reach the later healthy member next slice.
+  for (healthyFirst in listOf(false, true)) test("bounded proof failures do not retire an untested healthy route (healthyFirst=$healthyFirst)") {
+    serviceFixture { service, executor ->
+      val value = JSONObject(String(Base64.getDecoder().decode(serviceManifest().getString("signed_payload"))))
+      val endpoints = JSONArray().put(JSONObject().put("id", "canonical").put("url", botUrl).put("priority", if (healthyFirst) 0 else 100))
+      for (index in 1..3) endpoints.put(JSONObject().put("id", "entry-$index").put("url", "https://bad$index.invalid/v1").put("priority", 10))
+      value.put("endpoints", endpoints)
+      val payload = value.toString().toByteArray()
+      NetworkFixture.directoryOverride = JSONObject().put("signed_payload", Base64.getEncoder().encodeToString(payload))
+        .put("signature", sign(botKeyA, "salcara-ingress-manifest-v1\n".toByteArray() + payload))
+      NetworkFixture.proofOverride = { url -> when (url.host) {
+        "fixture.invalid" -> serviceProof(url, botKeyA)
+        "bad1.invalid" -> serviceProof(url, botKeyB)
+        else -> throw java.io.IOException("temporary outage")
+      } }
+      service.onStartCommand(SalcaraWatchService.prepareStart(Intent()), 0, 1)
+      SalcaraWatchService.configure(service, botWatchConfig(true)); executor.next()
+      check(!service.stopped)
+      if (!healthyFirst) {
+        check(NetworkFixture.calls == 0 && executor.pending.size == 1)
+        check(NetworkFixture.publicUrls.count { it.contains("/identity?") } == 3)
+        check(NetworkFixture.publicUrls.none { it.startsWith("$botUrl/ingress/identity?") })
+        executor.next()
+      }
+      check(!service.stopped && NetworkFixture.calls == 1)
+      check(NetworkFixture.headers.single()["X-Salcara-Bot-Token"] == "synthetic-bot-only")
+      check(NetworkFixture.publicUrls.any { it.startsWith("$botUrl/ingress/identity?") })
+      check(service.manager.posts.none { it.tag == "$serviceScope:watch-status" })
     }
   }
   for ((status, code) in listOf(503 to "bot_phone_revoke_pending", 503 to "bot_phone_bind_pending", 503 to "bot_phone_reset_pending",
