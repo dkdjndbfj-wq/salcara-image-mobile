@@ -1,5 +1,6 @@
-import { bindBotPhone, botBindingEndpoint, devices, parseBotBindingPackage, setHubFetch, type FetchLike } from '../remote/client';
-import { botConnectionId, connectionId, connectionToken, loadConnections, saveBotConnections, saveConnection, selectedConnection, type RemoteConnection } from '../remote/connections';
+import { bindBotPhone, botBindingEndpoint, devices, parseBotBindingPackage, setHubFetch as setRawHubFetch, type FetchLike } from '../remote/client';
+import { botConnectionId, botGroupId, confirmLegacyBotGroupPin, getBotGroup, connectionId, connectionToken, loadConnections, saveBotConnections as saveLegacyBotConnections, saveConnection, selectedConnection, type RemoteConnection } from '../remote/connections';
+import { botStationFixture } from './fixtures/bot-station';
 import { bootRemote, getRemoteState, probeSavedConnections, refreshDevices, reloadSavedConnections, resetRemoteForTests, revokeRemoteConnectionById, useSavedConnection, watchCredentials } from '../remote/store';
 
 const mockSettings = new Map<string, string>(), mockSecrets = new Map<string, string>();
@@ -14,9 +15,17 @@ jest.mock('expo-secure-store', () => ({
   setItemAsync: async (key: string, value: string) => { mockSecrets.set(key, value); },
   deleteItemAsync: async (key: string) => { mockSecrets.delete(key); },
 }));
-jest.mock('expo-crypto', () => ({ randomUUID: () => require('node:crypto').randomUUID() }));
+jest.mock('expo-crypto', () => ({ randomUUID: () => require('node:crypto').randomUUID(), getRandomBytes: (size: number) => new Uint8Array(require('node:crypto').randomBytes(size)) }));
 
 const hubUrl = 'https://mixed.example/salcara-hub/v1';
+const station = botStationFixture(hubUrl);
+const setHubFetch = (transport: FetchLike | null) => setRawHubFetch(transport ? station.wrap(transport) : null, true);
+async function saveBotConnections(profiles: RemoteConnection[], token: string) {
+  await saveLegacyBotConnections(profiles, token);
+  const group = (await getBotGroup(botGroupId(profiles[0].hubUrl, profiles[0].botGroupId!)))!;
+  if (!group.pin) await confirmLegacyBotGroupPin(group, station.pin);
+  return loadConnections();
+}
 const token = 'a'.repeat(64), botToken = 'b'.repeat(64);
 const device = (deviceId = 'a') => ({ deviceId, name: `电脑 ${deviceId}`, os: 'windows', tools: [], projects: [], online: true, lastSeen: 1 });
 const profile = (deviceId = 'a', groupId?: string, computerId?: string): RemoteConnection => ({
@@ -27,7 +36,8 @@ const binding = { type: 'salcara-hub-bot-binding' as const, version: 1 as const,
 const reply = (body: unknown, status = 200) => ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) });
 const transport: FetchLike = async endpoint => endpoint.endsWith('/ping')
   ? reply({ service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, authModes: ['device-pairing'], capabilities: ['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1'] })
-  : endpoint.endsWith('/app/devices') ? reply({ devices: [device('a'), device('b'), device('c')] }) : reply({ ok: true });
+  : endpoint.endsWith('/app/devices') ? reply({ devices: [device('a'), device('b'), device('c')] })
+    : endpoint.endsWith('/bot/phone/revoke') ? reply({ ok: true, groupId: 'group', invitationRevoked: true }) : reply({ ok: true });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function flush() { for (let i = 0; i < 100; i++) await Promise.resolve(); }
 async function saveMixed() {
@@ -73,25 +83,25 @@ test.each(['revoked', 'network'] as const)('a Bot %s response cleans only confir
   await saveMixed();
   const otherGroup = profile('a', 'other'); await saveBotConnections([otherGroup], 'e'.repeat(64)); await reloadSavedConnections();
   await useSavedConnection(profile('a', 'group').id);
-  setHubFetch(async () => reply({ code: failure === 'revoked' ? 'bot_phone_credentials_invalid' : 'service_unavailable' }, failure === 'revoked' ? 403 : 503));
+  setHubFetch(async (url, init) => url.endsWith('/ping') ? transport(url, init) : reply({ code: failure === 'revoked' ? 'bot_credentials_invalid' : 'service_unavailable' }, failure === 'revoked' ? 403 : 503));
   await refreshDevices(true);
   const remaining = await loadConnections();
   expect(remaining.some(item => item.id === profile().id)).toBe(true);
   expect(await connectionToken(otherGroup)).toBe('e'.repeat(64));
-  expect(remaining.filter(item => item.botGroupId === 'group')).toHaveLength(failure === 'revoked' ? 0 : 2);
+  expect(remaining.filter(item => item.botGroupId === 'group')).toHaveLength(failure === 'revoked' ? 0 : 3);
   if (failure === 'revoked') expect(watchCredentials()).toBeNull();
   resetRemoteForTests(); await bootRemote([]);
-  expect(getRemoteState().connections.filter(item => item.botGroupId === 'group')).toHaveLength(failure === 'revoked' ? 0 : 2);
+  expect(getRemoteState().connections.filter(item => item.botGroupId === 'group')).toHaveLength(failure === 'revoked' ? 0 : 3);
 });
 
 test('a concurrent successful Bot rebind survives old group-token revocation cleanup', async () => {
   await saveMixed(); await useSavedConnection(profile('a', 'group').id);
   const pending = deferred<Awaited<ReturnType<FetchLike>>>();
-  setHubFetch(async () => pending.promise);
+  setHubFetch(async (url, init) => url.endsWith('/ping') ? transport(url, init) : pending.promise);
   const refreshing = refreshDevices(true); await flush();
   const replacement = { ...profile('b', 'group'), pairedAt: 2 };
   await saveBotConnections([replacement], 'e'.repeat(64));
-  pending.resolve(reply({ code: 'bot_phone_credentials_invalid' }, 403)); await refreshing;
+  pending.resolve(reply({ code: 'bot_credentials_invalid' }, 403)); await refreshing;
   expect(await connectionToken(replacement)).toBe('e'.repeat(64));
   expect(await connectionToken(profile('a', 'group'))).toBeNull();
   expect(await connectionToken(profile())).toBe(token);
@@ -158,9 +168,10 @@ test('Bot import uses the versioned API without altering its signed package and 
   expect((await bindBotPhone(parsed, 'f'.repeat(64))).devices).toHaveLength(2);
   expect(calls[0].endpoint).toBe(`${hubUrl}/bot/phone/bind`);
   expect(JSON.parse(String(calls[0].init.body)).binding).toEqual(binding);
-  expect(await devices({ url: hubUrl, botToken, deviceId: 'b' })).toEqual([device('b')]);
-  expect(calls[1].init.headers).toMatchObject({ 'X-Salcara-Bot-Token': botToken });
-  expect(calls[1].init.headers).not.toHaveProperty('X-Salcara-Pair-Token');
+  expect(await devices({ url: hubUrl, botToken, botPin: station.pin, deviceId: 'b' })).toEqual([device('b')]);
+  const selectedRead = calls.find(call => call.endpoint.endsWith('/app/devices'))!;
+  expect(selectedRead.init.headers).toMatchObject({ 'X-Salcara-Bot-Token': botToken });
+  expect(selectedRead.init.headers).not.toHaveProperty('X-Salcara-Pair-Token');
 });
 
 test.each(['wrong-group', 'duplicate', 'invalid-device', 'invalid-computer', 'empty'] as const)('Bot import rejects the entire %s response', async failure => {
@@ -182,7 +193,7 @@ test('Bot and ordinary profiles on one computer switch locally without a station
   expect(getRemoteState().devices).toEqual([device('b')]);
   const selected = getRemoteState().connectionId;
   const health = await probeSavedConnections();
-  expect(Object.values(health)).toEqual(['online', 'online', 'online']);
+  expect(Object.values(health)).toEqual(['online', 'online', 'online', 'online']); // Group refresh discovers c without selecting it.
   expect(getRemoteState().connectionId).toBe(selected);
   expect(calls.some(call => call.endpoint.endsWith('/app/commands'))).toBe(false);
   const botCalls = calls.filter(call => call.endpoint.endsWith('/app/devices') && (call.init.headers as Record<string, string>)['X-Salcara-Bot-Token']);
@@ -239,12 +250,13 @@ test.each(['offline', 'missing', 'unauthorized', 'discovery', 'missing-credentia
 test.each(['cancel', 'newer-selection'] as const)('an online confirmation arriving after %s cannot activate the old choice', async action => {
   await saveMixed(); await useSavedConnection(profile().id);
   const wait = deferred<Awaited<ReturnType<FetchLike>>>(); let wanted = true, entered = false;
+  const started = deferred<void>();
   setHubFetch(async (endpoint, init) => {
-    if (endpoint.endsWith('/app/devices') && !entered) { entered = true; return wait.promise; }
+    if (endpoint.endsWith('/app/devices') && !entered) { entered = true; started.resolve(); return wait.promise; }
     return transport(endpoint, init);
   });
   const pending = useSavedConnection(profile('b', 'group').id, false, { requireOnline: true, stillWanted: () => wanted });
-  await flush(); expect(entered).toBe(true);
+  await Promise.race([started.promise, pending]); expect(entered).toBe(true);
   expect(getRemoteState().connectionId).toBe(profile().id);
   expect(await selectedConnection()).toBe(profile().id);
   if (action === 'cancel') wanted = false;
@@ -314,7 +326,7 @@ test.each(['relay', 'bot'] as const)('revoking %s preserves the other mode even 
   await useSavedConnection(keep);
   await revokeRemoteConnectionById(target);
   expect(getRemoteState().connectionId).toBe(keep);
-  expect(getRemoteState().connections.map(item => item.id).sort()).toEqual((kind === 'relay' ? [profile('a', 'group').id, profile('b', 'group').id] : [profile().id]).sort());
+  expect(getRemoteState().connections.map(item => item.id).sort()).toEqual((kind === 'relay' ? [profile('a', 'group').id, profile('b', 'group').id, profile('c', 'group').id] : [profile().id]).sort());
   expect(revoked.every(endpoint => endpoint.endsWith(kind === 'relay' ? '/app/pair/revoke' : '/bot/phone/revoke'))).toBe(true);
   expect(await connectionToken(kind === 'relay' ? profile('a', 'group') : profile())).toBe(kind === 'relay' ? botToken : token);
 });

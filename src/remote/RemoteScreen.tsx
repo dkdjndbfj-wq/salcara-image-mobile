@@ -771,7 +771,7 @@ export function QrPairing({ visible, remote, onPaired, onBotPaired, onSimulatedP
       {permission && !permission.granted && !permission.canAskAgain ? <ProgrammingAction tone="secondary" label="打开相机权限设置" onPress={() => void openSystemPermissionSettings()} style={{ marginTop: 10 }} /> : null}
       {error ? <Text accessibilityRole="alert" style={p.error}>{error}</Text> : null}
       <Text style={p.note}>打开电脑端「手机远程」显示的二维码。绑定完成后会自动保存这台电脑。</Text>
-      <RemoteBotBinding remote={remote} onBound={(id) => onBotPaired ? onBotPaired(id) : onPaired?.(false)} />
+      <RemoteBotBinding remote={remote} visible={visible} onBound={(id) => onBotPaired ? onBotPaired(id) : onPaired?.(false)} />
     </ScrollView>
     <Sheet visible={visible && scanning} presentation="page" scroll={false} title="扫描二维码" onClose={() => { scanGate.current = true; setScanning(false); }}>
       {visible && scanning && permission?.granted ? <CameraView testID="remote-qr-camera" style={{ flex: 1 }} facing="back" barcodeScannerSettings={{ barcodeTypes: ['qr'] }} onBarcodeScanned={scan}

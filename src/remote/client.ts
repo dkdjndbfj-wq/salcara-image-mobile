@@ -415,7 +415,7 @@ export type Command =
   | { type: 'models.list'; tool: ToolId; refresh?: boolean; controlSurface?: 'cli' | 'desktop'; sessionKey?: string; agent?: 'codex-desktop'; accountId?: string }
   | { type: 'desktop.navigate'; sessionKey: string; controlSurface: 'desktop'; accountId?: string };
 
-export type Hub = { url: string; key?: string; pairToken?: string; botToken?: string; deviceId?: string };
+export type Hub = { url: string; key?: string; pairToken?: string; botToken?: string; botPin?: BotBindingPin; deviceId?: string };
 export interface InterruptResult { status: 'requested' | 'stopped' | 'already_finished' | 'unconfirmed'; turnId: string }
 export type FetchLike = (url: string, init: Record<string, unknown>) => Promise<{
   ok: boolean; status: number; url?: string; redirected?: boolean; headers?: { get?: (name: string) => string | null } | null; body?: unknown; text?: () => Promise<string>; json?: () => Promise<unknown>;
@@ -497,8 +497,17 @@ export function isPairingAuthenticationError(error: unknown): boolean {
     && (!error.code || pairingErrorCodes.has(error.code));
 }
 
-function authHeaders(hub: Hub | { url: string; key?: string }) {
-  return { ...(hub.key ? { Authorization: `Bearer ${hub.key}` } : {}), ...('botToken' in hub && hub.botToken ? { 'X-Salcara-Bot-Token': hub.botToken } : 'pairToken' in hub && hub.pairToken ? { 'X-Salcara-Pair-Token': hub.pairToken } : {}) };
+function authHeaders(hub: Hub) {
+  if (hub.botToken) return { 'X-Salcara-Bot-Token': hub.botToken };
+  return { ...(hub.key ? { Authorization: `Bearer ${hub.key}` } : {}), ...(hub.pairToken ? { 'X-Salcara-Pair-Token': hub.pairToken } : {}) };
+}
+function snapshotHub(hub: Hub): Hub { return { ...hub, ...(hub.botPin ? { botPin: { ...hub.botPin } } : {}) }; }
+function requireBotPin(hub: Hub): BotBindingPin {
+  const pin = hub.botPin;
+  if (!pin || typeof pin.instanceId !== 'string' || !pin.instanceId || typeof pin.publicKey !== 'string' || !pin.publicKey) {
+    throw new HubError('此 Bot 绑定缺少已确认的服务身份，已保留凭据并暂停连接，请联系管理员确认原组', 409, 'bot_identity_unavailable');
+  }
+  return pin;
 }
 function checkResponseScope(response: Awaited<ReturnType<FetchLike>>, hubUrl: string) {
   // Never follow station redirects with a device credential, even within the same origin.
@@ -519,7 +528,8 @@ function withAbort<T>(signal: AbortSignal, operation: () => Promise<T>): Promise
   });
 }
 
-async function request(hub: Hub | { url: string; key?: string }, path: string, init: { method?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal; exact?: boolean } = {}) {
+async function request(hub: Hub, path: string, init: { method?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal; exact?: boolean; beforeSend?: () => void; botTarget?: VerifiedBotStation } = {}) {
+  const owner = snapshotHub(hub);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? 20_000);
   const forwardAbort = () => controller.abort();
@@ -531,21 +541,39 @@ async function request(hub: Hub | { url: string; key?: string }, path: string, i
   try {
     const wire = {
       method: init.method ?? 'GET',
-      headers: { Accept: 'application/json', ...authHeaders(hub), ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
+      headers: { Accept: 'application/json', ...authHeaders(owner), ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
       body: init.body ? JSON.stringify(init.body) : undefined,
       signal: controller.signal, credentials: 'omit', redirect: 'error',
     };
+    let botTarget: VerifiedBotStation | undefined;
+    if (owner.botToken) {
+      const pin = requireBotPin(owner);
+      botTarget = init.botTarget
+        ? { endpoint: init.botTarget.endpoint, pin: { ...init.botTarget.pin } }
+        : await withAbort(controller.signal, () => verifyBotBindingStation(owner.url, pin, false));
+      if (botTarget.pin.instanceId !== pin.instanceId || botTarget.pin.publicKey !== pin.publicKey) {
+        throw new HubError('Bot 服务身份已变更，已停止发送凭据', 409, 'hub_identity_changed');
+      }
+    }
     // A QR ticket belongs to the newly confirmed exact URL. Old routing
     // authority must not forward a replacement Hub's one-time pairing secret.
-    const transport = await withAbort(controller.signal, async () => init.exact
-      ? { response: await fetchImpl(`${hub.url}${path}`, wire), endpoint: hub.url }
-      : transportFetch(hub.url, path, wire));
+    const transport = await withAbort(controller.signal, async () => {
+      init.beforeSend?.();
+      if (botTarget) {
+        checkBotDispatchPin(owner.url, botTarget);
+        return { response: await fetchImpl(`${botTarget.endpoint}${path}`, wire), endpoint: botTarget.endpoint };
+      }
+      return init.exact
+        ? { response: await fetchImpl(`${owner.url}${path}`, wire), endpoint: owner.url }
+        : transportFetch(owner.url, path, wire);
+    });
     response = transport.response;
     checkResponseScope(response, transport.endpoint);
-    if (init.exact && response.url && response.url !== `${hub.url}${path}`) throw new HubError('中转站接口发生重定向，已停止连接以保护配对凭证');
+    if ((init.exact || botTarget) && response.url && response.url !== `${transport.endpoint}${path}`) throw new HubError('中转站接口发生重定向，已停止连接以保护配对凭证');
     const json = await withAbort(controller.signal, () => response.ok ? readJson(response) : readJson(response).catch(() => ({} as Record<string, unknown>)));
+    if (botTarget) checkBotIdentityContinuity(owner.url, botTarget);
     if (!response.ok) {
-      throw httpFailure(response.status, path === '/ping' ? { ...json, error: undefined } : json, Boolean('pairToken' in hub && hub.pairToken || 'botToken' in hub && hub.botToken));
+      throw httpFailure(response.status, path === '/ping' ? { ...json, error: undefined } : json, Boolean(owner.pairToken || owner.botToken));
     }
     return json;
   } catch (error) {
@@ -669,10 +697,65 @@ export async function devices(hub: Hub): Promise<DeviceStatus[]> {
   return Array.isArray(list) ? (list as DeviceStatus[]).filter((device) => device && (!hub.deviceId || device.deviceId === hub.deviceId)) : [];
 }
 
+/** Group discovery is deliberately separate from the selected-device read. */
+export async function botGroupDevices(hub: Hub, target?: VerifiedBotStation, beforeSend?: () => void): Promise<DeviceStatus[]> {
+  if (!hub.botToken || !/^[a-f0-9]{64}$/.test(hub.botToken)) throw new HubError('Bot 手机凭据无效', 400, 'bot_phone_invalid');
+  const result = await botRequest({ url: hub.url, botToken: hub.botToken, botPin: hub.botPin }, '/app/devices', { ...(target ? { botTarget: target } : {}), ...(beforeSend ? { beforeSend } : {}) });
+  return validBotDevices(result.devices);
+}
+
 export interface BotBindingPackage { type: 'salcara-hub-bot-binding'; version: 1; hubUrl: string; groupId: string; invite: string; signature: string }
 export interface BotPhoneBindResult { groupId: string; botToken: string; devices: DeviceStatus[] }
+export interface BotPhoneBindAttempt { attemptId: string; phoneToken: string }
+export interface BotBindingPin { instanceId: string; publicKey: string }
+export interface VerifiedBotStation { pin: BotBindingPin; endpoint: string }
 /** The signed package keeps its public base URL; API calls use the versioned endpoint. */
 export const botBindingEndpoint = (binding: BotBindingPackage): string => canonicalHubUrl(`${binding.hubUrl}/v1`);
+
+function checkBotIdentityContinuity(canonical: string, target: VerifiedBotStation): void {
+  if (ingressEnabled && ingress.isConfirming(canonical)) {
+    throw new HubError('服务身份正在确认，已暂停发送 Bot 凭据', 409, 'bot_identity_unavailable');
+  }
+  if (ingressEnabled && ingress.hasIdentityMismatch(canonical)) {
+    throw new HubError('Bot 服务身份已变更，已停止发送凭据', 409, 'hub_identity_changed');
+  }
+  const current = hubIngressSnapshot(canonical);
+  if (!current?.signature || current.hub_instance_id !== target.pin.instanceId || current.identity_public_key !== target.pin.publicKey
+    || current.expires_at <= Date.now() || !current.endpoints.some(item => item.url === target.endpoint)) {
+    throw new HubError('Bot 服务身份已变更，已停止发送绑定信息', 409, 'hub_identity_changed');
+  }
+}
+function checkBotDispatchPin(canonical: string, target: VerifiedBotStation): void {
+  checkBotIdentityContinuity(canonical, target);
+  if (!ingressEnabled || !ingress.isVerifiedPinnedEndpoint(canonical, target.endpoint, target.pin)) {
+    throw new HubError('Bot 服务身份验证已过期，已保留凭据，请重新核对连接后重试', 409, 'bot_identity_unavailable');
+  }
+}
+/** A synchronous guard for local confirmation writes; this never establishes trust. */
+export function isBotStationCurrent(canonical: string, target: VerifiedBotStation): boolean {
+  try { checkBotIdentityContinuity(canonical, target); return true; } catch { return false; }
+}
+
+async function botRequest(hub: Parameters<typeof request>[0], path: string, init?: Parameters<typeof request>[2]) {
+  try { return await request(hub, path, init); }
+  catch (error) {
+    if (!(error instanceof HubError)) throw error;
+    // Do not show arbitrary server text from a request carrying an invitation
+    // or phone credential: an upstream failure may echo the submitted body.
+    const message = error.code === 'bot_credentials_invalid' ? 'Bot 凭据或邀请已失效，请让管理员核对或重置原组'
+      : error.code === 'bot_phone_already_bound' ? '此 Bot 组已有手机绑定，请恢复原绑定或让管理员重置原组'
+      : error.code === 'bot_group_empty' ? '此 Hub 暂不支持绑定空 Bot 组，请升级 Hub'
+      : error.code === 'bot_phone_revoke_pending' ? 'Bot 撤销尚未确认，请保留当前记录并重试撤销'
+      : error.code === 'bot_phone_bind_pending' ? 'Bot 绑定尚未确认，请保留当前记录并重试原绑定'
+      : error.code === 'invalid_request' || error.code === 'ambiguous_credentials' ? 'Bot 请求格式不兼容，请检查手机与 Hub 版本'
+      : error.code === 'hub_identity_changed' ? 'Bot 服务身份已变更，已停止发送凭据'
+      : error.code === 'bot_identity_unavailable' ? '此 Bot 绑定缺少已确认的服务身份，已保留凭据并暂停连接'
+      : error.code === 'hub_timeout' ? 'Bot 服务响应超时，请保留当前记录并重试'
+      : error.code === 'hub_unreachable' ? '暂时连不上 Bot 服务，请保留当前记录并检查网络'
+      : 'Bot 请求结果尚未确认，请保留当前记录并重试';
+    throw new HubError(message, error.status, error.code);
+  }
+}
 
 export function parseBotBindingPackage(raw: string): BotBindingPackage {
   if (raw.length > 16 * 1024) throw new HubError('Bot 绑定包过大', 400, 'bot_binding_invalid');
@@ -695,20 +778,82 @@ export function parseBotBindingPackage(raw: string): BotBindingPackage {
   return binding;
 }
 
-export async function bindBotPhone(binding: BotBindingPackage, phoneId: string): Promise<BotPhoneBindResult> {
+function validBotDevices(value: unknown): DeviceStatus[] {
+  if (!Array.isArray(value) || value.length > 1000 || value.some((item: unknown) => {
+    if (!item || typeof item !== 'object') return true;
+    const device = item as DeviceStatus;
+    return typeof device.deviceId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(device.deviceId)
+      || !optionalField(item as Record<string, unknown>, 'computerId', field => typeof field === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(field))
+      || typeof device.name !== 'string' || !device.name.trim() || device.name.length > 200 || /[\u0000-\u001f]/.test(device.name)
+      || !Array.isArray(device.tools) || !Array.isArray(device.projects);
+  }) || new Set(value.map(item => (item as DeviceStatus).deviceId)).size !== value.length) {
+    throw new HubError('Hub 返回的 Bot 电脑列表无效', 502, 'bot_binding_invalid');
+  }
+  return value as DeviceStatus[];
+}
+
+/** A secret-bearing bind has no auth header: prove its destination explicitly. */
+export async function verifyBotBindingStation(hubUrl: string, expectedPin?: BotBindingPin, requireV2 = true): Promise<VerifiedBotStation> {
+  const canonical = canonicalHubUrl(hubUrl);
+  if (expectedPin && ingressEnabled) {
+    try { await ingress.refresh(canonical, expectedPin); }
+    catch (error) {
+      if (error instanceof IngressIdentityError) throw new HubError('Bot 服务身份已变更，已停止发送凭据', 409, 'hub_identity_changed');
+      throw error;
+    }
+  }
+  await discoverSavedStation(canonical);
+  const manifest = hubIngressSnapshot(canonical);
+  if (!manifest?.signature || !manifest.hub_instance_id || !manifest.identity_public_key) {
+    throw new HubError('无法确认 Bot 服务身份，请联系管理员更新远程服务', 409, 'bot_identity_unavailable');
+  }
+  const pin = { instanceId: manifest.hub_instance_id, publicKey: manifest.identity_public_key };
+  if (expectedPin && (pin.instanceId !== expectedPin.instanceId || pin.publicKey !== expectedPin.publicKey)) {
+    throw new HubError('Bot 服务身份已变更，已停止发送绑定信息', 409, 'hub_identity_changed');
+  }
+  const endpoints = [...new Set([canonical, ...manifest.endpoints.map(item => item.url)])];
+  for (const endpoint of endpoints) {
+    if (!await verifyHubAlias(canonical, endpoint)) continue;
+    // Capabilities are read from the same freshly proved endpoint, not a
+    // different anonymous origin or a stale public discovery response.
+    const station = discoveryResult(await request({ url: endpoint }, '/ping', { exact: true, timeoutMs: 8000 }), canonical);
+    const current = hubIngressSnapshot(canonical);
+    if (!current || current.hub_instance_id !== pin.instanceId || current.identity_public_key !== pin.publicKey) {
+      throw new HubError('Bot 服务身份已变更，已停止发送绑定信息', 409, 'hub_identity_changed');
+    }
+    if (requireV2 && !station.capabilities.includes('bot.phone.binding.v2')) {
+      throw new HubError('此 Hub 尚不支持安全恢复 Bot 绑定，请先升级 Hub', 426, 'bot_binding_upgrade_required');
+    }
+    return { pin, endpoint };
+  }
+  throw new HubError('无法确认 Bot 服务身份，请检查网络后重试', 409, 'bot_identity_unavailable');
+}
+
+/** v2 callers must durably save the attempt before passing its proved endpoint. */
+export async function bindBotPhone(binding: BotBindingPackage, phoneId: string, attempt?: BotPhoneBindAttempt, endpoint = botBindingEndpoint(binding), options?: { stillCurrent?: () => Promise<boolean>; pin?: BotBindingPin }): Promise<BotPhoneBindResult> {
   if (!/^[a-f0-9]{64}$/.test(phoneId)) throw new HubError('手机身份无效', 400, 'bot_phone_invalid');
-  const result = await request({ url: botBindingEndpoint(binding) }, '/bot/phone/bind', { method: 'POST', body: { binding, phoneId }, timeoutMs: 20_000, exact: true });
-  if (typeof result.botToken !== 'string' || !/^[a-f0-9]{64}$/.test(result.botToken) || !Array.isArray(result.devices)
-    || result.groupId !== binding.groupId || !result.devices.length || result.devices.length > 1000
-    || result.devices.some((item: unknown) => {
-      if (!item || typeof item !== 'object') return true;
-      const device = item as DeviceStatus;
-      return typeof device.deviceId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(device.deviceId)
-        || !optionalField(item as Record<string, unknown>, 'computerId', value => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value))
-        || typeof device.name !== 'string' || !device.name.trim() || device.name.length > 200 || /[\u0000-\u001f]/.test(device.name)
-        || !Array.isArray(device.tools) || !Array.isArray(device.projects);
-    }) || new Set(result.devices.map(item => (item as DeviceStatus).deviceId)).size !== result.devices.length) throw new HubError('Hub 返回的 Bot 手机凭据无效', 502, 'bot_binding_invalid');
-  return { groupId: result.groupId, botToken: result.botToken, devices: result.devices as DeviceStatus[] };
+  if (attempt && (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(attempt.attemptId)
+    || !/^[a-f0-9]{64}$/.test(attempt.phoneToken))) throw new HubError('Bot 恢复信息无效', 400, 'bot_phone_invalid');
+  if (endpoint !== botBindingEndpoint(binding) && !await verifyHubAlias(botBindingEndpoint(binding), endpoint)) {
+    throw new HubError('Bot 绑定地址未通过身份确认', 409, 'hub_identity_changed');
+  }
+  if (options?.stillCurrent && !await options.stillCurrent()) throw new HubError('Bot 绑定已变更，请刷新后重试', 409, 'bot_binding_changed');
+  const pin = options?.pin;
+  const result = await botRequest({ url: endpoint }, '/bot/phone/bind', { method: 'POST', body: { binding, phoneId, ...(attempt ? { attemptId: attempt.attemptId, phoneToken: attempt.phoneToken } : {}) }, timeoutMs: 20_000, exact: true,
+    ...(pin ? { beforeSend: () => checkBotDispatchPin(botBindingEndpoint(binding), { pin, endpoint }) } : {}) });
+  if (typeof result.botToken !== 'string' || !/^[a-f0-9]{64}$/.test(result.botToken) || result.groupId !== binding.groupId
+    || attempt && (result.ok !== true || result.botToken !== attempt.phoneToken)) throw new HubError('Hub 返回的 Bot 手机凭据无效', 502, 'bot_binding_invalid');
+  const members = validBotDevices(result.devices);
+  if (!attempt && members.length === 0) throw new HubError('Hub 返回的 Bot 手机凭据无效', 502, 'bot_binding_invalid');
+  return { groupId: result.groupId, botToken: result.botToken, devices: members };
+}
+
+export async function revokeBotPhone(hub: Hub, expectedGroupId: string, target?: VerifiedBotStation): Promise<void> {
+  if (!hub.botToken || !/^[a-f0-9]{64}$/.test(hub.botToken)) throw new HubError('Bot 手机凭据无效', 400, 'bot_phone_invalid');
+  const result = await botRequest({ url: hub.url, botToken: hub.botToken, botPin: hub.botPin }, '/bot/phone/revoke', { method: 'POST', ...(target ? { botTarget: target } : {}) });
+  if (result.ok !== true || result.groupId !== expectedGroupId || result.invitationRevoked !== true) {
+    throw new HubError('Bot 撤销结果尚未确认，请重试撤销', 502, 'bot_revoke_unconfirmed');
+  }
 }
 
 /** Runs one command on a computer; the hub waits up to 45 s for the reply. */
@@ -742,7 +887,7 @@ export async function command<T = Record<string, unknown>>(hub: Hub, deviceId: s
   throwIfAborted(signal);
   // Freeze before the first await. A UI selection change or caller mutation
   // cannot alter the command/paired station while its grant is acquired.
-  const owner = { ...hub };
+  const owner = snapshotHub(hub);
   const encodedCommand = JSON.stringify(cmd);
   if (['session.start', 'session.send', 'session.continue'].includes(cmd.type) && new TextEncoder().encode(encodedCommand).length > 240 * 1024) throw new HubError('内容过多，请减少正文、技能或引用后重试', 413, 'command_too_large');
   const frozenCommand = JSON.parse(encodedCommand) as Command;
@@ -949,7 +1094,8 @@ export const BACKOFF_MAX = 30_000;
  * attempts. A 401 stops for good (the key is no longer a relay user).
  */
 export function openStream(options: StreamOptions): StreamHandle {
-  const { hub, onEvent, onDevice, onState, idleMs = 65_000, wait = sleep } = options;
+  const { onEvent, onDevice, onState, idleMs = 65_000, wait = sleep } = options;
+  const hub = snapshotHub(options.hub);
   const outer = new AbortController();
   let seq = options.after ?? 0;
   let delay = BACKOFF_MIN;
@@ -961,14 +1107,33 @@ export function openStream(options: StreamOptions): StreamHandle {
     outer.signal.addEventListener('abort', stop, { once: true });
     let alive = Date.now();
     let endpoint = hub.url;
-    const watchdog = setInterval(() => { if (Date.now() - alive > idleMs) attempt.abort(); }, Math.min(idleMs, 5000));
+    let cancelReader: (() => unknown) | undefined;
+    let streamTarget: VerifiedBotStation | undefined;
+    let identityError: HubError | undefined;
+    const watchdog = setInterval(() => {
+      if (streamTarget) {
+        try { checkBotIdentityContinuity(hub.url, streamTarget); }
+        catch (error) { identityError = error as HubError; attempt.abort(); return; }
+      }
+      if (Date.now() - alive > idleMs) attempt.abort();
+    }, Math.min(idleMs, 5000));
     try {
-      const transport = await withAbort(attempt.signal, () => transportFetch(hub.url, `/app/stream?after=${seq}${hub.deviceId ? `&deviceId=${encodeURIComponent(hub.deviceId)}` : ''}`, {
-        method: 'GET', headers: { Accept: 'text/event-stream', ...authHeaders(hub) }, signal: attempt.signal, credentials: 'omit', redirect: 'error',
-      }));
+      const target = hub.botToken ? await withAbort(attempt.signal, () => verifyBotBindingStation(hub.url, requireBotPin(hub), false)) : undefined;
+      streamTarget = target;
+      const path = `/app/stream?after=${seq}${hub.deviceId ? `&deviceId=${encodeURIComponent(hub.deviceId)}` : ''}`;
+      const wire = { method: 'GET', headers: { Accept: 'text/event-stream', ...authHeaders(hub) }, signal: attempt.signal, credentials: 'omit', redirect: 'error' };
+      const transport = await withAbort(attempt.signal, async () => {
+        if (!target) return transportFetch(hub.url, path, wire);
+        checkBotDispatchPin(hub.url, target);
+        return { response: await fetchImpl(`${target.endpoint}${path}`, wire), endpoint: target.endpoint };
+      });
       const response = transport.response;
       endpoint = transport.endpoint;
       checkResponseScope(response, endpoint);
+      if (target) {
+        checkBotIdentityContinuity(hub.url, target);
+        if (response.url && response.url !== `${endpoint}${path}`) throw new HubError('Bot 事件流发生重定向，已停止连接');
+      }
       if (!response.ok) {
         const json = await readJson(response).catch(() => ({} as Record<string, unknown>));
         throw httpFailure(response.status, json, Boolean(hub.pairToken || hub.botToken));
@@ -978,8 +1143,11 @@ export function openStream(options: StreamOptions): StreamHandle {
       onState?.('open');
       const body = response.body as { getReader?: () => { read: () => Promise<{ done: boolean; value?: unknown }>; cancel?: () => unknown } } | undefined;
       const reader = body?.getReader?.();
+      if (reader) cancelReader = () => reader.cancel?.();
       const tracked = reader ? { getReader: () => ({ read: async () => { const chunk = await reader.read(); alive = Date.now(); return chunk; }, cancel: () => reader.cancel?.() }) } : body;
-      await readSse({ headers: response.headers, body: tracked, text: response.text }, (event) => {
+      await withAbort(attempt.signal, () => readSse({ headers: response.headers, body: tracked, text: response.text }, (event) => {
+        if (outer.signal.aborted || attempt.signal.aborted) return;
+        if (target) checkBotIdentityContinuity(hub.url, target);
         let data: unknown;
         try { data = JSON.parse(event.data); } catch { return; }
         if (!isRecord(data)) return;
@@ -1008,14 +1176,17 @@ export function openStream(options: StreamOptions): StreamHandle {
         if (validCounter(data.seq) && data.seq <= seq) return;
         if (hubEvent) onEvent(hubEvent);
         if (validCounter(data.seq)) seq = data.seq;
-      }, attempt.signal);
+      }, attempt.signal));
       if (!outer.signal.aborted && ingressEnabled) ingress.fail(hub.url, endpoint);
       return null;
     } catch (error) {
-      if (error instanceof HubError && (error.status === 401 || error.status === 403)) throw error;
+      if (identityError) throw identityError;
+      if (error instanceof HubError && (error.status === 401 || error.status === 403 || error.code === 'bot_identity_unavailable' || error.code === 'hub_identity_changed')) throw error;
       if (!outer.signal.aborted && ingressEnabled) ingress.fail(hub.url, endpoint);
       return error instanceof Error ? error.message : String(error);
     } finally {
+      attempt.abort();
+      if (cancelReader) void Promise.resolve().then(cancelReader).catch(() => undefined);
       clearInterval(watchdog);
       outer.signal.removeEventListener('abort', stop);
     }

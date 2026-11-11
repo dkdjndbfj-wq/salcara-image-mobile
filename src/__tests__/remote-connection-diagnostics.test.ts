@@ -1,7 +1,8 @@
 import { diagnosticProbe, setHubFetch, type FetchLike, type Hub } from '../remote/client';
 import { diagnosticSummary, measureConnection } from '../remote/connection-diagnostics';
+import { botStationFixture } from './fixtures/bot-station';
 
-jest.mock('expo-crypto', () => ({ randomUUID: () => require('node:crypto').randomUUID() }));
+jest.mock('expo-crypto', () => ({ randomUUID: () => require('node:crypto').randomUUID(), getRandomBytes: (size: number) => new Uint8Array(require('node:crypto').randomBytes(size)) }));
 const owner: Hub = { url: 'https://private-station.example/salcara-hub/v1', pairToken: 'private-pair-token', deviceId: 'private-pc' };
 const reply = (body: unknown, status = 200) => ({ ok: status === 200, status, text: async () => JSON.stringify(body) });
 const echo = (body: Record<string, unknown>): Record<string, unknown> => ({ version: 1, ...body, status: 'ok', ...(body.target === 'hub' ? { deviceOnline: true, lastSeen: 123 } : { hubDeviceMs: 12 }) });
@@ -58,7 +59,11 @@ test('offline computer stops after the Hub exchange', async () => {
 });
 
 test('Bot diagnostics use the Bot credential, label the measured route and explain re-binding without a QR instruction', async () => {
-  const bot: Hub = { url: owner.url, botToken: 'private-bot-token', deviceId: owner.deviceId };
+  const station = botStationFixture(owner.url);
+  const bot: Hub = { url: owner.url, botToken: 'private-bot-token', botPin: station.pin, deviceId: owner.deviceId };
+  setHubFetch(station.wrap(async (endpoint, init) => {
+    const body = JSON.parse(String(init.body)); requests.push({ endpoint, init, body }); now += body.target === 'hub' ? 25 : 60; return reply(echo(body));
+  }, true), true);
   const measured = await measureConnection(bot, bot.deviceId!);
   expect(measured.roundTrip.status).toBe('ok');
   for (const segment of [measured.hub, measured.computer, measured.roundTrip]) {
@@ -68,7 +73,7 @@ test('Bot diagnostics use the Bot credential, label the measured route and expla
     expect(request.init.headers).toMatchObject({ 'X-Salcara-Bot-Token': bot.botToken });
     expect(request.init.headers).not.toHaveProperty('X-Salcara-Pair-Token');
   }
-  setHubFetch(async () => reply({ error: 'private-bot-token' }, 401));
+  setHubFetch(station.wrap(async () => reply({ error: 'private-bot-token' }, 401), true), true);
   const rejected = await measureConnection(bot, bot.deviceId!);
   expect(rejected.hub).toMatchObject({ status: 'reauth', ms: null });
   expect(rejected.hub.detail).toContain('重新绑定 Bot');expect(rejected.hub.detail).not.toContain('扫码');

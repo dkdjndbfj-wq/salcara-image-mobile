@@ -4,7 +4,7 @@ import { bytesToHex } from '@noble/hashes/utils.js';
 import { devices, HubError, setHubFetch, type FetchLike } from '../remote/client';
 import { connectionFailure } from '../remote/connection-errors';
 import { remoteConnectionState } from '../remote/connection-state';
-import { botConnectionId, connectionId, connectionToken, saveConnection, type RemoteConnection } from '../remote/connections';
+import { botConnectionId, botGroupId, confirmLegacyBotGroupPin, getBotGroup, connectionId, connectionToken, saveConnection, type RemoteConnection } from '../remote/connections';
 import { bootRemote, getRemoteState, resetRemoteForTests, useSavedConnection } from '../remote/store';
 import type { IngressManifest } from '../remote/ingress';
 
@@ -52,6 +52,7 @@ test.each(['relay', 'bot'] as const)('restoring a saved %s computer can use its 
   const profile: RemoteConnection = { id: mode === 'bot' ? botConnectionId(canonical, device.deviceId, 'group') : connectionId(canonical, device.deviceId),
     hubUrl: canonical, deviceId: device.deviceId, deviceName: device.name, pairedAt: 1, ...(mode === 'bot' ? { botGroupId: 'group' } : {}) };
   await saveConnection(profile, token);
+  if (mode === 'bot') await confirmLegacyBotGroupPin((await getBotGroup(botGroupId(canonical, 'group')))!, { instanceId: hubId, publicKey: key });
   await bootRemote([]);
   const calls: Array<{ url: string; init: Record<string, unknown> }> = [];
   const fetch: FetchLike = async (url, init) => {
@@ -89,7 +90,7 @@ test('a canonical nonce check that cannot reach the network preserves pairing wi
   const manifest = signedManifest();
   mockSecrets.set(pinKey, JSON.stringify(manifest));
   setHubFetch(async url => url.endsWith('/ingress/manifest') ? json(manifest) : Promise.reject(new Error('Network offline')), true);
-  await expect(devices({ url: canonical, botToken: token, deviceId: device.deviceId })).rejects.toMatchObject({ code: 'hub_unreachable' });
+  await expect(devices({ url: canonical, botToken: token, botPin: { instanceId: hubId, publicKey: key }, deviceId: device.deviceId })).rejects.toMatchObject({ code: 'hub_unreachable' });
 });
 
 test('a confirmed identity mismatch has its own safe recovery state rather than requiring computer enrollment', () => {

@@ -74,7 +74,7 @@ export function verifyIngressProof(value: unknown, manifest: IngressManifest, no
 }
 
 interface Storage { read(canonical: string): Promise<string | null>; write(canonical: string, value: string): Promise<void> }
-interface Entry { manifest?: IngressManifest; epoch: number; confirming?: number; invalidIdentity?: boolean; loaded: Promise<void>; refreshing?: Promise<void>; retryAt: number; lastRefreshAt: number; hintCursor: number; proofCursor: number; lastSuccess?: string; failed: Map<string, number>; leases: Map<string, number>; proofs: Map<string, Promise<void>> }
+interface Entry { manifest?: IngressManifest; epoch: number; confirming?: number; invalidIdentity?: boolean; loaded: Promise<void>; refreshing?: Promise<void>; initialAnchor?: string; retryAt: number; lastRefreshAt: number; hintCursor: number; proofCursor: number; lastSuccess?: string; failed: Map<string, number>; leases: Map<string, number>; proofs: Map<string, Promise<void>> }
 /** Only transport URLs change. Canonical identity, credentials, cursors and receipts stay with callers. */
 export function createIngressRouter(options: { fetch: FetchLike; nonce: () => string; storage?: Storage; now?: () => number }) {
   const now = options.now ?? Date.now, entries = new Map<string, Entry>();
@@ -129,12 +129,29 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
       })()]);
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
-  async function refresh(canonical: string): Promise<void> {
+  async function refresh(canonical: string, expectedPin?: { instanceId: string; publicKey: string }): Promise<void> {
     if (!apiUrl(canonical)) return;
+    const anchor = expectedPin ? { ...expectedPin } : undefined;
+    if (anchor) {
+      if (!/^[a-f0-9]{32}$/.test(anchor.instanceId)) throw new IngressIdentityError();
+      try { base64(anchor.publicKey, 32); } catch { throw new IngressIdentityError(); }
+    }
+    const anchorKey = anchor ? JSON.stringify([anchor.instanceId, anchor.publicKey]) : undefined;
     const current = entry(canonical); await current.loaded;
     if (current.confirming !== undefined) return;
-    if (current.refreshing) return current.refreshing;
-    if (current.retryAt > now()) return;
+    const matchesAnchor = () => !anchor || !current.manifest || current.manifest.hub_instance_id === anchor.instanceId && current.manifest.identity_public_key === anchor.publicKey;
+    if (!matchesAnchor()) throw new IngressIdentityError();
+    if (current.refreshing) {
+      await current.refreshing;
+      if (!matchesAnchor()) throw new IngressIdentityError();
+      if (!anchor || current.manifest || current.initialAnchor === anchorKey || current.confirming !== undefined) return;
+      // An unanchored public probe may have rejected a signed move that no
+      // longer lists the old URL. Retry once using the saved group's anchor.
+      if (current.refreshing) return current.refreshing;
+    }
+    const anchoredInitial = Boolean(anchor && !current.manifest);
+    if (current.retryAt > now() && (!anchoredInitial || current.initialAnchor === anchorKey)) return;
+    if (anchoredInitial) current.initialAnchor = anchorKey;
     current.lastRefreshAt = now();
     current.retryAt = now() + 60_000;
     const epoch = current.epoch;
@@ -167,7 +184,10 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
             const candidate = batch[index];
             try {
               const old = current.manifest;
-              const manifest = parseIngressManifest(result.value, canonical, now(), false, !old);
+              const manifest = parseIngressManifest(result.value, canonical, now(), false, !old && !anchoredInitial);
+              if (anchoredInitial && (!manifest.signature || manifest.hub_instance_id !== anchor!.instanceId || manifest.identity_public_key !== anchor!.publicKey)) {
+                identityMismatch = true; continue;
+              }
               if (old && (old.hub_instance_id !== manifest.hub_instance_id || old.identity_public_key !== manifest.identity_public_key)) {
                 identityMismatch = true; continue;
               }
@@ -191,7 +211,8 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
         } else if (current.manifest === previous && identityMismatch) current.invalidIdentity = true;
       } finally { clearTimeout(timer); current.refreshing = undefined; }
     })();
-    return current.refreshing;
+    await current.refreshing;
+    if (anchor && !current.manifest && current.invalidIdentity) throw new IngressIdentityError();
   }
   function fail(canonical: string, endpoint: string) {
     const value = entries.get(canonical); value?.failed.set(endpoint, now() + 30_000); value?.leases.delete(endpoint);
@@ -348,5 +369,14 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
     const value = entries.get(canonical)?.manifest;
     return value ? JSON.parse(JSON.stringify(value.signature ? value : { ...value, endpoints: value.endpoints.filter(endpoint => endpoint.url === canonical) })) : undefined;
   }
-  return { refresh, resolve, fetch, fail, verifyAlias, adoptPinnedManifest, confirmPairingIdentity, pinSnapshot, snapshot(canonical: string): IngressManifest | undefined { const value = entries.get(canonical)?.manifest; return value && value.expires_at > now() ? pinSnapshot(canonical) : undefined; } };
+  return { refresh, resolve, fetch, fail, verifyAlias, adoptPinnedManifest, confirmPairingIdentity, pinSnapshot,
+    isConfirming(canonical: string): boolean { return entries.get(canonical)?.confirming !== undefined; },
+    hasIdentityMismatch(canonical: string): boolean { return entries.get(canonical)?.invalidIdentity === true; },
+    isVerifiedPinnedEndpoint(canonical: string, endpoint: string, expected: { instanceId: string; publicKey: string }): boolean {
+      const current = entries.get(canonical), manifest = current?.manifest;
+      return Boolean(current && current.confirming === undefined && !current.invalidIdentity && manifest?.signature && manifest.expires_at > now()
+        && manifest.hub_instance_id === expected.instanceId && manifest.identity_public_key === expected.publicKey
+        && manifest.endpoints.some(item => item.url === endpoint) && (current.leases.get(endpoint) ?? 0) > now());
+    },
+    snapshot(canonical: string): IngressManifest | undefined { const value = entries.get(canonical)?.manifest; return value && value.expires_at > now() ? pinSnapshot(canonical) : undefined; } };
 }

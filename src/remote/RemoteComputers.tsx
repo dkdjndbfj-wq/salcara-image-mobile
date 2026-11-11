@@ -5,19 +5,20 @@ import { AppDialog, showToast } from '../components/ui';
 import { themed, useDesk } from '../theme';
 import { remoteConnectionState, remoteDeviceConnected, savedConnectionHealthLabel } from './connection-state';
 import { connectionDisplayName, computerGroupKey, pairedComputerCount, type RemoteConnection } from './connections';
-import { getRemoteState, useSavedConnection, probeSavedConnections, renameRemoteConnection, revokeRemoteConnectionById, type RemoteState, type SavedConnectionHealth } from './store';
+import { getRemoteState, useSavedConnection, probeSavedConnections, refreshRemoteBotGroup, remoteConnectionRevision, renameRemoteConnection, revokeRemoteConnectionById, type RemoteState, type SavedConnectionHealth } from './store';
 import { listDirectPairings, getDirectConnectionState, reconnectDirect, forgetDirectPairing, type DirectConnectionState, type DirectPairingInfo } from './direct-pairing';
 import { connectionKind, connectionModeLabel, connectionModeIcon, connectionSelection, type ComputerSelection } from './computer-connections';
 import { ProgrammingAction, ProgrammingCard, ProgrammingHeading, ProgrammingPanel, ProgrammingRow, useProgrammingStyles } from './ProgrammingUi';
 import { SIMULATED_REMOTE_COMPUTER_ENABLED, SIMULATED_REMOTE_DEVICE_ID, SIMULATED_REMOTE_DEVICE_NAME } from './development-fixture';
 import { RemoteConnectionSyncNotice } from './RemoteConnectionSyncNotice';
+import { RemoteBotGroups } from './RemoteBotBinding';
 
 const DEVICE_ONLINE = '#12A86B';
 const DEVICE_OFFLINE = '#B45353';
 const stationHost = (url: string) => { try { return new URL(url).host; } catch { return '已保存连接'; } };
 const samePairing = (current: RemoteConnection, previous: RemoteConnection) => current.id === previous.id
   && current.hubUrl === previous.hubUrl && current.deviceId === previous.deviceId && current.botGroupId === previous.botGroupId
-  && current.computerId === previous.computerId && current.pairedAt === previous.pairedAt;
+  && current.botGeneration === previous.botGeneration && current.computerId === previous.computerId && current.pairedAt === previous.pairedAt;
 const sameDirectPairing = (current: DirectPairingInfo, previous: DirectPairingInfo) => current.deviceId === previous.deviceId
   && current.pairingScope === previous.pairingScope && current.pairedAt === previous.pairedAt && current.endpoint === previous.endpoint;
 
@@ -93,6 +94,8 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
     if (!snapshot.connections.some(item => samePairing(item, profile))) {
       showToast('这条连接已改变，请重新选择电脑', 'alert'); return;
     }
+    const botGroup = snapshot.botGroups?.find(item => item.hubUrl === profile.hubUrl && item.groupId === profile.botGroupId);
+    if (botGroup && botGroup.status !== 'active') { showToast('请先完成 Bot 组的待确认操作', 'alert'); return; }
     const device = snapshot.devices.find(item => item.deviceId === profile.deviceId);
     if (profile.id === snapshot.connectionId && snapshot.phase === 'ready' && !snapshot.signingIn && remoteDeviceConnected(snapshot, device)) { onSelected(connectionSelection(profile)); return; }
     gate.current = true; setBusy(profile.id);
@@ -185,7 +188,20 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
     catch (error) { if (stillWanted()) showToast((error as Error).message, 'alert'); }
     finally { gate.current = false; if (alive.current) setManagementBusy(false); }
   };
-  const checkAgain = () => { if (visible) { setRefreshing(true); setRefreshRevision(value => value + 1); } };
+  const checkAgain = async () => {
+    if (!visible || refreshing) return;
+    const owner = activity.current, revision = remoteConnectionRevision();
+    const current = () => alive.current && owner === activity.current && activity.current.visible && revision === remoteConnectionRevision();
+    setRefreshing(true);
+    try {
+      const groups = (getRemoteState().botGroups ?? []).filter(item => item.status === 'active' || item.status === 'pending');
+      // Membership reads are explicit and never replay pending binding POSTs.
+      const results = await Promise.allSettled(groups.map(item => refreshRemoteBotGroup(item.id, current)));
+      if (current() && results.some(result => result.status === 'rejected')) showToast('部分 Bot 组尚未刷新，原绑定已保留，可在组卡片重试', 'alert');
+    } finally {
+      if (alive.current && owner === activity.current) { setRefreshing(false); setRefreshRevision(value => value + 1); }
+    }
+  };
   const saveDemoName = () => {
     const next = demoNameDraft.trim().replace(/\s+/g, ' ');
     if (!next) { showToast('请输入设备名称', 'alert'); return; }
@@ -196,7 +212,7 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
   };
   return <>
     <ScrollView contentContainerStyle={[p.page, styles.managementPage]} showsVerticalScrollIndicator={false}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={checkAgain} tintColor={dk.muted} />}>
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void checkAgain()} tintColor={dk.muted} />}>
       <View style={styles.managementHeader}>
         <View style={styles.managementHeading}><ProgrammingHeading title="设备管理" subtitle={visibleComputers ? '按电脑选择连接方式' : '绑定电脑后，可以在这里管理设备'} /></View>
         <Pressable accessibilityRole="button" accessibilityLabel="绑定新电脑" accessibilityHint="扫描电脑二维码" disabled={Boolean(busy) || Boolean(remote.signingIn)} onPress={onBind} style={({ pressed }) => [styles.scanAction, pressed && styles.deviceCardPressed]}>
@@ -264,7 +280,8 @@ export function RemoteComputers({ visible = true, remote, selectedDeviceId, dire
         </View>;
       }) : null}
       </View>
-      {!visibleComputers && !directError ? <ProgrammingCard soft><View style={styles.empty}><View style={p.glyph}><Icon name="laptop" size={20} color={dk.text2} /></View>
+      <RemoteBotGroups remote={remote} visible={visible} />
+      {!visibleComputers && !directError && !(remote.botGroups ?? []).some(group => group.status !== 'revoked') ? <ProgrammingCard soft><View style={styles.empty}><View style={p.glyph}><Icon name="laptop" size={20} color={dk.text2} /></View>
         <Text style={p.name}>还没有绑定电脑</Text><Text style={[p.detail, { textAlign: 'center' }]}>在电脑上安装 Salcara 电脑端，然后在这里扫码绑定</Text></View></ProgrammingCard> : null}
       <Text style={p.note}>同名电脑可通过地址和设备尾号区分。</Text>
     </ScrollView>

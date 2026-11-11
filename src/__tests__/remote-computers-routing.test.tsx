@@ -7,12 +7,14 @@ import type { DirectConnectionState } from '../remote/direct-pairing';
 let mockRemote:RemoteState;
 let mockDirect:DirectConnectionState;
 const mockUse=jest.fn(),mockReconnect=jest.fn(),mockRevoke=jest.fn(),mockForget=jest.fn(),mockToast=jest.fn();
-const mockProbe=jest.fn(),mockListDirect=jest.fn(),mockRename=jest.fn();
+const mockProbe=jest.fn(),mockListDirect=jest.fn(),mockRename=jest.fn(),mockGroupRefresh=jest.fn(),mockGroupRevoke=jest.fn();
 const direct={deviceId:'direct-C',deviceName:'电脑 C',endpoint:'wss://192.168.1.8:47832/direct/ws',pairedAt:1,pairingScope:'direct:binding-c'};
 jest.mock('../components/Icon',()=>({Icon:()=>null}));
 jest.mock('../remote/RemoteConnectionSyncNotice',()=>({RemoteConnectionSyncNotice:()=>null}));
 jest.mock('../remote/store',()=>({getRemoteState:()=>mockRemote,useSavedConnection:(...args:unknown[])=>mockUse(...args),
   probeSavedConnections:()=>mockProbe(),
+  remoteConnectionRevision:()=>1,refreshRemoteBotGroup:(...args:unknown[])=>mockGroupRefresh(...args),
+  revokeRemoteBotGroup:(...args:unknown[])=>mockGroupRevoke(...args),
   renameRemoteConnection:(...args:unknown[])=>mockRename(...args),revokeRemoteConnectionById:(id:string)=>mockRevoke(id)}));
 jest.mock('../remote/direct-pairing',()=>({listDirectPairings:()=>mockListDirect(),getDirectConnectionState:()=>mockDirect,
   reconnectDirect:(...args:unknown[])=>mockReconnect(...args),forgetDirectPairing:(...args:unknown[])=>mockForget(...args)}));
@@ -37,6 +39,7 @@ beforeEach(()=>{
   mockProbe.mockImplementation(async()=>Object.fromEntries(mockRemote.connections.map(item=>[item.id,'online'])));
   mockListDirect.mockResolvedValue([direct]);
   mockRename.mockResolvedValue(undefined);mockRevoke.mockResolvedValue(undefined);mockForget.mockResolvedValue(undefined);
+  mockGroupRefresh.mockResolvedValue({devices:[]});mockGroupRevoke.mockResolvedValue(undefined);
 });
 const props=()=>({remote:mockRemote,selectedDeviceId:'A',directConnection:mockDirect,onSelected:jest.fn(),onBind:jest.fn()});
 
@@ -206,6 +209,29 @@ test('an old removal confirmation cannot revoke a freshly rebound connection wit
   await fireEvent.press(view.getByLabelText('确认 解除 Bot 组'));
   expect(mockRevoke).not.toHaveBeenCalled();
   expect(mockToast).toHaveBeenCalledWith(expect.stringContaining('已改变'),'alert');
+});
+
+test('a Bot generation change invalidates an older computer card even when timestamps match',async()=>{
+  mockRemote={...mockRemote,connections:mockRemote.connections.map(item=>item.id==='bot-B'?{...item,botGeneration:'one'}:item)};
+  const input=props(),view=await render(<RemoteComputers {...input}/>);
+  mockRemote={...mockRemote,connections:mockRemote.connections.map(item=>item.id==='bot-B'?{...item,botGeneration:'two'}:item)};
+  await fireEvent.press(view.getByLabelText('选择电脑 电脑 B'));
+  expect(mockUse).not.toHaveBeenCalled();expect(input.onSelected).not.toHaveBeenCalled();
+});
+
+test('device management exposes an empty Bot group without a fake computer card',async()=>{
+  mockListDirect.mockResolvedValue([]);
+  mockRemote={...mockRemote,connections:[],connectionId:null,devices:[],botGroups:[{
+    id:'empty-group',hubUrl:'https://b.example/v1',groupId:'empty',generation:'one',pairedAt:1,status:'active',
+    pin:{instanceId:'fixture-instance',publicKey:'A'.repeat(43)+'='},
+  }]};
+  const input=props(),view=await render(<RemoteComputers {...input}/>);
+  expect(view.getByText(/已绑定，等待电脑加入/)).toBeTruthy();
+  expect(view.queryAllByRole('button',{name:/^选择(直连)?电脑 /})).toHaveLength(0);
+  expect(view.queryByText('还没有绑定电脑')).toBeNull();
+  await fireEvent.press(view.getByLabelText('刷新组电脑'));
+  expect(mockGroupRefresh).toHaveBeenCalledWith('empty-group',expect.any(Function));
+  expect(mockUse).not.toHaveBeenCalled();expect(input.onSelected).not.toHaveBeenCalled();
 });
 
 test('an old name editor cannot change a freshly rebound connection',async()=>{

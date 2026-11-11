@@ -18,11 +18,11 @@ import { getSetting, setSetting } from '../storage/database';
 import { connectionFailure, connectionProblem, type ConnectionProblem } from './connection-errors';
 import { readPreferredAgent, rememberPreferredAgent, type AgentPreferenceScope } from './agent-preferences';
 import {
-  command, confirmPair, confirmQrPair, devices as fetchDevices, discoverStation, discoverSavedStation, hubUrlFor, HubError, isExecutionPolicyError, isPairingAuthenticationError, ping, revokePair, sessionEventsPage, parseFeatureChange, verifyHubAlias, confirmPairingHubIdentity,
+  command, confirmPair, confirmQrPair, devices as fetchDevices, discoverStation, discoverSavedStation, hubUrlFor, HubError, isExecutionPolicyError, isPairingAuthenticationError, ping, revokePair, sessionEventsPage, parseFeatureChange, verifyHubAlias, confirmPairingHubIdentity, botBindingEndpoint,
   type AgentId, type AgentProfile, type ApprovalMode, type AttachmentRef, type Command, type Decision, type DeviceStatus, type Effort, type Hub, type HubEvent, type Project, type ClaudeDesktopScope, type WorkspaceMode,
   type RemoteApiOption, type SessionInfo, type ToolId, type ToolKind, type Usage, type PermissionMode,
   type RemoteQuestion, type QuestionAnswers, type ModelCapability, type ModelCatalog,
-  type MessageOrigin, type AgentCapabilities, type InterruptResult,
+  type MessageOrigin, type AgentCapabilities, type InterruptResult, type BotBindingPackage,
 } from './client';
 import { messageContextReferences } from './conversation-metadata';
 import { hasDiffAnnotations, hasResponseAnnotations, validateContextPrompt, type ContextReference } from './context-references';
@@ -45,7 +45,8 @@ import { claudeApiAdmissionReady } from './api-admission';
 import { eligibleApiStations, officialRemoteApi, remoteApiProblem } from './api-eligibility';
 import { clearRemoteCache, loadCachedSessions, loadCachedThread, resetRemoteCacheForTests, saveCachedSessions, saveCachedThread } from './cache';
 import { deletePairToken, getPairToken, savePairToken } from './pair-storage';
-import { connectionId, connectionToken, deliveryCredentialId, forgetConnection, loadConnections, renameConnection as renameSavedConnection, saveConnection, selectConnection, selectConnectionIf, selectedConnection, type RemoteConnection } from './connections';
+import { botConnectionId, botGroupId, connectionHub, connectionId, connectionToken, deliveryCredentialId, forgetConnection, getBotGroup, listBotGroupProfiles, loadBotGroups, loadConnections, renameConnection as renameSavedConnection, saveConnection, selectConnection, selectConnectionIf, selectedConnection, type BotGroupRecord, type BotGroupState, type RemoteConnection } from './connections';
+import { confirmLegacyBotIdentity, importBotBinding, previewLegacyBotIdentity, refreshBotGroup, retryBotGroupBinding, revokeBotGroup, type LegacyBotIdentityPreview } from './bot-group-bindings';
 import { measureConnection } from './connection-diagnostics';
 import { canonicalHubUrl, readPairQr, type PairQr } from './pairing';
 import { phoneIdentity } from './phone-identity';
@@ -537,6 +538,8 @@ export interface RemoteState {
   phase: 'loading' | 'setup' | 'pairing' | 'ready';
   serviceId: string | null;
   connections: RemoteConnection[];
+  /** Public group metadata only; an empty group has no invented computer. */
+  botGroups?: BotGroupState[];
   connectionId: string | null;
   /** Only set after a successful public plugin discovery. QR scans must match exactly. */
   selectedHubUrl: string | null;
@@ -557,13 +560,15 @@ export interface RemoteState {
 }
 
 const SETTING = 'remote_service';
-const initial: RemoteState = { phase: 'loading', serviceId: null, connections: [], connectionId: null, selectedHubUrl: null, probes: {}, connection: 'idle', devices: [], devicesLoaded: false, sessions: {}, agents: {}, timelines: {}, approvals: {}, signingIn: null, focus: null };
+const initial: RemoteState = { phase: 'loading', serviceId: null, connections: [], botGroups: [], connectionId: null, selectedHubUrl: null, probes: {}, connection: 'idle', devices: [], devicesLoaded: false, sessions: {}, agents: {}, timelines: {}, approvals: {}, signingIn: null, focus: null };
 let state: RemoteState = initial;
 let hub: Hub | null = null;
+let activeBotBinding: { connectionId: string; hubUrl: string; groupId: string; generation?: string; token: string } | null = null;
 let lastSeq = 0;
 let booted = false;
 let screenOpen = false;
 let connectionGeneration = 0;
+let savedConnectionsRevision = 0;
 let remoteContentRecoveryFlight: { owner: Hub; generation: number; scope: string; promise: Promise<RemoteContentRecoveryResult> } | null = null;
 // Pairing requests are separate from station-selection generations. A camera
 // can report the same QR more than once, and users can scan a second computer
@@ -734,7 +739,9 @@ const alertListeners = new Set<(approval: PendingApproval) => void>();
 
 function set(patch: Partial<RemoteState> | ((current: RemoteState) => Partial<RemoteState>)) {
   const previous = state;
-  state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) };
+  const update = typeof patch === 'function' ? patch(state) : patch;
+  if (update.connections || update.botGroups) savedConnectionsRevision += 1;
+  state = { ...state, ...update };
   try { persistChanges(previous, state); } catch { /* the cache is optional */ }
   listeners.forEach((listener) => listener());
 }
@@ -819,8 +826,11 @@ export async function diagnoseRemoteConnection(deviceId: string, signal?: AbortS
 }
 /** Refresh the non-secret connection index after an external import flow. */
 export async function reloadSavedConnections(): Promise<RemoteConnection[]> {
+  const revision = ++savedConnectionsRevision;
+  // Loading groups also migrates legacy per-computer Bot credentials locally.
+  const botGroups = await loadBotGroups();
   const connections = await loadConnections();
-  set({ connections });
+  if (revision === savedConnectionsRevision) set({ connections, botGroups });
   return connections;
 }
 /** Capture this before an import; a later user selection must own activation. */
@@ -844,8 +854,10 @@ export function onRemoteEvent(listener: (event: HubEvent) => void): () => void {
 }
 export function isRemoteScreenOpen(): boolean { return screenOpen; }
 /** Credential snapshot for scoped workspace requests and supported native watchers; never persisted. */
-export function watchCredentials(): { url: string; key?: string; pairToken?: string; botToken?: string } | null {
-  return hub?.pairToken ? { url: hub.url, key: hub.key, pairToken: hub.pairToken, ...(hub.botToken ? { botToken: hub.botToken } : {}) } : null;
+export function watchCredentials(): { url: string; key?: string; pairToken?: string; botToken?: string; botPin?: Hub['botPin'] } | null {
+  if (hub?.botToken && !hub.botPin) return null;
+  return hub?.pairToken ? { url: hub.url, key: hub.key, pairToken: hub.pairToken,
+    ...(hub.botToken ? { botToken: hub.botToken, botPin: { ...hub.botPin! } } : {}) } : null;
 }
 export function sessionCursor(deviceId: string, sessionKey: string): number { return sessionCursors.get(timelineKey(deviceId, sessionKey)) ?? 0; }
 
@@ -931,11 +943,25 @@ function stopStream() {
 }
 
 function resetConnection(patch: Partial<RemoteState>, active?: { owner: Hub; capabilities: string[] }) {
+  const activeProfile = active?.owner.botToken && patch.connectionId ? state.connections.find(item => item.id === patch.connectionId) : undefined;
+  activeBotBinding = activeProfile?.botGroupId && active?.owner.botToken
+    ? { connectionId: activeProfile.id, hubUrl: activeProfile.hubUrl, groupId: activeProfile.botGroupId,
+      generation: activeProfile.botGeneration, token: active.owner.botToken } : null;
   agentFeatureCache.clear();
   contextSourceGenerations.clear(); contextCompactFlights.clear(); nativeActionFlights.clear(); nativeActionUnconfirmed.clear(); workflowFlights.clear(); workflowUnconfirmed.clear(); sideQuestionFlights.clear(); sideQuestionHeads.clear(); sideQuestionUnconfirmed.clear();
   stopStream(); connectionGeneration += 1; hub = active?.owner ?? null; lastSeq = 0;
   hubCapabilities = new Set(active?.capabilities ?? []); sessionCursors.clear(); sessionEpochs.clear(); sessionApprovalSnapshots.clear(); incompleteTurnRepairs.clear(); sessionRequests.clear(); snapshotFlights.clear(); modelCache.clear(); modelRequests.clear(); apiChanges.clear();
-  set({ ...initial, phase: 'setup', connections: state.connections, probes: state.probes, ...patch });
+  set({ ...initial, phase: 'setup', connections: state.connections, botGroups: state.botGroups ?? [], probes: state.probes, ...patch });
+}
+
+const BOT_IDENTITY_CONFIRMATION = '此 Bot 绑定缺少已确认的安全身份，请重新确认安全绑定信息；现有凭据和聊天记录保留';
+function botIdentityUnavailable(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'bot_identity_unavailable');
+}
+function savedConnectionFailure(error: unknown, pairedRequest = true) {
+  return botIdentityUnavailable(error)
+    ? { connectionProblem: 'identity' as const, connectionError: BOT_IDENTITY_CONFIRMATION }
+    : connectionFailure(error, pairedRequest);
 }
 
 /** First step: explicitly choose a station and verify its plugin. No model API key is read. */
@@ -1027,9 +1053,9 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
   try {
     const discovery = deferNetwork ? null : await discoverSavedStation(profile.hubUrl);
     if (!current()) return;
-    const token = await connectionToken(profile);
+    const activeOwner = await connectionHub(profile);
     if (!current()) return;
-    if (!token) {
+    if (!activeOwner?.pairToken) {
       if (requireOnline) throw new Error('这条连接的配对已失效，请重新扫码');
       if (options.handoverOperationId) throw new Error('目标中转站的手机配对已失效，请重新扫码');
       if (!await selectConnectionIf(null, current)) return;
@@ -1038,7 +1064,7 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
       hub = { url: profile.hubUrl };
       return;
     }
-    const activeOwner: Hub = { url: profile.hubUrl, pairToken: token, ...(profile.botGroupId ? { botToken: token } : {}), deviceId: profile.deviceId };
+    const token = activeOwner.pairToken;
     // An available Hub does not imply that this exact computer is reachable.
     // Authenticate and verify the target before replacing the old connection.
     pairedRequestIssued = requireOnline;
@@ -1048,7 +1074,12 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
       throw new Error('这台电脑当前离线，请选择可用的连接');
     }
     await clearPendingHandover(options.handoverOperationId);
+    if (profile.botGroupId && await connectionToken(profile) !== token) throw new Error('Bot 组绑定已改变，请刷新后重新选择');
     if (!current() || !await selectConnectionIf(profile.id, current)) return;
+    // The group may be durably revoking while a target probe or selection
+    // write is pending. Never publish the credential captured before that.
+    if (profile.botGroupId && await connectionToken(profile) !== token) throw new Error('Bot 组绑定已改变，请刷新后重新选择');
+    if (!current()) return;
     resetConnection({ phase: 'ready', connectionId: profile.id, selectedHubUrl: profile.hubUrl, signingIn: null,
       connection: confirmedDevices ? 'open' : deferNetwork ? 'idle' : 'connecting',
       ...(confirmedDevices ? { devices: confirmedDevices, devicesLoaded: true } : {}) }, { owner: activeOwner, capabilities: discovery?.capabilities ?? [] });
@@ -1070,7 +1101,7 @@ export async function useSavedConnection(id: string, deferNetwork = false, optio
     if (!current()) return;
     // Preserve the confirmed A-side owner when a handover's target is unavailable.
     if (!requireOnline && !options.handoverOperationId) resetConnection({ phase: 'ready', connectionId: profile.id, selectedHubUrl: profile.hubUrl,
-      signingIn: null, devicesLoaded: true, connection: 'error', ...connectionFailure(error, pairedRequestIssued) });
+      signingIn: null, devicesLoaded: true, connection: 'error', ...savedConnectionFailure(error, pairedRequestIssued) });
     throw error;
   } finally {
     if (generation === connectionGeneration && state.signingIn === id) set({ signingIn: null });
@@ -1190,13 +1221,13 @@ export async function probeSavedConnections(): Promise<Record<string, SavedConne
     while (next < profiles.length) {
       const profile = profiles[next++];
       try {
-        const token = await connectionToken(profile);
-        if (!token) { health[profile.id] = 'reauth'; continue; }
-        const devices = await fetchDevices({ url: profile.hubUrl, pairToken: token, ...(profile.botGroupId ? { botToken: token } : {}), deviceId: profile.deviceId });
+        const owner = await connectionHub(profile);
+        if (!owner) { health[profile.id] = 'reauth'; continue; }
+        const devices = await fetchDevices(owner);
         const device = devices.find(item => item.deviceId === profile.deviceId);
         health[profile.id] = device?.online ? 'online' : 'offline';
       } catch (error) {
-        const problem = connectionProblem(error);
+        const problem = botIdentityUnavailable(error) ? 'identity' : connectionProblem(error);
         health[profile.id] = problem === 'pairing' ? 'reauth' : problem === 'permission' ? 'denied' : problem === 'network' ? 'unreachable' : problem;
       }
     }
@@ -1207,7 +1238,10 @@ export async function probeSavedConnections(): Promise<Record<string, SavedConne
 
 /** Revoke a saved computer directly, without switching the currently open computer. */
 export function revokeRemoteConnectionById(id: string): Promise<void> {
-  return serializeStationChange(() => revokeRemoteConnectionImpl(id));
+  const profile = state.connections.find(item => item.id === id);
+  const group = state.botGroups?.find(item => item.id === id || item.hubUrl === profile?.hubUrl && item.groupId === profile?.botGroupId);
+  const expectedGeneration = profile?.botGeneration ?? group?.generation;
+  return serializeStationChange(() => revokeRemoteConnectionImpl(id, expectedGeneration));
 }
 
 async function retirePairingReceipts(exactScope: string): Promise<void> {
@@ -1219,28 +1253,150 @@ async function retirePairingReceipts(exactScope: string): Promise<void> {
   await retireQuestionScope(exactScope);
 }
 
-async function revokeRemoteConnectionImpl(id: string): Promise<void> {
+/** A durable revocation immediately fences the exact old in-memory owner. */
+async function stopBotGroupRuntime(group: BotGroupRecord): Promise<void> {
+  if (!group.token || hub?.url !== group.hubUrl || hub.botToken !== group.token) return;
+  if (activeBotBinding) {
+    if (activeBotBinding.connectionId !== state.connectionId || activeBotBinding.groupId !== group.groupId
+      || activeBotBinding.hubUrl !== group.hubUrl || activeBotBinding.token !== group.token
+      || activeBotBinding.generation && activeBotBinding.generation !== group.generation) return;
+  } else {
+    const profile = state.connections.find(item => item.id === state.connectionId);
+    if (profile ? profile.hubUrl !== group.hubUrl || profile.botGroupId !== group.groupId
+      || profile.botGeneration && profile.botGeneration !== group.generation
+      : !hub.deviceId || botConnectionId(group.hubUrl, hub.deviceId, group.groupId) !== state.connectionId) return;
+  }
+  resetConnection({ phase: 'pairing', connectionId: null, selectedHubUrl: group.hubUrl,
+    devicesLoaded: true, connection: 'idle' });
+  const generation = connectionGeneration;
+  await selectConnectionIf(null, () => generation === connectionGeneration && !hub && !state.connectionId);
+}
+
+async function retireBotGroupContents(group: BotGroupRecord, captured: RemoteConnection[] = []): Promise<void> {
+  const profiles = [...new Map([...captured, ...await listBotGroupProfiles(group.id, group.generation)]
+    .filter(item => item.hubUrl === group.hubUrl && item.botGroupId === group.groupId
+      && (!item.botGeneration || item.botGeneration === group.generation))
+    .map(item => [item.id, item])).values()];
+  for (const profile of profiles) {
+    const current = await getBotGroup(group.id);
+    const credential = group.token ? deliveryCredentialId(group.token) : group.retiredCredentialId;
+    const replacementCredential = current?.token ? deliveryCredentialId(current.token) : current?.retiredCredentialId;
+    const reusedCredential = current && current.generation !== group.generation && replacementCredential === credential;
+    if (credential && !reusedCredential) {
+      const scope = `${profile.id}|credential:${credential}`;
+      await retirePairingReceipts(scope);
+      await clearRemoteCache(scope, [profile.deviceId]);
+    }
+    // Never remove a newer binding's compatibility cache during old cleanup.
+    const after = await getBotGroup(group.id);
+    if (!after || after.generation === group.generation) {
+      await retirePairingReceipts(profile.id);
+      await clearRemoteCache(profile.id, [profile.deviceId]);
+    }
+  }
+}
+
+async function reconcileBotGroupRuntime(group: BotGroupRecord): Promise<void> {
+  const owner = hub;
+  if (!group.token || owner?.url !== group.hubUrl || owner.botToken !== group.token) return;
+  const generation = connectionGeneration;
+  const profile = state.connections.find(item => item.id === state.connectionId);
+  const token = profile ? await connectionToken(profile) : null;
+  if (owner !== hub || generation !== connectionGeneration) return;
+  if (token !== group.token) await stopBotGroupRuntime(group);
+}
+
+async function settlePreviousBotGroup(group: BotGroupRecord, profiles: RemoteConnection[]): Promise<void> {
+  const current = await getBotGroup(group.id);
+  if (current?.generation === group.generation && current.status === 'revoking') {
+    await stopBotGroupRuntime(group);
+  } else if (current?.generation !== group.generation || current?.status === 'revoked') {
+    await stopBotGroupRuntime(group);
+    await retireBotGroupContents(group, profiles);
+  }
+}
+
+async function runBotGroupRead(id: string, task: () => ReturnType<typeof refreshBotGroup>) {
+  const group = await getBotGroup(id);
+  const profiles = group ? await listBotGroupProfiles(id, group.generation) : [];
+  try {
+    const result = await task();
+    if (group) await settlePreviousBotGroup(group, profiles);
+    await reloadSavedConnections();
+    if (group) await reconcileBotGroupRuntime(group);
+    return result;
+  } catch (error) {
+    // Only the service's same-pin, exact-authentication result may invalidate
+    // disk authority. A generic 403/network failure never means unbound.
+    try { if (group) await settlePreviousBotGroup(group, profiles); }
+    finally { await reloadSavedConnections().catch(() => undefined); }
+    throw error;
+  }
+}
+
+export function importRemoteBotBinding(binding: BotBindingPackage) {
+  return runBotGroupRead(botGroupId(botBindingEndpoint(binding), binding.groupId), () => importBotBinding(binding, {
+    onRetired: async group => {
+      await stopBotGroupRuntime(group);
+      // This callback is only reached after the service durably tombstoned the
+      // old binding. Its revoke path performs local cleanup without a POST.
+      await revokeBotGroup(group.id, { expectedGeneration: group.generation,
+        beforeComplete: retired => retireBotGroupContents(retired) });
+    },
+  }));
+}
+
+/** Explicit group reads do not activate a computer or replay a binding POST. */
+export function refreshRemoteBotGroup(id: string, stillCurrent?: () => boolean) {
+  return runBotGroupRead(id, () => refreshBotGroup(id, stillCurrent));
+}
+
+/** Only a deliberate retry may resend the already-persisted binding attempt. */
+export function retryRemoteBotGroupBinding(id: string) {
+  return runBotGroupRead(id, () => retryBotGroupBinding(id));
+}
+
+/** An anonymous preview is not permission to send the saved phone token. */
+export function previewRemoteBotIdentity(id: string): Promise<LegacyBotIdentityPreview> {
+  return previewLegacyBotIdentity(id);
+}
+
+export function confirmRemoteBotIdentity(id: string, preview: LegacyBotIdentityPreview, stillWanted: () => boolean) {
+  return runBotGroupRead(id, () => confirmLegacyBotIdentity(id, preview, stillWanted));
+}
+
+export function revokeRemoteBotGroup(id: string, expectedGeneration?: string): Promise<void> {
+  return serializeStationChange(() => revokeRemoteBotGroupImpl(id, expectedGeneration));
+}
+
+async function revokeRemoteBotGroupImpl(id: string, expectedGeneration?: string): Promise<void> {
+  try {
+    await revokeBotGroup(id, { expectedGeneration, onRevoking: stopBotGroupRuntime,
+      beforeComplete: group => retireBotGroupContents(group) });
+  } finally {
+    // Unknown network results remain visibly revoking and cannot run tasks.
+    await reloadSavedConnections();
+  }
+}
+
+async function revokeRemoteConnectionImpl(id: string, expectedBotGeneration?: string): Promise<void> {
   const profile = state.connections.find((item) => item.id === id);
+  const botGroups = await loadBotGroups();
+  const botGroup = botGroups.find(group => group.id === id || group.hubUrl === profile?.hubUrl && group.groupId === profile?.botGroupId);
+  if (botGroup) return revokeRemoteBotGroupImpl(botGroup.id, expectedBotGeneration ?? botGroup.generation);
+  if (profile?.botGroupId) throw new Error('Bot 组记录未恢复，请刷新后重试');
   if (!profile) throw new Error('没有找到这台电脑的连接记录');
   const generation = connectionGeneration;
   const selectedId = state.connectionId;
   const selectedOwner = hub;
-  let related = state.connections.filter(item => item.id === profile.id || (profile.botGroupId
-    ? item.botGroupId === profile.botGroupId && item.hubUrl === profile.hubUrl
-    : !item.botGroupId && profile.computerId && item.computerId === profile.computerId));
+  const related = state.connections.filter(item => item.id === profile.id || !item.botGroupId && profile.computerId && item.computerId === profile.computerId);
   const selectedOwnerMatches = selectedOwner?.url === profile.hubUrl && selectedOwner.deviceId === profile.deviceId;
   const wasActiveTarget = profile.id === selectedId && selectedOwnerMatches && Boolean(selectedOwner?.pairToken);
   const targetToken = profile.id === selectedId && selectedOwnerMatches && selectedOwner?.pairToken
     ? selectedOwner.pairToken : await connectionToken(profile);
   if (!targetToken) throw new Error('这台电脑的配对凭证不可用，请重新扫码绑定后再解除');
-  if (profile.botGroupId) {
-    // A rebind may already have replaced one member's credential. Revoke only
-    // the captured group credential, never a newer phone binding in that group.
-    const sameCredential = await Promise.all(related.map(async item => item.id === profile.id || await connectionToken(item) === targetToken));
-    related = related.filter((_item, index) => sameCredential[index]);
-  }
   const owner: Hub = profile.id === selectedId && selectedOwnerMatches && selectedOwner?.pairToken
-    ? selectedOwner : { url: profile.hubUrl, pairToken: targetToken, botToken: profile.botGroupId ? targetToken : undefined, deviceId: profile.deviceId };
+    ? selectedOwner : { url: profile.hubUrl, pairToken: targetToken, deviceId: profile.deviceId };
   const mutation = beginApiMutation(owner, profile.deviceId, 'API 或中转站正在切换，请稍候');
   try {
   // A physical computer may have several station-specific identities. Revoke
@@ -1253,7 +1409,7 @@ async function revokeRemoteConnectionImpl(id: string): Promise<void> {
     const token = item.id === profile.id ? targetToken : await connectionToken(item);
     expectedTokens.set(item.id, token);
     if (!token) return item;
-    try { await revokePair({ url: item.hubUrl, deviceId: item.deviceId, pairToken: token, botToken: item.botGroupId ? token : undefined }); }
+    try { await revokePair({ url: item.hubUrl, deviceId: item.deviceId, pairToken: token }); }
     catch (error) { if (!isPairingAuthenticationError(error)) throw error; }
     return item;
   }));
@@ -1331,11 +1487,13 @@ export async function bootRemote(providers: ProviderProfile[]): Promise<void> {
     await collectRemoteImagesAtStartup().catch(() => undefined);
     await maintainRemoteRecovery();
     if (generation !== connectionGeneration) return;
+    const botGroups = await loadBotGroups().catch(() => []);
+    if (generation !== connectionGeneration) return;
     const connections = await loadConnections().catch(() => []);
     if (generation !== connectionGeneration) return;
     const selected = await selectedConnection().catch(() => null);
     if (generation !== connectionGeneration) return;
-    set({ connections });
+    set({ connections, botGroups });
     if (selected && connections.some((item) => item.id === selected)) {
       await useSavedConnection(selected, true).catch(() => undefined);
       // If the process died after the desktop committed B but before this
@@ -1446,7 +1604,7 @@ export async function signInRemote(service: ProviderProfile): Promise<void> {
     if (committedGeneration !== connectionGeneration) throw new Error('连接选择已改变，请重试');
     await selectConnection(null);
     if (committedGeneration !== connectionGeneration) throw new Error('连接选择已改变，请重试');
-    set({ ...initial, connections: state.connections, phase: paired ? 'ready' : 'pairing', serviceId: service.id, probes: state.probes, signingIn: null });
+    set({ ...initial, connections: state.connections, botGroups: state.botGroups ?? [], phase: paired ? 'ready' : 'pairing', serviceId: service.id, probes: state.probes, signingIn: null });
     if (committedGeneration === connectionGeneration && paired) startDemandConnection();
   } finally {
     if (generation === connectionGeneration && state.signingIn === service.id) set({ signingIn: null });
@@ -1468,7 +1626,7 @@ export async function signOutRemote(): Promise<void> {
   if (generation !== connectionGeneration) return;
   await selectConnection(null).catch(() => undefined);
   if (generation !== connectionGeneration) return;
-  set({ ...initial, phase: 'setup', probes: state.probes, connections: state.connections });
+  set({ ...initial, phase: 'setup', probes: state.probes, connections: state.connections, botGroups: state.botGroups ?? [] });
 }
 
 export async function pairRemote(code: string): Promise<void> {
@@ -1556,6 +1714,23 @@ export async function refreshDevices(quiet = false): Promise<void> {
   const generation = connectionGeneration;
   const revision = ++devicesRevision;
   const current = () => owner === hub && generation === connectionGeneration && revision === devicesRevision;
+  if (owner.botToken) {
+    try {
+      const profile = state.connections.find(item => item.id === state.connectionId);
+      const groups = await loadBotGroups();
+      if (!current()) return;
+      const group = groups.find(item => item.hubUrl === owner.url && item.groupId === profile?.botGroupId);
+      if (!group) throw new Error('Bot 组记录未恢复，请刷新后重试');
+      const result = await refreshRemoteBotGroup(group.id, current);
+      if (!current()) return;
+      const list = result.devices.filter(item => !owner.deviceId || item.deviceId === owner.deviceId);
+      set({ devices: list, devicesLoaded: true, connection: 'open', connectionError: undefined, connectionProblem: undefined });
+    } catch (error) {
+      if (current()) set({ devicesLoaded: true, ...savedConnectionFailure(error, true), connection: 'error' });
+      if (!quiet) throw error;
+    }
+    return;
+  }
   let pairedDevicesRequestIssued = false;
   try {
     if (!hubCapabilities.size) {
@@ -1630,6 +1805,12 @@ export async function refreshDevices(quiet = false): Promise<void> {
 
 function need(): Hub {
   if (!hub?.pairToken) throw new Error('请先扫码配对电脑');
+  if (hub.botToken) {
+    if (!hub.botPin) throw new HubError(BOT_IDENTITY_CONFIRMATION, 409, 'bot_identity_unavailable');
+    const profile = state.connections.find(item => item.id === state.connectionId);
+    const group = state.botGroups?.find(item => item.hubUrl === hub!.url && item.groupId === profile?.botGroupId);
+    if (group && group.status !== 'active') throw new Error('Bot 组尚未确认或正在解除，请先完成组操作');
+  }
   return hub;
 }
 
@@ -1889,6 +2070,7 @@ async function hasPendingDeliveryForDevice(deviceId: string): Promise<boolean> {
 }
 
 async function targetComputerOnline(profile: RemoteConnection): Promise<boolean> {
+  if (profile.botGroupId) return false; // Station handover never uses Bot authority.
   const token = await connectionToken(profile);
   if (!token) return false;
   try {
@@ -1898,6 +2080,7 @@ async function targetComputerOnline(profile: RemoteConnection): Promise<boolean>
 }
 
 async function handoverPayloadApplied(profile: RemoteConnection, intent: PendingStationHandover): Promise<boolean> {
+  if (profile.botGroupId) return false;
   const token = await connectionToken(profile);
   if (!token) return false;
   try {
@@ -1940,7 +2123,7 @@ async function recoverPendingHandover(intent: PendingStationHandover, expectedGe
   if (!stillWanted() || expectedGeneration !== connectionGeneration || expectedOwner !== hub) return false;
   const current = state.connections.find((item) => item.id === state.connectionId);
   const target = state.connections.find((item) => item.id === intent.targetConnectionId);
-  if (!target || !current || current.id !== intent.fromConnectionId || current.deviceId !== intent.deviceId) return false;
+  if (!target || !current || target.botGroupId || current.botGroupId || current.id !== intent.fromConnectionId || current.deviceId !== intent.deviceId) return false;
   if (target.computerId && current.computerId && target.computerId !== current.computerId) return false;
   if (!(await targetComputerOnline(target))) return false;
   if (!stillWanted() || expectedGeneration !== connectionGeneration || expectedOwner !== hub) return false;
@@ -1956,6 +2139,7 @@ async function recoverPendingHandover(intent: PendingStationHandover, expectedGe
 
 /** Same handover UUID and payload, delivered through B's bounded standby lane. */
 async function requestStandbyHandover(target: RemoteConnection, intent: PendingStationHandover, expectedGeneration: number, expectedOwner: Hub, stillWanted: () => boolean = () => true): Promise<void> {
+  if (target.botGroupId || expectedOwner.botToken) throw new Error('Bot 连接不能执行中转站切换');
   const current = () => stillWanted() && expectedGeneration === connectionGeneration && expectedOwner === hub && state.connectionId === intent.fromConnectionId;
   if (!current()) throw new Error('连接选择已取消，请重新选择');
   const discovery = await discoverSavedStation(target.hubUrl);
@@ -2030,7 +2214,7 @@ async function runCommand<T = Record<string, unknown>>(owner: Hub, deviceId: str
     return result;
   } catch (error) {
     if (!quiet && owner === hub && !isExecutionPolicyError(error) && error instanceof HubError && (error.status === 0 || error.status >= 500 || error.status === 401 || error.status === 403 || error.status === 409)) {
-      set({ connection: 'error', ...connectionFailure(error) });
+      set({ connection: 'error', ...savedConnectionFailure(error) });
     }
     throw error;
   }
@@ -2325,7 +2509,9 @@ export async function loadAgentProfiles(deviceId: string): Promise<void> {
     publishAgentStatus(deviceId, parsed);
   } catch (error) {
     if (!current()) return;
-    const message = error instanceof HubError && error.status === 409 ? '电脑不在线' : '没有读到 Agent 信息，请更新电脑端 Salcara Bridge 或重试';
+    const message = botIdentityUnavailable(error) ? BOT_IDENTITY_CONFIRMATION
+      : error instanceof HubError && error.code === 'hub_identity_changed' ? '远程服务身份已改变，已停止发送凭据，请核对服务器身份'
+        : error instanceof HubError && error.status === 409 ? '电脑不在线' : '没有读到 Agent 信息，请更新电脑端 Salcara Bridge 或重试';
     set((previous) => ({ agents: { ...previous.agents, [deviceId]: { ...entry, loading: false, loaded: true, error: message } } }));
     throw new Error(message);
   }
@@ -2617,7 +2803,8 @@ export function hubSupportsPush(): boolean { return hubCapabilities.has('push.fc
 export function pushTarget(): { hub: Hub; deviceId: string } | null {
   // Legacy code pairing has no device in the connection: it pairs exactly one computer.
   const deviceId = hub?.deviceId ?? (state.devices.length === 1 ? state.devices[0].deviceId : undefined);
-  return hub?.pairToken && deviceId ? { hub, deviceId } : null;
+  if (hub?.botToken && !hub.botPin) return null;
+  return hub?.pairToken && deviceId ? { hub: { ...hub, ...(hub.botPin ? { botPin: { ...hub.botPin } } : {}) }, deviceId } : null;
 }
 /** Plain subscription to store changes (outside React). */
 export function onRemoteChange(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; }
@@ -4296,7 +4483,7 @@ export async function listAgentFeatures(deviceId: string, tool: ToolId, target: 
 }
 
 /** Test hook. */
-export function resetRemoteForTests() { if (recoveryMaintenanceTimer) clearInterval(recoveryMaintenanceTimer); recoveryMaintenanceTimer = undefined; agentFeatureCache.clear(); contextSourceGenerations.clear(); contextCompactFlights.clear(); nativeActionFlights.clear(); nativeActionUnconfirmed.clear(); workflowFlights.clear(); workflowUnconfirmed.clear(); sideQuestionFlights.clear(); sideQuestionHeads.clear(); sideQuestionUnconfirmed.clear(); localPromptSequence = 0; remoteContentRecoveryFlight = null; resetRemoteCacheForTests(); resetAttachmentCacheForTests(); modelCache.clear(); modelRequests.clear(); apiChanges.clear(); apiMutationOwners.clear(); apiMutationDevices.clear(); apiReadDevices.clear(); devicesRevision += 1; pairingGeneration += 1; pairingFlights.clear(); handoverRecoveryFlight = null; stationChangeTail = Promise.resolve(); stopStream(); connectionGeneration += 1; probeGeneration += 1; hub = null; lastSeq = 0; booted = false; screenOpen = false; hubCapabilities.clear(); sessionCursors.clear(); sessionEpochs.clear(); sessionSyncTails.clear(); sessionApprovalSnapshots.clear(); incompleteTurnRepairs.clear(); sessionRequests.clear(); snapshotFlights.clear(); agentRequests.clear(); interruptFlights.clear(); resetDeliveryForTests(); state = initial; }
+export function resetRemoteForTests() { activeBotBinding = null; savedConnectionsRevision += 1; if (recoveryMaintenanceTimer) clearInterval(recoveryMaintenanceTimer); recoveryMaintenanceTimer = undefined; agentFeatureCache.clear(); contextSourceGenerations.clear(); contextCompactFlights.clear(); nativeActionFlights.clear(); nativeActionUnconfirmed.clear(); workflowFlights.clear(); workflowUnconfirmed.clear(); sideQuestionFlights.clear(); sideQuestionHeads.clear(); sideQuestionUnconfirmed.clear(); localPromptSequence = 0; remoteContentRecoveryFlight = null; resetRemoteCacheForTests(); resetAttachmentCacheForTests(); modelCache.clear(); modelRequests.clear(); apiChanges.clear(); apiMutationOwners.clear(); apiMutationDevices.clear(); apiReadDevices.clear(); devicesRevision += 1; pairingGeneration += 1; pairingFlights.clear(); handoverRecoveryFlight = null; stationChangeTail = Promise.resolve(); stopStream(); connectionGeneration += 1; probeGeneration += 1; hub = null; lastSeq = 0; booted = false; screenOpen = false; hubCapabilities.clear(); sessionCursors.clear(); sessionEpochs.clear(); sessionSyncTails.clear(); sessionApprovalSnapshots.clear(); incompleteTurnRepairs.clear(); sessionRequests.clear(); snapshotFlights.clear(); agentRequests.clear(); interruptFlights.clear(); resetDeliveryForTests(); state = initial; }
 
 
 // Cross-task messages are explicit phone-user submissions. Native peer events
