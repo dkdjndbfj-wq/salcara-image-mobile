@@ -197,8 +197,16 @@ test('notification targets are group-scoped and disappear as soon as revocation 
   const bot = targets.find(item => item.hub.botToken)!;
   const pair = targets.find(item => !item.hub.botToken)!;
   expect(bot.notificationScope).not.toBe(pair.notificationScope);
-  expect(await resolveNotificationTarget(bot.notificationScope, 'a')).toEqual(bot);
+  const resolved = await resolveNotificationTarget(bot.notificationScope, 'a');
+  expect(resolved).toEqual({ ...bot, hub: { ...bot.hub, authorizeDispatch: expect.any(Function) } });
+  // Each snapshot owns a fresh authority closure, while its public identity
+  // and credentials remain exact. Neither closure survives a durable revoke.
+  expect(resolved!.hub.authorizeDispatch).not.toBe(bot.hub.authorizeDispatch);
   await beginBotGroupRevocation(group);
+  const dispatch = jest.fn();
+  expect(await bot.hub.authorizeDispatch!(dispatch)).toBeNull();
+  expect(await resolved!.hub.authorizeDispatch!(dispatch)).toBeNull();
+  expect(dispatch).not.toHaveBeenCalled();
   expect(await resolveNotificationTarget(bot.notificationScope, 'a')).toBeNull();
   expect(await loadNotificationTargets()).toEqual([pair]);
 });

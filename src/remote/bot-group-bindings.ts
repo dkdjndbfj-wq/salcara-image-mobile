@@ -4,7 +4,7 @@ import {
   revokeBotPhone, verifyBotBindingStation, type BotBindingPackage, type BotBindingPin, type DeviceStatus, type Hub, type VerifiedBotStation,
 } from './client';
 import {
-  beginBotGroupRevocation, botBindingFingerprint, botConnectionId, botGroupId,
+  authorizeBotGroupDispatch, beginBotGroupRevocation, botBindingFingerprint, botConnectionId, botGroupId,
   commitBotGroupMembers, completeBotGroupRevocation, confirmLegacyBotGroupPin, getBotGroup, invalidateBotGroup,
   loadConnections, prepareBotGroup, type BotGroupRecord, type BotGroupState, type RemoteConnection,
 } from './connections';
@@ -33,7 +33,8 @@ function nextRead(id: string): () => boolean {
 function changed(): HubError { return new HubError('Bot 绑定已变更，请刷新后重试', 409, 'bot_binding_changed'); }
 function pinnedHub(record: BotGroupRecord): Hub {
   if (!record.pin) throw new HubError('此 Bot 绑定缺少已确认的服务身份，已保留凭据并暂停连接，请联系管理员确认原组', 409, 'bot_identity_unavailable');
-  return { url: record.hubUrl, botToken: record.token, botPin: { ...record.pin } };
+  return { url: record.hubUrl, botToken: record.token, botPin: { ...record.pin },
+    authorizeDispatch: dispatch => authorizeBotGroupDispatch(record, dispatch) };
 }
 function credentialsInvalid(error: unknown): error is HubError {
   return error instanceof HubError && error.status === 403 && error.code === 'bot_credentials_invalid';

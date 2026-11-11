@@ -854,10 +854,11 @@ export function onRemoteEvent(listener: (event: HubEvent) => void): () => void {
 }
 export function isRemoteScreenOpen(): boolean { return screenOpen; }
 /** Credential snapshot for scoped workspace requests and supported native watchers; never persisted. */
-export function watchCredentials(): { url: string; key?: string; pairToken?: string; botToken?: string; botPin?: Hub['botPin'] } | null {
+export function watchCredentials(): Omit<Hub, 'deviceId'> | null {
   if (hub?.botToken && !hub.botPin) return null;
   return hub?.pairToken ? { url: hub.url, key: hub.key, pairToken: hub.pairToken,
-    ...(hub.botToken ? { botToken: hub.botToken, botPin: { ...hub.botPin! } } : {}) } : null;
+    ...(hub.botToken ? { botToken: hub.botToken, botPin: { ...hub.botPin! }, authorizeDispatch: hub.authorizeDispatch,
+      dispatchGuard: hub.dispatchGuard, captureDispatchGuard: hub.captureDispatchGuard } : {}) } : null;
 }
 export function sessionCursor(deviceId: string, sessionKey: string): number { return sessionCursors.get(timelineKey(deviceId, sessionKey)) ?? 0; }
 
@@ -950,6 +951,17 @@ function resetConnection(patch: Partial<RemoteState>, active?: { owner: Hub; cap
   agentFeatureCache.clear();
   contextSourceGenerations.clear(); contextCompactFlights.clear(); nativeActionFlights.clear(); nativeActionUnconfirmed.clear(); workflowFlights.clear(); workflowUnconfirmed.clear(); sideQuestionFlights.clear(); sideQuestionHeads.clear(); sideQuestionUnconfirmed.clear();
   stopStream(); connectionGeneration += 1; hub = active?.owner ?? null; lastSeq = 0;
+  if (hub?.botToken) {
+    const owner = hub, inheritedCapture = owner.captureDispatchGuard;
+    // Keep owner identity intact. Capture lifetime at request start, so a
+    // cancelled selection invalidates old requests without disabling new ones
+    // on the retained runtime. Independently loaded background Hubs stay free
+    // of this foreground selection guard.
+    owner.captureDispatchGuard = () => {
+      const generation = connectionGeneration, pairing = pairingGeneration, inherited = inheritedCapture?.();
+      return () => hub === owner && generation === connectionGeneration && pairing === pairingGeneration && (!inherited || inherited());
+    };
+  }
   hubCapabilities = new Set(active?.capabilities ?? []); sessionCursors.clear(); sessionEpochs.clear(); sessionApprovalSnapshots.clear(); incompleteTurnRepairs.clear(); sessionRequests.clear(); snapshotFlights.clear(); modelCache.clear(); modelRequests.clear(); apiChanges.clear();
   set({ ...initial, phase: 'setup', connections: state.connections, botGroups: state.botGroups ?? [], probes: state.probes, ...patch });
 }

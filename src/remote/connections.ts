@@ -129,6 +129,43 @@ async function writeBotGroup(record: BotGroupRecord): Promise<void> {
 function sameBotGeneration(actual: BotGroupRecord | null, expected: BotGroupRecord): actual is BotGroupRecord {
   return Boolean(actual && actual.id === expected.id && actual.generation === expected.generation && actual.token === expected.token);
 }
+type BotDispatchIdentity = Readonly<Pick<BotGroupRecord, 'id' | 'hubUrl' | 'groupId' | 'generation' | 'status' | 'token'>> & {
+  readonly pin?: Readonly<BotHubPin>;
+};
+function captureBotDispatchIdentity(group: BotGroupRecord): BotDispatchIdentity {
+  return Object.freeze({ id: group.id, hubUrl: group.hubUrl, groupId: group.groupId, generation: group.generation,
+    status: group.status, token: group.token, ...(group.pin ? { pin: Object.freeze({ ...group.pin }) } : {}) });
+}
+function sameBotDispatchIdentity(actual: BotGroupRecord | null, expected: BotDispatchIdentity): boolean {
+  return Boolean(actual && expected.status !== 'revoked' && expected.token && expected.pin
+    && actual.id === expected.id && actual.hubUrl === expected.hubUrl && actual.groupId === expected.groupId
+    && actual.generation === expected.generation && actual.status === expected.status && actual.token === expected.token
+    && actual.pin?.instanceId === expected.pin.instanceId && actual.pin?.publicKey === expected.pin.publicKey);
+}
+/** Group recovery and revocation have authority even without any projected member.
+ * Capture before enqueueing: an active request cannot borrow later revoking authority. */
+export function authorizeBotGroupDispatch<T>(expected: BotGroupRecord, dispatch: () => T): Promise<{ value: T } | null> {
+  const identity = captureBotDispatchIdentity(expected);
+  return mutate(async () => {
+    if (!sameBotDispatchIdentity(await readBotGroup(identity.id), identity)) return null;
+    // Launch in the same queue as revoke, but never await network I/O here.
+    // The envelope prevents Promise assimilation from holding the queue open.
+    return { value: dispatch() };
+  });
+}
+function botConnectionAuthorizer(group: BotGroupRecord, profile: RemoteConnection): NonNullable<Hub['authorizeDispatch']> {
+  const identity = captureBotDispatchIdentity(group);
+  const member = Object.freeze({ id: profile.id, hubUrl: profile.hubUrl, deviceId: profile.deviceId,
+    botGroupId: profile.botGroupId, botGeneration: profile.botGeneration });
+  return <T>(dispatch: () => T) => mutate(async (): Promise<{ value: T } | null> => {
+    if (identity.status !== 'active' || !sameBotDispatchIdentity(await readBotGroup(identity.id), identity)) return null;
+    const saved = (await readConnectionIndex()).find(item => item.id === member.id);
+    // Retirement receipts are not membership and cannot authorize dispatch.
+    if (!saved || saved.hubUrl !== member.hubUrl || saved.deviceId !== member.deviceId || saved.botGroupId !== member.botGroupId
+      || saved.botGeneration !== member.botGeneration || saved.botGeneration !== identity.generation) return null;
+    return { value: dispatch() };
+  });
+}
 async function migrateBotGroup(id: string): Promise<BotGroupRecord | null> {
   const current = await readBotGroup(id);
   if (current) {
@@ -424,7 +461,7 @@ async function readConnectionHub(profile: RemoteConnection, omitUnconfirmedIdent
     throw Object.assign(new Error('旧 Bot 绑定尚未确认服务器安全身份，凭据已保留，请先核对并确认身份'), { code: 'bot_identity_unavailable' });
   }
   return { url: saved.hubUrl, deviceId: saved.deviceId, pairToken: token,
-    ...(saved.botGroupId ? { botToken: token, botPin: { ...group!.pin! } } : {}) };
+    ...(saved.botGroupId ? { botToken: token, botPin: { ...group!.pin! }, authorizeDispatch: botConnectionAuthorizer(group!, saved) } : {}) };
 }
 export function connectionHub(profile: RemoteConnection): Promise<Hub | null> { return mutate(() => readConnectionHub(profile)); }
 /** Index and keychain reads share the binding mutation queue, including re-pair/revoke. */

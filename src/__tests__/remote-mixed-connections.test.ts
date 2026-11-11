@@ -1,7 +1,7 @@
 import { bindBotPhone, botBindingEndpoint, devices, parseBotBindingPackage, setHubFetch as setRawHubFetch, type FetchLike } from '../remote/client';
 import { botConnectionId, botGroupId, confirmLegacyBotGroupPin, getBotGroup, connectionId, connectionToken, loadConnections, loadNotificationTargets, resolveNotificationTarget, onConnectionBindingsChange, forgetConnection, saveBotConnections as saveLegacyBotConnections, saveConnection, selectedConnection, type RemoteConnection } from '../remote/connections';
 import { botStationFixture } from './fixtures/bot-station';
-import { bootRemote, getRemoteState, probeSavedConnections, refreshDevices, reloadSavedConnections, resetRemoteForTests, revokeRemoteConnectionById, useSavedConnection, watchCredentials } from '../remote/store';
+import { bootRemote, getRemoteState, loadAgentProfiles, probeSavedConnections, refreshDevices, reloadSavedConnections, resetRemoteForTests, revokeRemoteConnectionById, useSavedConnection, watchCredentials } from '../remote/store';
 
 const mockSettings = new Map<string, string>(), mockSecrets = new Map<string, string>();
 const mockWriteSetting = jest.fn();
@@ -52,6 +52,27 @@ beforeEach(() => {
   setHubFetch(transport);
 });
 afterEach(() => { resetRemoteForTests(); setHubFetch(null); });
+
+test.each([
+  [403, 'bot_credentials_invalid', 'pairing'],
+  [403, 'unknown_policy', 'permission'],
+  [503, 'bot_phone_revoke_pending', 'unavailable'],
+] as const)('ordinary Bot command HTTP %s %s labels the connection without generic binding cleanup', async (status, code, problem) => {
+  await saveMixed(); await useSavedConnection(profile('a', 'group').id);
+  const selected = getRemoteState().connectionId;
+  setHubFetch(async (endpoint, init) => {
+    if (endpoint.endsWith('/app/commands')) {
+      expect(init.headers).toMatchObject({ 'X-Salcara-Bot-Token': botToken });
+      return reply({ code, error: `private-${botToken}` }, status);
+    }
+    return transport(endpoint, init);
+  });
+  await expect(loadAgentProfiles('a')).rejects.toThrow();
+  expect(getRemoteState()).toMatchObject({ connection: 'error', connectionProblem: problem, connectionId: selected });
+  expect(getRemoteState().connectionError).not.toContain(botToken);
+  expect(await connectionToken(profile('a', 'group'))).toBe(botToken);
+  expect((await getBotGroup(botGroupId(hubUrl, 'group')))?.status).toBe('active');
+});
 
 test('Bot import retains verified computer identities with identical display names through persistence and restart', async () => {
   setHubFetch(async () => reply({ groupId: 'group', botToken, devices: [

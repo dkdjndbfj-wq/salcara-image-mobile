@@ -346,6 +346,31 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
       return active() && current.epoch === epoch;
     } catch { return false; }
   }
+  /** A saved Bot group may restore routing with its own durable identity even
+   * when the shared cache is empty. It cannot replace another binding's pin. */
+  async function adoptPinnedBotManifest(canonical: string, value: unknown, expectedPin: { instanceId: string; publicKey: string }, active: () => boolean): Promise<boolean> {
+    if (!apiUrl(canonical) || !active()) return false;
+    const anchor = { ...expectedPin };
+    try {
+      if (!/^[a-f0-9]{32}$/.test(anchor.instanceId)) return false;
+      base64(anchor.publicKey, 32);
+      const current = entry(canonical); await current.loaded;
+      const previous = current.manifest, epoch = current.epoch;
+      const matches = (manifest: IngressManifest) => manifest.hub_instance_id === anchor.instanceId && manifest.identity_public_key === anchor.publicKey;
+      const wanted = () => active() && entries.get(canonical) === current && current.epoch === epoch
+        && current.confirming === undefined && current.manifest === previous;
+      if (!wanted() || previous && !matches(previous)) return false;
+      const next = parseIngressManifest(value, canonical, now(), true, false);
+      if (!next.signature || !matches(next) || previous && (next.revision < previous.revision
+        || next.revision === previous.revision && next.expires_at < previous.expires_at)) return false;
+      // Save only public, signed routing metadata. This grants no proof lease;
+      // the first authenticated request must still renew/prove its endpoint.
+      await persist(canonical, current, next, epoch, wanted);
+      if (!wanted()) return false;
+      current.manifest = next; current.leases.clear(); current.failed.clear(); current.retryAt = 0;
+      return true;
+    } catch { return false; }
+  }
   /** A successful, explicitly confirmed new QR binding may replace a reset Hub's pin. */
   async function confirmPairingIdentity(canonical: string, active: () => boolean): Promise<void> {
     const current = entry(canonical); await current.loaded;
@@ -369,7 +394,7 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
     const value = entries.get(canonical)?.manifest;
     return value ? JSON.parse(JSON.stringify(value.signature ? value : { ...value, endpoints: value.endpoints.filter(endpoint => endpoint.url === canonical) })) : undefined;
   }
-  return { refresh, resolve, fetch, fail, verifyAlias, adoptPinnedManifest, confirmPairingIdentity, pinSnapshot,
+  return { refresh, resolve, fetch, fail, verifyAlias, adoptPinnedManifest, adoptPinnedBotManifest, confirmPairingIdentity, pinSnapshot,
     isConfirming(canonical: string): boolean { return entries.get(canonical)?.confirming !== undefined; },
     hasIdentityMismatch(canonical: string): boolean { return entries.get(canonical)?.invalidIdentity === true; },
     isVerifiedPinnedEndpoint(canonical: string, endpoint: string, expected: { instanceId: string; publicKey: string }): boolean {
