@@ -37,6 +37,7 @@ class SalcaraNotifyModule : Module() {
 
     OnDestroy {
       tokenListener = null
+      SalcaraNotificationCenter.setVisible(null, null)
     }
 
     Function("setNotificationsEnabled") { enabled: Boolean ->
@@ -44,15 +45,42 @@ class SalcaraNotifyModule : Module() {
         context.getSharedPreferences("salcara_remote_notifications", Context.MODE_PRIVATE)
           .edit().putBoolean("enabled", enabled).commit()
         if (!enabled) {
-          SalcaraWatchService.clearConfiguration(context, "disabled")
-          context.stopService(Intent(context, SalcaraWatchService::class.java))
           if (Build.VERSION.SDK_INT >= 26) {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.activeNotifications.filter { it.notification.channelId == TASK_CHANNEL || it.notification.channelId == WATCH_CHANNEL }
-              .forEach { manager.cancel(it.id) }
+            manager.activeNotifications.filter { it.notification.channelId in listOf(TASK_CHANNEL, QUIET_CHANNEL, WATCH_CHANNEL) }
+              .forEach { manager.cancel(it.tag, it.id) }
           }
         }
       }
+      // Never acquire the watch configuration monitor while holding the posting
+      // monitor: a worker may be updating its ongoing notification at this instant.
+      if (!enabled) {
+        SalcaraWatchService.clearConfiguration(context, "disabled")
+        context.stopService(Intent(context, SalcaraWatchService::class.java))
+      }
+    }
+
+    Function("setNotificationTargets") { json: String ->
+      try {
+        val saved = SalcaraNotificationCenter.setTargets(context, json)
+        if (saved) SalcaraWatchService.targetsChanged(context)
+        else SalcaraWatchService.reportConfigurationFailure(context, "storage")
+        saved
+      } catch (_: IllegalArgumentException) {
+        SalcaraNotificationCenter.blockTargets(context)
+        SalcaraWatchService.reportConfigurationFailure(context, "capacity")
+        false
+      } catch (_: org.json.JSONException) {
+        SalcaraNotificationCenter.blockTargets(context)
+        SalcaraWatchService.reportConfigurationFailure(context, "configuration")
+        false
+      }
+    }
+    Function("setVisibleNotificationTarget") { scope: String?, sessionKey: String? ->
+      SalcaraNotificationCenter.setVisible(scope, sessionKey)
+    }
+    Function("admitNotification") { id: String, payload: String ->
+      SalcaraNotificationCenter.admit(context, id, org.json.JSONObject(payload))
     }
 
     // Firebase token for Hub push, or null when this build / phone cannot receive
@@ -91,8 +119,7 @@ class SalcaraNotifyModule : Module() {
     }
 
     AsyncFunction("notify") { id: String, title: String, body: String, payload: String ->
-      ensureChannels(context)
-      postTaskNotification(context, id.hashCode(), build(context, TASK_CHANNEL, title, body, payload, false))
+      SalcaraNotificationCenter.submit(context, id, title, body, org.json.JSONObject(payload))
     }
 
     AsyncFunction("startWatch") { title: String, body: String ->
@@ -148,6 +175,7 @@ class SalcaraNotifyModule : Module() {
     /** Set while the JS module is alive; SalcaraPushService reports new Firebase tokens here. */
     @Volatile var tokenListener: ((String) -> Unit)? = null
     const val TASK_CHANNEL = "salcara_tasks"
+    const val QUIET_CHANNEL = "salcara_task_digest"
     const val WATCH_CHANNEL = "salcara_watch"
     const val EXTRA_PAYLOAD = "salcara_notification"
     private val notificationLock = Any()
@@ -169,20 +197,32 @@ class SalcaraNotifyModule : Module() {
         catch (error: SecurityException) { /* Android permission may be revoked while a request is in flight. */ }
       }
     }
-
-    private fun startWatchIfEnabled(context: Context, intent: Intent): Boolean = synchronized(notificationLock) {
+    fun postTaggedNotification(context: Context, tag: String, notification: Notification): Boolean = synchronized(notificationLock) {
       if (!notificationsAllowed(context)) false else try {
-        val request = SalcaraWatchService.prepareStart(intent)
-        if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(request) else context.startService(request)
+        (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(tag, 0, notification)
         true
-      } catch (error: Exception) { false }
+      } catch (_: SecurityException) { false }
+    }
+
+    private fun startWatchIfEnabled(context: Context, intent: Intent): Boolean {
+      val request = SalcaraWatchService.prepareStart(intent)
+      return synchronized(notificationLock) {
+        if (!notificationsAllowed(context)) false else try {
+          if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(request) else context.startService(request)
+          true
+        } catch (error: Exception) { false }
+      }
     }
 
     fun ensureChannels(context: Context) {
       if (Build.VERSION.SDK_INT < 26) return
       val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
       manager.createNotificationChannel(NotificationChannel(TASK_CHANNEL, "编程任务", NotificationManager.IMPORTANCE_HIGH).apply {
-        description = "电脑上的任务完成、失败或收到最终回复时提醒"
+        description = "任务结果、失败、批准请求和需要回答的问题"
+      })
+      manager.createNotificationChannel(NotificationChannel(QUIET_CHANNEL, "任务结果汇总", NotificationManager.IMPORTANCE_LOW).apply {
+        description = "密集完成与回复安静合并，重要请求单独提醒"
+        setSound(null, null)
       })
       manager.createNotificationChannel(NotificationChannel(WATCH_CHANNEL, "正在运行的任务", NotificationManager.IMPORTANCE_LOW).apply {
         description = "任务运行期间保持连接，完成后自动消失"
@@ -195,9 +235,12 @@ class SalcaraNotifyModule : Module() {
       return if (custom != 0) custom else context.applicationInfo.icon
     }
 
-    fun build(context: Context, channel: String, title: String, body: String, payload: String?, ongoing: Boolean, actions: List<Notification.Action> = emptyList()): Notification {
+    fun build(context: Context, channel: String, title: String, body: String, payload: String?, ongoing: Boolean, actions: List<Notification.Action> = emptyList(), alertOnce: Boolean = true, expiresAt: Long? = null): Notification {
       val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        // PendingIntent identity ignores extras; a hash collision must not open
+        // another computer's thread. The explicit app activity still receives this.
+        data = android.net.Uri.parse("salcara-notification://open/" + android.net.Uri.encode(payload ?: channel))
         if (payload != null) putExtra(EXTRA_PAYLOAD, payload)
       }
       val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
@@ -213,8 +256,10 @@ class SalcaraNotifyModule : Module() {
         .setOngoing(ongoing)
         // Completion can follow the final-reply event for the same turn; reuse
         // one stable notification id without showing a second heads-up banner.
-        .setOnlyAlertOnce(true)
+        .setOnlyAlertOnce(alertOnce)
         .setAutoCancel(!ongoing)
+      if (Build.VERSION.SDK_INT >= 26 && expiresAt != null) builder.setTimeoutAfter((expiresAt - System.currentTimeMillis()).coerceAtLeast(1))
+      if (Build.VERSION.SDK_INT < 26 && channel == QUIET_CHANNEL) builder.setPriority(Notification.PRIORITY_LOW).setSound(null)
       if (content != null) builder.setContentIntent(content)
       actions.forEach { builder.addAction(it) }
       return builder.build()

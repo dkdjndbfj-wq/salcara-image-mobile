@@ -55,7 +55,7 @@ fun main() {
     check(!SalcaraWatchRecovery.validConfig(config().put("pairToken", "bad\r\nheader")))
   }
   test("unbounded sessions and oversized content cannot be restored") {
-    val sessions = JSONArray(); repeat(17) { sessions.put(JSONObject().put("deviceId", "pc-$it").put("sessionKey", "s")) }
+    val sessions = JSONArray(); repeat(SalcaraWatchRecovery.MAX_SESSIONS + 1) { sessions.put(JSONObject().put("deviceId", "pc-1").put("sessionKey", "s$it")) }
     check(!SalcaraWatchRecovery.validConfig(config().put("sessions", sessions)))
     check(!SalcaraWatchRecovery.validConfig(config().put("padding", "x".repeat(SalcaraWatchRecovery.MAX_BYTES))))
     check(!SalcaraWatchRecovery.validConfig(config().put("sessions", JSONArray())))
@@ -66,6 +66,36 @@ fun main() {
     check(!SalcaraWatchRecovery.validConfig(value))
     value.getJSONArray("sessions").getJSONObject(0).put("after", 0).put("sessionKey", "bad|scope")
     check(!SalcaraWatchRecovery.validConfig(value))
+  }
+  test("five or more sessions promote to bounded device observation without truncation") {
+    val sessions = JSONArray(); repeat(30) { sessions.put(JSONObject().put("deviceId", "pc-1").put("sessionKey", "s$it").put("after", 100 + it)) }
+    val value = SalcaraWatchRecovery.normalized(config().put("sessions", sessions))!!
+    check(value.getJSONArray("sessions").length() == 30 && value.getBoolean("deviceMode"))
+    check(value.getJSONArray("devices").length() == 1 && value.getJSONArray("devices").getJSONObject(0).getLong("after") == 100L)
+    val stored = SalcaraWatchRecovery.create(value, now, false, now)!!
+    check(stored.getLong("expiresAt") == now + SalcaraWatchRecovery.TASK_TTL)
+  }
+  test("schema two retains distinct Bot and relay authority, cursors and bounded lease") {
+    val relay = config(true)
+    val bot = config(true).put("navigationScope", "ns1_" + "b".repeat(64)).put("pairToken", "").put("botToken", "synthetic-bot")
+    bot.getJSONArray("devices").getJSONObject(0).put("after", 900)
+    val multi = JSONObject().put("schema", 2).put("version", 133).put("follow", true).put("standby", true).put("connections", JSONArray().put(relay).put(bot))
+    check(SalcaraWatchRecovery.validConfig(multi))
+    val restored = SalcaraWatchRecovery.validate(SalcaraWatchRecovery.create(multi, now, true, now)!!, now + 1)!!
+    val children = SalcaraWatchRecovery.connections(restored.getJSONObject("config"))
+    check(children.size == 2 && children[0].getJSONArray("devices").getJSONObject(0).getLong("after") == 12L && children[1].getJSONArray("devices").getJSONObject(0).getLong("after") == 900L)
+    check(SalcaraWatchRecovery.requestHeaders(bot.put("pairToken", "must-never-send")) == mapOf("X-Salcara-Bot-Token" to "synthetic-bot"))
+    check(SalcaraWatchRecovery.requestHeaders(relay).keys == setOf("X-Salcara-Pair-Token"))
+    check(!SalcaraWatchRecovery.validConfig(JSONObject(multi.toString()).put("standby", false)))
+    check(!SalcaraWatchRecovery.validConfig(JSONObject(multi.toString()).put("connections", JSONArray().put(relay).put(relay))))
+    val tooMany = JSONArray(); repeat(65) { tooMany.put(relay) }
+    check(!SalcaraWatchRecovery.validConfig(JSONObject(multi.toString()).put("connections", tooMany)))
+  }
+  test("session updated cannot retire a watch before the actual parent terminal event") {
+    check(!SalcaraWatchRecovery.isTerminalEvent(JSONObject().put("type", "session.updated").put("session", JSONObject().put("status", "idle"))))
+    check(!SalcaraWatchRecovery.isTerminalEvent(JSONObject().put("type", "turn").put("status", "failed").put("parentId", "parent")))
+    check(SalcaraWatchRecovery.isTerminalEvent(JSONObject().put("type", "turn").put("status", "failed")))
+    check(!SalcaraWatchRecovery.isTerminalEvent(JSONObject().put("type", "message").put("final", true)))
   }
   test("new pairing with the same device ID never inherits the old pairing cursor") {
     val a = config(true)
@@ -101,6 +131,20 @@ fun main() {
       check(SalcaraWatchRecovery.withIngressManifest(stored, next, next, envelope, now) == null)
     }
     check(SalcaraWatchRecovery.withIngressManifest(stored, current, current, envelope, now + SalcaraWatchRecovery.TASK_TTL) == null)
+  }
+  test("multi-target ingress handoff preserves both computers' cursors and rejects foreign Bot credentials") {
+    val a = config(true); val b = config(true).put("navigationScope", "ns1_" + "b".repeat(64)).put("pairToken", "").put("botToken", "synthetic-bot")
+    val multi = JSONObject().put("schema", 2).put("follow", true).put("standby", true).put("connections", JSONArray().put(a).put(b))
+    val stored = SalcaraWatchRecovery.create(multi, now - 10, true, now)!!
+    SalcaraWatchRecovery.connections(stored.getJSONObject("config"))[1].getJSONArray("devices").getJSONObject(0).put("after", 900)
+    val merged = SalcaraWatchRecovery.withConnectionIngressManifest(stored, multi, b, envelope, now)!!
+    check(merged.getLong("expiresAt") == stored.getLong("expiresAt"))
+    val children = SalcaraWatchRecovery.connections(merged.getJSONObject("config"))
+    check(!children[0].has("ingressManifest") && children[1].has("ingressManifest"))
+    check(children[1].getJSONArray("devices").getJSONObject(0).getLong("after") == 900L)
+    check(SalcaraWatchRecovery.withConnectionIngressManifest(stored, multi, JSONObject(b.toString()), envelope, now) == null)
+    b.put("botToken", "changed")
+    check(SalcaraWatchRecovery.withConnectionIngressManifest(stored, multi, b, envelope, now) == null)
   }
   test("public ingress handoff exposes only namespace and original envelope fields") {
     val current = config().put("ingressManifest", JSONObject(envelope.toString()).put("pairToken", "must-not-export"))

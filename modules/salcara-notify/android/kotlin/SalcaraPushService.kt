@@ -18,8 +18,6 @@ class SalcaraPushService : FirebaseMessagingService() {
     val data = message.data
     if (data["type"] != "salcara.task") return
     if (!SalcaraNotifyModule.notificationsAllowed(this)) return
-    // In the foreground the app shows this itself.
-    if (inForeground(this)) return
     val deviceId = data["deviceId"].orEmpty()
     val sessionKey = data["sessionKey"].orEmpty()
     val id = data["id"].orEmpty()
@@ -29,15 +27,32 @@ class SalcaraPushService : FirebaseMessagingService() {
       "done" -> "$agent 完成了任务" to "点开查看结果"
       "failed" -> "$agent 的任务没有完成" to "点开查看原因"
       "reply" -> "$agent 有新回复" to "点开查看回复"
+      "approval" -> "$agent 需要批准" to "点开处理请求"
+      "question" -> "$agent 需要你回答" to "点开查看问题"
+      "resolved" -> "请求已处理" to ""
       else -> return
     }
     SalcaraNotifyModule.ensureChannels(this)
-    val scope = data["notificationScope"].orEmpty().takeIf { it.matches(Regex("ns1_[a-f0-9]{64}")) }
+    val scope = data["notificationScope"].orEmpty().takeIf { it.matches(Regex("ns1_[a-f0-9]{64}")) } ?: return
+    if (!SalcaraNotificationCenter.permits(this, scope, deviceId)) return
     val payload = JSONObject().put("deviceId", deviceId).put("sessionKey", sessionKey)
-      .apply { if (scope != null) put("notificationScope", scope) }.toString()
-    // The same device/thread IDs may exist on another Hub or a new pairing.
-    val notificationId = "${scope ?: "legacy"}:$id".hashCode()
-    SalcaraNotifyModule.postTaskNotification(this, notificationId, SalcaraNotifyModule.build(this, SalcaraNotifyModule.TASK_CHANNEL, title, body, payload, false))
+      .put("notificationScope", scope).put("kind", data["kind"])
+    for (field in listOf("eventTs", "ts", "expiresAt")) data[field]?.toLongOrNull()?.let { payload.put(field, it) }
+    data["approvalId"]?.let { payload.put("approvalId", it) }
+    data["turnRef"]?.let { payload.put("turnRef", it) }
+    // Metadata from newer Hubs lets all three channels share the legacy-turn adapter.
+    data["event"]?.let { try { payload.put("event", JSONObject(it)) } catch (_: Exception) { } }
+    data["eventType"]?.let { type ->
+      val event = JSONObject().put("type", type)
+      for (field in listOf("status", "role", "messagePhase", "parentId", "turnId", "approvalId")) data[field]?.let { event.put(field, it) }
+      data["eventId"]?.let { event.put("id", it) }
+      data["final"]?.let { event.put("final", it == "true" || it == "1") }
+      for (field in listOf("seq", "ts", "expiresAt")) data[field]?.toLongOrNull()?.let { event.put(field, it) }
+      if (!event.has("ts")) data["eventTs"]?.toLongOrNull()?.let { event.put("ts", it) }
+      if (type == "approval.request") event.put("kind", if (data["kind"] == "question") "question" else "approval")
+      payload.put("event", event)
+    }
+    SalcaraNotificationCenter.submit(this, id, title, body, payload)
   }
 
   override fun onNewToken(token: String) {
