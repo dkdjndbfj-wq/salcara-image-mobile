@@ -1,6 +1,6 @@
 import * as client from '../remote/client';
 import { HubError, type BotBindingPackage, type DeviceStatus } from '../remote/client';
-import { beginBotGroupRevocation, botConnectionId, botGroupId, connectionToken, deliveryCredentialId, getBotGroup, listBotGroupProfiles, loadBotGroups, loadConnections, saveBotConnections, selectConnection, selectedConnection } from '../remote/connections';
+import { beginBotGroupRevocation, botBindingFingerprint, botConnectionId, botGroupId, commitBotGroupMembers, completeBotGroupRevocation, connectionToken, deliveryCredentialId, getBotGroup, listBotGroupProfiles, loadBotGroups, loadConnections, prepareBotGroup, saveBotConnections, selectConnection, selectedConnection } from '../remote/connections';
 import { confirmLegacyBotIdentity, importBotBinding, previewLegacyBotIdentity, refreshBotGroup, retryBotGroupBinding, revokeBotGroup } from '../remote/bot-group-bindings';
 
 const mockSettings = new Map<string, string>(), mockSecrets = new Map<string, string>();
@@ -369,4 +369,120 @@ test('legacy confirmation rejects a global identity change while saving the pin'
   });
   await expect(confirmLegacyBotIdentity(id, preview)).rejects.toMatchObject({ code: 'bot_binding_changed' });
   expect(read).not.toHaveBeenCalled(); expect(bind).not.toHaveBeenCalled();
+});
+
+test.each(['empty', 'members'] as const)('a late accepted first bind survives invite-only withdrawal and restores %s from the original token', async resultKind => {
+  // The first POST lost its transport response, but can still commit at Hub.
+  bind.mockRejectedValueOnce(new HubError('first response lost', 0, 'hub_unreachable'));
+  await expect(importBotBinding(binding)).rejects.toMatchObject({ code: 'hub_unreachable' });
+  const pending = (await getBotGroup(id))!;
+  const list = resultKind === 'empty' ? [] : members();
+  read.mockRejectedValueOnce(invalid()); // Not committed when recovery first checked.
+  bind.mockImplementationOnce(async (_package, _phone, attempt) => {
+    expect(attempt).toEqual({ attemptId: pending.attemptId, phoneToken: pending.token });
+    // Original POST commits; the administrator then withdraws only invitations.
+    // The phone token remains valid even though this exact bind replay is denied.
+    server.set(pending.token!, list);
+    throw invalid();
+  });
+  await expect(retryBotGroupBinding(id)).resolves.toMatchObject({
+    group: { status: 'active', generation: pending.generation }, devices: list,
+  });
+  expect(await getBotGroup(id)).toMatchObject({ status: 'active', token: pending.token, attemptId: pending.attemptId, generation: pending.generation });
+  expect((await loadConnections()).map(item => item.deviceId)).toEqual(list.map(item => item.deviceId));
+  expect(bind).toHaveBeenCalledTimes(2);
+  expect(read).toHaveBeenCalledTimes(3);
+  expect(read.mock.calls[2][0]).toMatchObject({ url: hubUrl, botToken: pending.token, botPin: pin });
+});
+
+async function pendingLostFirstBind() {
+  bind.mockRejectedValueOnce(new HubError('first response lost', 0, 'hub_unreachable'));
+  await expect(importBotBinding(binding)).rejects.toMatchObject({ code: 'hub_unreachable' });
+  const pending = (await getBotGroup(id))!;
+  read.mockClear(); bind.mockClear(); verify.mockClear();
+  return pending;
+}
+
+test('a denied bind replay retires pending only after a second exact credential rejection and same-pin confirmation', async () => {
+  const pending = await pendingLostFirstBind();
+  read.mockRejectedValueOnce(invalid()).mockRejectedValueOnce(invalid());
+  bind.mockRejectedValueOnce(invalid());
+  await expect(retryBotGroupBinding(id)).rejects.toMatchObject({ code: 'bot_credentials_invalid' });
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(read.mock.calls.every(call => call[0].botToken === pending.token && call[0].botPin?.publicKey === pin.publicKey)).toBe(true);
+  expect(bind).toHaveBeenCalledTimes(1);
+  expect(bind.mock.calls[0][2]).toEqual({ attemptId: pending.attemptId, phoneToken: pending.token });
+  expect(verify.mock.calls.slice(-2).map(call => [call[0], call[1], call[2]])).toEqual([[hubUrl, pin, false], [hubUrl, pin, false]]);
+  expect(await getBotGroup(id)).toMatchObject({ status: 'revoked', generation: pending.generation });
+  expect((await getBotGroup(id))!.token).toBeUndefined();
+});
+
+test.each(['503', 'network', 'generic403'] as const)('a denied bind replay followed by %s preserves the original pending recovery material', async failure => {
+  const pending = await pendingLostFirstBind();
+  const unknown = failure === '503' ? new HubError('unavailable', 503, 'service_unavailable')
+    : failure === 'network' ? new HubError('lost', 0, 'hub_unreachable') : new HubError('proxy rejected', 403, 'proxy_denied');
+  read.mockRejectedValueOnce(invalid()).mockRejectedValueOnce(unknown);
+  bind.mockRejectedValueOnce(invalid());
+  await expect(retryBotGroupBinding(id)).rejects.toBe(unknown);
+  expect(read).toHaveBeenCalledTimes(2); expect(bind).toHaveBeenCalledTimes(1);
+  expect(await getBotGroup(id)).toMatchObject({ status: 'pending', token: pending.token, attemptId: pending.attemptId,
+    phoneId: pending.phoneId, binding: pending.binding, pin, generation: pending.generation });
+  expect(await loadConnections()).toEqual([]);
+});
+
+test('a denied bind replay cannot retire the credential when confirming the final GET rejection loses its pin', async () => {
+  const pending = await pendingLostFirstBind();
+  const mismatch = new HubError('identity changed', 409, 'hub_identity_changed');
+  verify.mockImplementation(async () => {
+    if (read.mock.calls.length === 2) throw mismatch;
+    return { pin, endpoint: hubUrl };
+  });
+  read.mockRejectedValueOnce(invalid()).mockRejectedValueOnce(invalid());
+  bind.mockRejectedValueOnce(invalid());
+  await expect(retryBotGroupBinding(id)).rejects.toBe(mismatch);
+  expect(await getBotGroup(id)).toMatchObject({ status: 'pending', token: pending.token, attemptId: pending.attemptId, generation: pending.generation });
+  expect(read).toHaveBeenCalledTimes(2); expect(bind).toHaveBeenCalledTimes(1);
+});
+
+test.each(['success', 'auth'] as const)('late post-replay GET %s cannot overwrite a newer same-generation member refresh', async outcomeKind => {
+  const pending = await pendingLostFirstBind();
+  const entered = deferred<void>(), late = deferred<DeviceStatus[]>();
+  read.mockRejectedValueOnce(invalid()).mockImplementationOnce(async () => { entered.resolve(); return late.promise; });
+  bind.mockRejectedValueOnce(invalid());
+  const recovering = retryBotGroupBinding(id);
+  const outcome = recovering.then(() => ({ ok: true }), error => ({ ok: false, error }));
+  await entered.promise;
+  server.set(pending.token!, members('pc-b'));
+  await refreshBotGroup(id);
+  if (outcomeKind === 'success') late.resolve(members('pc-a')); else late.reject(invalid());
+  expect(await outcome).toMatchObject({ ok: false });
+  expect(await getBotGroup(id)).toMatchObject({ status: 'active', token: pending.token, generation: pending.generation });
+  expect((await loadConnections()).map(item => item.deviceId)).toEqual(['pc-b']);
+  expect(bind).toHaveBeenCalledTimes(1);
+});
+
+test.each(['success', 'auth'] as const)('late post-replay GET %s cannot mutate a same-token replacement generation even without a newer service read', async outcomeKind => {
+  const pending = await pendingLostFirstBind();
+  const entered = deferred<void>(), late = deferred<DeviceStatus[]>();
+  read.mockRejectedValueOnce(invalid()).mockImplementationOnce(async () => { entered.resolve(); return late.promise; });
+  bind.mockRejectedValueOnce(invalid());
+  const recovering = retryBotGroupBinding(id);
+  const outcome = recovering.then(() => ({ ok: true }), error => ({ ok: false, error }));
+  await entered.promise;
+  // Change durable authority directly: no service read increments the latest-
+  // request counter, and the same token bytes exercise the independent ABA fence.
+  const revoking = (await beginBotGroupRevocation(pending))!;
+  await completeBotGroupRevocation(revoking);
+  const replacementBinding = { ...binding, invite: 'e'.repeat(64), signature: 'a'.repeat(64) };
+  const generation = '00000000-0000-4000-8000-000000000002';
+  const replacement = { ...pending, status: 'pending' as const, generation, attemptId: generation,
+    binding: replacementBinding, fingerprint: botBindingFingerprint(replacementBinding) };
+  await prepareBotGroup(replacement);
+  await commitBotGroupMembers(replacement, [{ id: botConnectionId(hubUrl, 'pc-b', 'group'), hubUrl,
+    deviceId: 'pc-b', deviceName: '电脑 pc-b', botGroupId: 'group', pairedAt: 2 }]);
+  if (outcomeKind === 'success') late.resolve(members('pc-a')); else late.reject(invalid());
+  expect(await outcome).toMatchObject({ ok: false });
+  expect(await getBotGroup(id)).toMatchObject({ status: 'active', token: pending.token, generation });
+  expect((await loadConnections()).map(item => item.deviceId)).toEqual(['pc-b']);
+  expect(bind).toHaveBeenCalledTimes(1);
 });

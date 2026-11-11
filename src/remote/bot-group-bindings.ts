@@ -125,11 +125,24 @@ export async function retryBotGroupBinding(id: string): Promise<BotGroupResult> 
       { stillCurrent: async () => latest() && sameRecord(await getBotGroup(record.id), record), pin: record.pin });
     return await persistMembers(record, result.devices, latest);
   } catch (error) {
-    if (credentialsInvalid(error) && latest()) {
+    if (!credentialsInvalid(error) || !latest()) throw error;
+    // An invite-only revocation can reject this replay after the original
+    // in-flight bind has accepted the phone. The first GET predates that
+    // acceptance, so only a new authenticated read can retire its token.
+    const finalTarget = await verifyBotBindingStation(record.hubUrl, record.pin, false);
+    await currentRecord(record);
+    if (!latest()) throw changed();
+    let devices: DeviceStatus[];
+    try {
+      devices = await botGroupDevices(pinnedHub(record), finalTarget, () => { if (!latest()) throw changed(); });
+    } catch (readError) {
+      if (!credentialsInvalid(readError) || !latest()) throw readError;
       await verifyBotBindingStation(record.hubUrl, record.pin, false);
+      await currentRecord(record);
       if (latest()) await invalidateBotGroup(record.id, record.token, record.generation);
+      throw readError;
     }
-    throw error;
+    return persistMembers(record, devices, latest);
   }
 }
 
