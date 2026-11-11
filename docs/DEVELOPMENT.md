@@ -7,7 +7,7 @@
 - 产品名称：Salcara AI。
 - 正式仓库：dkdjndbfj-wq/salcara-image-mobile，源码在 main。
 - Android 包名／iOS bundle ID：top.salcara.image。保持这些身份可避免把更新变成另一款应用。
-- 当前正式 Android 版本：1.8.2 / versionCode 23，沿用正式签名和包名；发布记录见对应版本说明。
+- 当前源码版本：1.8.5 / Android versionCode 26，沿用正式签名和包名；实际公开版本以 GitHub Releases 为准，发布说明见 [1.8.5](RELEASE-1.8.5.md)。
 - updates 分支只保存正式版本清单，不是另一份应用源码，也不是另一个发布渠道。
 
 package.json 的 private 防止误发到 npm，不表示 GitHub 项目闭源。历史测试构建使用独立包名，不用于正式更新；不要把调试包或本地工作目录发布成第二款正式产品。
