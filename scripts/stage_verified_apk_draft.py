@@ -121,6 +121,17 @@ def regular(path):
     need(path.is_file() and stat.S_ISREG(path.stat().st_mode), "Required regular file is missing")
 
 
+def select_build_tools(sdk):
+    # Exact original-byte diagnostics verified this tool's output contract.
+    # Missing or unsafe SDK36 must fail, never select a newer fallback.
+    need(sdk.is_absolute() and sdk.is_dir(), "Android SDK build tools are required")
+    tools = sdk / "36.0.0"
+    need(tools.is_dir(), "Android SDK build tools 36.0.0 are required")
+    for executable in (tools / "apksigner", tools / "aapt"):
+        regular(executable)
+    return tools
+
+
 def sha(path):
     with path.open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
@@ -312,12 +323,7 @@ def main():
         command(["gh", "api", f"repos/{REPO}/releases/assets/{old_assets[0]['id']}", "--method", "GET", "-H", "Accept: application/octet-stream"], timeout=600, stdout=target)
     need(old.stat().st_size == OLD_SIZE and sha(old) == OLD_SHA, "Previous exact production APK bytes mismatch")
     sdk = Path(os.environ.get("ANDROID_HOME", "")) / "build-tools"
-    need(sdk.is_absolute() and sdk.is_dir(), "Android SDK build tools are required")
-    candidates = [str(path) for path in sdk.iterdir() if path.is_dir()]
-    need(bool(candidates), "Android SDK build tools are unavailable")
-    tools = Path(command(["sort", "-V"], input=("\n".join(candidates) + "\n").encode()).decode().splitlines()[-1])
-    for executable in (tools / "apksigner", tools / "aapt"):
-        regular(executable)
+    tools = select_build_tools(sdk)
     android_identity(old, tools, "1.8.4", 25)
     android_identity(apk, tools, VERSION, CODE)
     upgrade_script = tested / "scripts" / "verify-apk-upgrade.sh"

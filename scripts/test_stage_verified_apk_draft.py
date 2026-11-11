@@ -63,6 +63,105 @@ def apk_payload(wrong_machine=False, missing_abi=False):
     return data.getvalue()
 
 
+class BuildToolsSelection(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="build-tools-test-", dir=QA)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def tools(self, sdk, version):
+        directory = sdk / version
+        directory.mkdir(parents=True)
+        for name in ("apksigner", "aapt"):
+            (directory / name).touch()
+        return directory
+
+    def select(self, sdk):
+        # Selecting an installed toolchain must not execute a tool, download
+        # another version, or query an external service, even on failure.
+        with patch.object(stage, "command", side_effect=AssertionError("Tool selection executed a command")) as command, patch.object(stage, "api", side_effect=AssertionError("Tool selection called an API")) as api:
+            try:
+                return stage.select_build_tools(sdk)
+            finally:
+                command.assert_not_called()
+                api.assert_not_called()
+
+    def assert_link_rejected(self, sdk, linked_path):
+        # Synthetic symlink metadata exercises every path component without
+        # requiring the Windows privilege needed to create a real symlink.
+        original_is_symlink = Path.is_symlink
+        with patch.object(Path, "is_symlink", autospec=True,
+                          side_effect=lambda path: path == linked_path or original_is_symlink(path)):
+            with self.assertRaises(stage.GateError):
+                self.select(sdk)
+
+    def test_pins_real_sdk36_even_when_sdk37_is_available(self):
+        sdk = self.root / "build-tools"
+        expected = self.tools(sdk, "36.0.0")
+        self.tools(sdk, "37.0.0")
+        with patch.object(stage, "regular", wraps=stage.regular) as regular:
+            self.assertEqual(self.select(sdk), expected)
+        self.assertEqual({call.args[0] for call in regular.call_args_list},
+                         {expected / "apksigner", expected / "aapt"})
+
+    def test_missing_sdk36_fails_without_falling_back_to_sdk37(self):
+        for newer_present in (False, True):
+            with self.subTest(newer_present=newer_present):
+                sdk = self.root / str(newer_present) / "build-tools"
+                sdk.mkdir(parents=True)
+                if newer_present:
+                    self.tools(sdk, "37.0.0")
+                with self.assertRaises(stage.GateError):
+                    self.select(sdk)
+
+    def test_sdk36_must_be_a_directory_not_a_file(self):
+        sdk = self.root / "build-tools"
+        self.tools(sdk, "37.0.0")
+        (sdk / "36.0.0").touch()
+        with self.assertRaises(stage.GateError):
+            self.select(sdk)
+
+    def test_both_sdk36_tools_must_exist_without_fallback(self):
+        for missing in ("apksigner", "aapt"):
+            with self.subTest(missing=missing):
+                sdk = self.root / missing / "build-tools"
+                tools = self.tools(sdk, "36.0.0")
+                self.tools(sdk, "37.0.0")
+                (tools / missing).unlink()
+                with self.assertRaises(stage.GateError):
+                    self.select(sdk)
+
+    def test_both_sdk36_tools_must_be_regular_files_not_directories(self):
+        for invalid in ("apksigner", "aapt"):
+            with self.subTest(invalid=invalid):
+                sdk = self.root / invalid / "build-tools"
+                tools = self.tools(sdk, "36.0.0")
+                (tools / invalid).unlink()
+                (tools / invalid).mkdir()
+                with self.assertRaises(stage.GateError):
+                    self.select(sdk)
+
+    def test_sdk36_directory_symlink_is_rejected(self):
+        sdk = self.root / "build-tools"
+        tools = self.tools(sdk, "36.0.0")
+        self.tools(sdk, "37.0.0")
+        self.assert_link_rejected(sdk, tools)
+
+    def test_either_sdk36_tool_symlink_is_rejected(self):
+        sdk = self.root / "build-tools"
+        tools = self.tools(sdk, "36.0.0")
+        for name in ("apksigner", "aapt"):
+            with self.subTest(tool=name):
+                self.assert_link_rejected(sdk, tools / name)
+
+    def test_sdk_root_and_ancestor_directory_symlinks_are_rejected(self):
+        sdk = self.root / "android" / "build-tools"
+        self.tools(sdk, "36.0.0")
+        for ancestor in (sdk, sdk.parent, self.root):
+            with self.subTest(ancestor=ancestor.name):
+                self.assert_link_rejected(sdk, ancestor)
+
+
 class DraftGates(unittest.TestCase):
     def test_read_apis_require_200_and_never_treat_404_as_draft_absence(self):
         self.assertEqual(stage.parse_api_response(http(200, {"ok": True}), 0), {"ok": True})
