@@ -9,6 +9,7 @@ import { parseComputerActivity, type ComputerActivity } from './computer-activit
 import { executionRetryAt, validRetryAt } from './execution-retry';
 import { ingressRuntime } from './ingress-runtime';
 import { IngressIdentityError } from './ingress';
+import { hermesSettlement, normalizeHermesEvent } from './hermes-event-compat';
 export type { BrowserNavigation } from './browser-navigation';
 
 /** Salcara Hub client — see remote/docs/PROTOCOL.md. The hub sits on the relay's own origin. */
@@ -166,9 +167,9 @@ export type HubEvent = Base & (
   | { type: 'reasoning'; id: string; text: string; final: boolean }
   | { type: 'tool'; id: string; kind: ToolKind; title: string; detail?: string; status: 'running' | 'done' | 'failed' | 'interrupted'; output?: string; outputFinal?: boolean; planKind?: 'proposal' | 'tasks'; diff?: string; exitCode?: number; durationMs?: number; attachments?: AttachmentRef[]; browser?: BrowserNavigation; computer?: ComputerActivity }
   | { type: 'approval.request'; approvalId: string; kind: 'command' | 'file_change' | 'tool' | 'permission' | 'question'; title: string; detail?: string; diff?: string; cwd?: string; questions?: RemoteQuestion[]; questionMode?: string; expiresAt?: number; approvalTransport?: 'codex-hook-v1'; approvalOptions?: ApprovalOptions }
-  | { type: 'approval.resolved'; approvalId: string; decision: Decision; by: 'phone' | 'desktop' | 'timeout' }
+  | { type: 'approval.resolved'; approvalId: string; decision: Decision | 'unknown'; by: 'phone' | 'desktop' | 'timeout' | 'unknown' }
   | { type: 'turn'; status: 'started' | 'completed' | 'failed' | 'interrupted'; error?: string; errorCode?: string; retryAt?: number; usage?: Usage; durationMs?: number }
-  | { type: 'notice'; id?: string; level: 'info' | 'warn' | 'error'; text: string; errorCode?: string; retryAt?: number; retrying?: boolean; noticeKind?: 'context_compaction'; progress?: boolean }
+  | { type: 'notice'; id?: string; level: 'info' | 'warn' | 'error'; text: string; errorCode?: string; retryAt?: number; retrying?: boolean; noticeKind?: 'context_compaction' | 'session_source_frozen'; progress?: boolean }
 );
 
 const MAX_EVENT_TEXT = 2 * 1024 * 1024;
@@ -228,6 +229,7 @@ function parseDeviceStatus(input: unknown): DeviceStatus | undefined {
  * additive fields on known events are accepted for forward compatibility.
  */
 export function parseHubEvent(value: unknown): HubEvent | undefined {
+  value = normalizeHermesEvent(value);
   if (!isRecord(value) || !validId(value.type, 128)) throw new HubError('中转站返回了无效的事件内容');
   if (value.type === 'features.changed') {
     // Feature invalidations are advisory control records. Ignore malformed
@@ -302,10 +304,11 @@ export function parseHubEvent(value: unknown): HubEvent | undefined {
       }
       break;
     case 'approval.resolved':
-      if (typeof value.decision === 'string' && !knownValue(value.decision, ['allow', 'allow_session', 'deny'])
-        || typeof value.by === 'string' && !knownValue(value.by, ['phone', 'desktop', 'timeout'])) return undefined;
-      if (!validId(value.approvalId) || !['allow', 'allow_session', 'deny'].includes(String(value.decision))
-        || !['phone', 'desktop', 'timeout'].includes(String(value.by))) throw new HubError('中转站返回了无效的审批结果');
+      if (typeof value.decision === 'string' && !knownValue(value.decision, ['allow', 'allow_session', 'deny']) && !(hermesSettlement(value) && value.decision === 'unknown')
+        || typeof value.by === 'string' && !knownValue(value.by, ['phone', 'desktop', 'timeout']) && !(hermesSettlement(value) && value.by === 'unknown')) return undefined;
+      if (!validId(value.approvalId)
+        || !(hermesSettlement(value) && value.decision === 'unknown') && !['allow', 'allow_session', 'deny'].includes(String(value.decision))
+        || !(hermesSettlement(value) && value.by === 'unknown') && !['phone', 'desktop', 'timeout'].includes(String(value.by))) throw new HubError('中转站返回了无效的审批结果');
       break;
     case 'turn':
       if (typeof value.status === 'string' && !knownValue(value.status, ['started', 'completed', 'failed', 'interrupted'])) return undefined;
@@ -393,7 +396,7 @@ export type Command =
   | { type: 'session.revert'; sessionKey: string; expectedTurnId: string; expectedMessageId: string; operationId: string; accountId?: string; controlSurface: 'cli' }
   | { type: 'session.steer'; sessionKey: string; text: string; expectedTurnId: string; operationId: string; accountId?: string; controlSurface: 'cli' }
   | { type: 'session.continue'; sessionKey: string; text: string; expectedTurnId: string; operationId: string; accountId?: string; model?: string; effort?: Effort; permissionMode?: PermissionMode; collaborationMode?: CollaborationMode; skills?: SkillReference[]; contextReferences?: ContextReference[]; approval?: ApprovalMode; controlSurface: 'cli' }
-  | { type: 'approval.respond'; approvalId: string; sessionKey?: string; decision: Decision; message?: string; answers?: QuestionAnswers; accountId?: string; controlSurface: 'cli' }
+  | { type: 'approval.respond'; approvalId: string; sessionKey?: string; decision: Decision; message?: string; answers?: QuestionAnswers; accountId?: string; operationId?: string; controlSurface: 'cli' }
   | { type: 'desktop.approval.respond'; sessionKey: string; approvalId: string; decision: 'allow' | 'deny'; message?: string; operationId: string; accountId?: string; controlSurface: 'desktop' }
   | { type: 'projects.list' }
   | { type: 'features.list'; tool: ToolId; cwd?: string; sessionKey?: string; accountId?: string; controlSurface: 'cli'; ifRevision?: string; force?: boolean; syncVersion?: 1; cursor?: string; pageSize?: number }
@@ -989,7 +992,7 @@ export async function command<T = Record<string, unknown>>(hub: Hub, deviceId: s
 
 export interface ExecutionTicket { operationId: string; ticket: string; dispatchNotAfter: number; storageEpoch: string }
 export interface DurableOperation extends ExecutionTicket {
-  state: 'prepared' | 'queued' | 'pending' | 'completed' | 'uncertain' | 'expired';
+  state: 'prepared' | 'queued' | 'pending' | 'completed' | 'uncertain' | 'expired' | 'cancelled' | 'not_dispatched';
   ok: boolean; result?: Record<string, unknown>; error?: string; code?: string; httpStatus?: number; retainedUntil?: number;
 }
 export function validExecutionTicket(value: unknown): value is ExecutionTicket {
@@ -1008,12 +1011,22 @@ export async function prepareCommand(hub: Hub, deviceId: string, requestId: stri
 export async function readOperation(hub: Hub, deviceId: string, ticket: ExecutionTicket, signal?: AbortSignal): Promise<DurableOperation> {
   const result = await request(hub, `/app/operations?deviceId=${encodeURIComponent(deviceId)}&operationId=${encodeURIComponent(ticket.operationId)}&ticket=${encodeURIComponent(ticket.ticket)}`, { signal });
   if (result.operationId !== ticket.operationId || result.storageEpoch !== ticket.storageEpoch || result.dispatchNotAfter !== ticket.dispatchNotAfter
-    || !['prepared', 'queued', 'pending', 'completed', 'uncertain', 'expired'].includes(String(result.state)) || typeof result.ok !== 'boolean'
+    || !['prepared', 'queued', 'pending', 'completed', 'uncertain', 'expired', 'cancelled', 'not_dispatched'].includes(String(result.state)) || typeof result.ok !== 'boolean'
+    || result.state === 'cancelled' && (result.ok !== false || result.code !== 'operation_cancelled' || result.cancelled !== true)
+    || result.state === 'not_dispatched' && (result.ok !== false || !['offline_queue_unavailable', 'offline_queue_registration_failed'].includes(String(result.code)))
     || result.result !== undefined && (!result.result || typeof result.result !== 'object' || Array.isArray(result.result))) throw new HubError('服务器返回的恢复记录无效', 502, 'invalid_operation_record');
   return { ...result, ...ticket } as DurableOperation;
 }
 export async function acknowledgeOperation(hub: Hub, deviceId: string, ticket: ExecutionTicket): Promise<void> {
   await request(hub, '/app/operations/ack', { method: 'POST', body: { deviceId, operationId: ticket.operationId, ticket: ticket.ticket } });
+}
+/** Cancels only an existing server queue entry; never prepares or dispatches work. */
+export async function cancelQueuedOperation(hub: Hub, deviceId: string, ticket: ExecutionTicket): Promise<void> {
+  const result = await request(hub, '/app/operations/cancel', { method: 'POST', body: { deviceId, operationId: ticket.operationId, ticket: ticket.ticket } });
+  if (result.ok !== true || result.state !== 'cancelled' || result.code !== 'operation_cancelled' || result.cancelled !== true || result.retryable !== false
+    || result.operationId !== ticket.operationId || result.storageEpoch !== ticket.storageEpoch || result.dispatchNotAfter !== ticket.dispatchNotAfter) {
+    throw new HubError('撤回结果暂未确认，请核对原任务；不会重新派发', 502, 'operation_cancel_unavailable');
+  }
 }
 export async function acknowledgeSessionEvents(hub: Hub, deviceId: string, sessionKey: string, through: number, storageEpoch: string): Promise<void> {
   await request(hub, '/app/events/ack', { method: 'POST', body: { deviceId, sessionKey, through, storageEpoch } });

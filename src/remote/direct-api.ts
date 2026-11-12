@@ -27,7 +27,7 @@ const projectPreviewStrings = new Set(['sourcePath', 'projectPath', 'script', 'm
 export type DirectApiErrorCode = 'disconnected' | 'timeout' | 'remote' | 'protocol' | 'busy';
 
 export class DirectApiError extends Error {
-  constructor(readonly code: DirectApiErrorCode, message: string) {
+  constructor(readonly code: DirectApiErrorCode, message: string, readonly remoteCode?: string) {
     super(message);
     this.name = 'DirectApiError';
   }
@@ -93,7 +93,7 @@ const commandSchemas: Record<DirectCommand['type'], CommandSchema> = {
   'session.revert': { keys: ['type', 'sessionKey', 'expectedTurnId', 'expectedMessageId', 'operationId', 'accountId', 'controlSurface'], required: ['type', 'sessionKey', 'expectedTurnId', 'expectedMessageId', 'operationId', 'controlSurface'] },
   'session.steer': { keys: ['type', 'sessionKey', 'text', 'expectedTurnId', 'operationId', 'accountId', 'controlSurface'], required: ['type', 'sessionKey', 'text', 'expectedTurnId', 'operationId', 'controlSurface'] },
   'session.continue': { keys: ['type', 'sessionKey', 'text', 'expectedTurnId', 'operationId', 'accountId', 'model', 'effort', 'permissionMode', 'collaborationMode', 'skills', 'contextReferences', 'approval', 'controlSurface'], required: ['type', 'sessionKey', 'text', 'expectedTurnId', 'operationId', 'controlSurface'] },
-  'approval.respond': { keys: ['type', 'approvalId', 'sessionKey', 'decision', 'message', 'answers', 'accountId', 'controlSurface'], required: ['type', 'approvalId', 'decision', 'controlSurface'] },
+  'approval.respond': { keys: ['type', 'approvalId', 'sessionKey', 'decision', 'message', 'answers', 'accountId', 'operationId', 'controlSurface'], required: ['type', 'approvalId', 'decision', 'controlSurface'] },
   'desktop.approval.respond': { keys: ['type', 'sessionKey', 'approvalId', 'decision', 'message', 'operationId', 'accountId', 'controlSurface'], required: ['type', 'sessionKey', 'approvalId', 'decision', 'operationId', 'controlSurface'] },
   'projects.list': { keys: ['type'], required: ['type'] },
   'features.list': { keys: ['type', 'tool', 'cwd', 'sessionKey', 'accountId', 'controlSurface', 'ifRevision', 'force', 'syncVersion', 'cursor', 'pageSize'], required: ['type', 'tool', 'controlSurface'] },
@@ -163,12 +163,12 @@ function onMessage(value: unknown): void {
     pending.delete(value.requestId);
     clearTimeout(request.timer);
     const keys = Object.keys(value);
-    const isError = keys.length === 3 && keys.every(key => ['type', 'requestId', 'error'].includes(key))
-      && typeof value.error === 'string';
+    const isError = (keys.length === 3 || keys.length === 4) && keys.every(key => ['type', 'requestId', 'error', 'code'].includes(key))
+      && typeof value.error === 'string' && (value.code === undefined || typeof value.code === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value.code));
     const isResult = keys.length === 3 && keys.every(key => ['type', 'requestId', 'result'].includes(key))
       && Object.hasOwn(value, 'result');
     if (isError) {
-      request.reject(new DirectApiError('remote', (value.error as string).slice(0, 4096) || '电脑拒绝了直连请求'));
+      request.reject(new DirectApiError('remote', (value.error as string).slice(0, 4096) || '电脑拒绝了直连请求', value.code as string | undefined));
       return;
     }
     if (!isResult) {
@@ -243,7 +243,7 @@ function requestTimeout(value: number | undefined): number {
 }
 
 /** Sends one typed command over the current authenticated direct socket only. */
-export function requestDirect(command: DirectCommand, options: { timeoutMs?: number } = {}): Promise<unknown> {
+export function requestDirect(command: DirectCommand, options: { timeoutMs?: number; requestId?: string } = {}): Promise<unknown> {
   const state = getDirectConnectionState();
   if (state.status !== 'connected' || !state.deviceId) return Promise.reject(new DirectApiError('disconnected', '电脑直连尚未就绪'));
   if (!validCommand(command)) return Promise.reject(new DirectApiError('protocol', '直连命令类型或字段无效'));
@@ -261,9 +261,9 @@ export function requestDirect(command: DirectCommand, options: { timeoutMs?: num
   }
 
   let requestId: string;
-  try { requestId = randomUUID(); }
+  try { requestId = options.requestId ?? randomUUID(); }
   catch { return Promise.reject(new DirectApiError('protocol', '无法创建直连请求标识')); }
-  if (!requestId || requestId.length > 128 || pending.has(requestId)) return Promise.reject(new DirectApiError('protocol', '直连请求标识无效或重复'));
+  if (!requestId || requestId.length > 128 || options.requestId !== undefined && !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(requestId) || pending.has(requestId)) return Promise.reject(new DirectApiError('protocol', '直连请求标识无效或重复'));
   const frame = { type: 'command', requestId, command: commandSnapshot };
   const frameText = JSON.stringify(frame);
   if (new TextEncoder().encode(frameText).byteLength > MAX_FRAME_BYTES) return Promise.reject(new DirectApiError('protocol', '直连请求超出大小限制'));

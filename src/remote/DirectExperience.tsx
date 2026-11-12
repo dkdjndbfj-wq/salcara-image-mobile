@@ -11,6 +11,8 @@ import { directConnectionGeneration, directDeliveryScope, getDirectConnectionSta
 import { requestDirect, subscribeDirectEvents, type DirectEventEnvelope } from './direct-api';
 import { readPreferredAgent, rememberPreferredAgent } from './agent-preferences';
 import { approvalDecisions } from './approvals';
+import { approvalResultUncertain, APPROVAL_PENDING_MESSAGE } from './approval-result';
+import { prepareQuestionReceipt, markQuestionAttempt, markQuestionRejected, pendingQuestionReceipts, reconcileQuestionReceipts, finishQuestionReceipt, blockQuestionReceipt, type QuestionReceipt } from './question-outbox';
 import {directQuestionDraftSource,finishDirectQuestionDraft} from './direct-question-drafts';
 import { applyEvent, EMPTY_TIMELINE, timelineKey, type RemoteState, type Timeline } from './store';
 import { agentSessions, agentSupports, parseAgentStatus, sessionWorkspaceMode } from './projection';
@@ -65,6 +67,7 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
   const [nextCursor, setNextCursor] = useState<string | undefined>();
   const [selected, setSelected] = useState<SessionInfo | null>(null);
   const [timeline, setTimeline] = useState<Timeline>(EMPTY_TIMELINE);
+  const [approvalRecovery, setApprovalRecovery] = useState<{ identity: string; receipts: QuestionReceipt[] } | null>(null);
   const revertedHistory=useRef(new Map<string,Pick<Timeline,'revertedTurns'|'revertedItems'|'revertOperations'>>());
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -89,6 +92,7 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
   const snapshotLoading = useRef(false);
   const busy = useRef(false);
   const drafts = useRef(new Map<string, string>());
+  const questionProfileReads = useRef(new Map<string, string>());
   const scope = directDeliveryScope(), connectionGeneration = directConnectionGeneration();
   useEffect(() => { setManagementOpen(false); }, [scope, connectionGeneration, connection.status]);
   const selectionRef=useRef(selected);selectionRef.current=selected;
@@ -175,12 +179,14 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
   }, [connection.deviceId, connection.status, agents, agentId, nextCursor, workspaceMode]);
 
   const openConversation = useCallback(async (session: SessionInfo, preserveDraft = false) => {
+    const snapshotStartedAt = Date.now();
     const deviceId = connection.deviceId;
     if (!deviceId || connection.status !== 'connected' || busy.current) return;
     busy.current = true;
     const revision = ++owner.current;
     const original = selectedKey.current === session.sessionKey ? currentAction.current.timeline : EMPTY_TIMELINE;
-    const current = () => revision === owner.current && getDirectConnectionState().deviceId === deviceId && directDeliveryScope() === scope;
+    const current = () => revision === owner.current && getDirectConnectionState().deviceId === deviceId
+      && getDirectConnectionState().status === 'connected' && directDeliveryScope() === scope && directConnectionGeneration() === connectionGeneration;
     selectedKey.current = session.sessionKey;
     snapshotLoading.current = true;
     pendingEvents.current = [];
@@ -196,11 +202,30 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
       if (!result || !current()) return;
       snapshotLoading.current = false;
       const merged = result.timeline;retain(merged);
-      currentAction.current.timeline={ ...merged, loading: false, readErrorCode: undefined, snapshotAt: Date.now(), nextCursor: result.nextCursor, historyExpanded: false };
+      currentAction.current.timeline={ ...merged, loading: false, readErrorCode: undefined, snapshotStartedAt, snapshotAt: Date.now(), nextCursor: result.nextCursor, historyExpanded: false };
       setTimeline(currentAction.current.timeline);
       selectionRef.current=merged.session ?? session;setSelected(selectionRef.current);
+      // Runtime initialization may negotiate Questions only during start/open.
+      // Read authoritative capabilities once per session and connection; never
+      // infer support from a question event or reset the directory/draft here.
+      const profileScope = JSON.stringify([scope, connectionGeneration, deviceId]);
+      if (session.tool === 'hermes'
+        && remoteRef.current.agents[deviceId]?.list.find(item => item.id === 'hermes')?.capabilities?.questions !== true
+        && questionProfileReads.current.get(session.sessionKey) !== profileScope) {
+        questionProfileReads.current.set(session.sessionKey, profileScope);
+        try {
+          const raw = await requestDirect({ type: 'agents.status' });
+          if (!current()) return;
+          const parsed = parseAgentStatus(raw);
+          setAgents(parsed.agents.filter(profile => profile.available && agentSupports(profile, profile.id, 'list')));
+          setApis(parsed.apis); setAutoAll(parsed.autoAll);
+        } catch {
+          // The session already opened successfully. A status read failure
+          // keeps the last advertised capabilities and the user's draft.
+        }
+      }
     } catch (reason) {
-      if (revision === owner.current) {
+      if (current()) {
         const queued = pendingEvents.current;
         pendingEvents.current = [];
         snapshotLoading.current = false;
@@ -208,7 +233,7 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
         setTimeline(currentAction.current.timeline); setError((reason as Error).message);
       }
     } finally { if (revision === owner.current) { busy.current = false; setLoading(false); } }
-  }, [connection.deviceId, connection.status, scope]);
+  }, [connection.deviceId, connection.status, scope, connectionGeneration]);
 
   const loadEarlier = useCallback(async () => {
     const deviceId = connection.deviceId, session = selected, cursor = timeline.nextCursor;
@@ -247,16 +272,18 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
     const session=selected,deviceId=connection.deviceId;
     if(!session||!deviceId||busy.current||connection.status!=='connected')return;
     const revision=++owner.current;busy.current=true;setLoading(true);setPendingRevision(value=>value+1);
+    const current=()=>revision===owner.current&&getDirectConnectionState().deviceId===deviceId
+      &&getDirectConnectionState().status==='connected'&&directDeliveryScope()===scope&&directConnectionGeneration()===connectionGeneration;
     try {
       const raw=await requestDirect({type:'agents.status'});
-      if(revision!==owner.current||getDirectConnectionState().deviceId!==deviceId)return;
+      if(!current())return;
       const parsed=parseAgentStatus(raw),available=parsed.agents.filter(item=>item.available&&agentSupports(item,item.id,'list'));
       setAgents(available);setApis(parsed.apis);setAutoAll(parsed.autoAll);
       if(!available.some(item=>item.id===agentId)){selectedKey.current=null;setSelected(null);setTimeline(EMPTY_TIMELINE);setDirectoryLoaded(false);setAgentId(available[0]?.id??null);setError('当前 Agent 已不可用，请从目录重新选择');return;}
       busy.current=false;setLoading(false);await openConversation(session);
-    } catch(reason){if(revision===owner.current)setError(reason instanceof Error?reason.message:'刷新电脑配置失败');}
+    } catch(reason){if(current())setError(reason instanceof Error?reason.message:'刷新电脑配置失败');}
     finally{if(revision===owner.current){busy.current=false;setLoading(false);}}
-  }, [selected,openConversation,connection.deviceId,connection.status,agentId]);
+  }, [selected,openConversation,connection.deviceId,connection.status,agentId,scope,connectionGeneration]);
 
   useEffect(() => {
     if (connection.status !== 'connected') {
@@ -317,6 +344,18 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
   },[startStore]);
   const actionIdentity=JSON.stringify([scope,connectionGeneration,connection.deviceId,selected?.sessionKey,profile?.id,profile?.api,profile?.execution,selected?.cwd,workspaceMode]);
   const currentAction=useRef({identity:actionIdentity,timeline});currentAction.current={identity:actionIdentity,timeline};
+  const approvalSignature = JSON.stringify(timeline.items.filter(item => item.kind === 'approval').map(item => [item.id, item.state, item.by]));
+  useEffect(() => {
+    if (!selected || !connection.deviceId) return;
+    let active = true;
+    const target = { scope, deviceId: connection.deviceId, sessionKey: selected.sessionKey };
+    const fresh = !timeline.loading && !timeline.error && !timeline.cachedAt && timeline.snapshotStartedAt !== undefined;
+    const ids = timeline.items.filter(item => item.kind === 'approval' && (item.state === 'pending' || item.by === 'timeout')).map(item => item.id);
+    void (fresh ? reconcileQuestionReceipts(target, ids, timeline.snapshotStartedAt) : Promise.resolve())
+      .then(() => pendingQuestionReceipts(target)).then(receipts => { if (active && currentAction.current.identity === actionIdentity) setApprovalRecovery({ identity: actionIdentity, receipts }); })
+      .catch(reason => { if (active && currentAction.current.identity === actionIdentity) { setApprovalRecovery(null); setError(reason instanceof Error ? reason.message : '审批记录未恢复，请刷新核对'); } });
+    return () => { active = false; };
+  }, [actionIdentity, approvalSignature, timeline.snapshotAt, timeline.loading, timeline.error]); // eslint-disable-line react-hooks/exhaustive-deps
   // A stop owns the exact connection/session/turn, independent of mutable
   // API display metadata returned by the next agents.status refresh.
   const stopIdentity=JSON.stringify([scope,connectionGeneration,connection.deviceId,selected?.sessionKey]);
@@ -393,7 +432,7 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
   useDirectHistoryRecovery({enabled:connection.status==='connected'&&Boolean(selected)&&!loading&&!timeline.readErrorCode,source:actionIdentity,revision:recoveryRevision,
     needed:Boolean(uncertainSend||stopping||historyRepair.needed(timeline)),recover:recoverHistory,onSuspend:historyRepair.suspend});
   const canSend = Boolean(profile?.available && profile.remoteSendSupported && agentSupports(profile, profile.id, 'send')
-    && apiReady
+    && apiReady && !timeline.sourceFrozen
     && selected?.controllable && selected.controlSurface !== 'desktop' && selected.controlSurface !== 'read-only' && !selected.archived
     && connection.status === 'connected' && !apiSelection.locked && !uncertainSend && !stopping && !loading && !timeline.readErrorCode && pendingReady===actionIdentity && !pendingAction);
   const sendAdmission=useRef({canSend,sending});sendAdmission.current={canSend,sending};
@@ -613,15 +652,31 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
 
   const respond = async (approvalId: string, decision: Decision, answers?: QuestionAnswers) => {
     if (!selected || !connection.deviceId || connection.status !== 'connected' || busy.current || stopping) return;
+    if (approvalRecovery?.identity !== actionIdentity || approvalRecovery.receipts.some(receipt => receipt.approvalId === approvalId)) { setError(APPROVAL_PENDING_MESSAGE); return; }
     const pending = timeline.items.find(item=>item.kind==='approval'&&item.id===approvalId&&item.state==='pending');
     if (!pending || pending.kind!=='approval' || !approvalDecisions(pending).includes(decision) || pending.expiresAt!==undefined&&pending.expiresAt<=Date.now()) { setError('请求已变化或过期，请刷新会话'); return; }
     if(!profile?.capabilities?.approval||((pending.approval==='question'||answers!==undefined)&&!profile.capabilities.questions)){setError(pending.approval==='question'?'当前 Agent 不支持手机回答，请在电脑处理':'当前 Agent 不支持手机审批，请在电脑处理');return;}
     busy.current = true;
     const revision = ++owner.current;
+    const target = { scope, deviceId: connection.deviceId, sessionKey: selected.sessionKey };
+    const current = () => revision === owner.current && currentAction.current.identity === actionIdentity && directDeliveryScope() === scope
+      && directConnectionGeneration() === connectionGeneration && getDirectConnectionState().deviceId === target.deviceId;
+    let receipt: QuestionReceipt | undefined, dispatched = false, confirmed = false, refreshRejected = false;
     setSending(true); setError('');
     try {
-      await requestDirect({ type: 'approval.respond', approvalId, sessionKey: selected.sessionKey, decision, ...(answers?{answers}:{}), ...(profile?.api.accountId ? { accountId: profile.api.accountId } : {}), controlSurface: 'cli' });
-      if (revision !== owner.current) return;
+      receipt = await prepareQuestionReceipt({ ...target, approvalId, decision, answers, expiresAt: pending.expiresAt,
+        command: { type: 'approval.respond', approvalId, sessionKey: target.sessionKey, decision, ...(answers ? { answers } : {}), ...(profile?.api.accountId ? { accountId: profile.api.accountId } : {}), controlSurface: 'cli' } });
+      if (!current()) { if (!receipt.attempted) await finishQuestionReceipt(receipt); return; }
+      if (receipt.attempted || receipt.blocked) throw new Error(APPROVAL_PENDING_MESSAGE);
+      await markQuestionAttempt(receipt);
+      if (!current() || AppState.currentState !== null && AppState.currentState !== 'active') { await finishQuestionReceipt(receipt); return; }
+      dispatched = true;
+      await requestDirect({ ...receipt.command!, operationId: receipt.requestId }, { requestId: receipt.requestId });
+      confirmed = true;
+      await finishQuestionReceipt(receipt).catch(() => undefined);
+      if (!current()) return;
+      setApprovalRecovery({ identity: actionIdentity, receipts: [] });
+      setTimeline(value => applyEvent(value, { type: 'approval.resolved', approvalId, decision, by: 'phone', deviceId: target.deviceId, sessionKey: target.sessionKey, tool: selected.tool, ts: Date.now() }));
       if(pending.approval==='question'){
         const draftSource=directQuestionDraftSource(scope,connection.deviceId,selected.sessionKey,pending);
         // Local cleanup must not turn an accepted answer into a failed remote
@@ -631,7 +686,22 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
       }
       busy.current = false; setSending(false);
       await refreshConversation();
-    } catch (reason) { if (revision === owner.current) setError(reason instanceof Error ? reason.message : '电脑未能处理批准请求'); }
+    } catch (reason) {
+      if (receipt && !confirmed) {
+        if (dispatched && !receipt.attempted && !approvalResultUncertain(reason)) {
+          refreshRejected = await markQuestionRejected(receipt).catch(() => false);
+          if (current()) setApprovalRecovery({ identity: actionIdentity, receipts: [receipt] });
+        } else if (receipt.attempted || dispatched && approvalResultUncertain(reason)) {
+          await blockQuestionReceipt(receipt, 'command_delivery_uncertain').catch(() => undefined);
+          if (current()) setApprovalRecovery({ identity: actionIdentity, receipts: [receipt] });
+        } else await finishQuestionReceipt(receipt).catch(() => undefined);
+      }
+      if (current()) setError(!confirmed && dispatched && approvalResultUncertain(reason) ? APPROVAL_PENDING_MESSAGE : reason instanceof Error ? reason.message : '电脑未能处理批准请求');
+      if (refreshRejected && current()) {
+        busy.current = false; setSending(false);
+        await refreshConversation();
+      }
+    }
     finally { if (revision === owner.current) { busy.current = false; setSending(false); } }
   };
 
@@ -763,6 +833,7 @@ export function DirectExperience({ workspaceMode = 'code', newConversationReques
     onResolveApi={() => { if (currentAction.current.identity === actionIdentity) apiSelection.open(); }}
     onMobileWorkspaceVisibilityChange={onMobileWorkspaceVisibilityChange} onRegisterBack={conversationBack.register}
     text={text} onText={setText} loading={loading} loadingMore={loadingMore} sending={sending} canSend={canSend} uncertain={uncertainSend} stopPending={Boolean(stopping)} error={error}
+    approvalReady={approvalRecovery?.identity === actionIdentity} approvalPending={approvalRecovery?.identity === actionIdentity && Boolean(approvalRecovery.receipts.length)}
     onSend={send} onRevert={revertLatest} onStop={()=>void stop()} onRespond={(id,decision,answers)=>void respond(id,decision,answers)} onEarlier={()=>void loadEarlier()} onRefresh={()=>void refreshConversation()}
     onContinue={submission=>continueTask(submission)} onRetry={()=>void retryFailed()} onRecoverDelivery={pendingAction?acknowledgeDelivery:undefined}
     onRecoverMissingDraft={receipt=>{const origin=receipt.targetOrigin;if(receipt.scope!==scope||scope!==directDeliveryScope()||connection.deviceId!==origin.deviceId||profile.id!==origin.agentId||origin.mode!==workspaceMode||origin.apiIdentity!==(profile.api.accountId??'')||!(origin.projectless ? projectlessAllowed : projects.some(project=>project.path===origin.cwd)))return;backToDirectory();setDraftRecovery(receipt);setProjectless(origin.projectless===true);setProjectPath(origin.projectless?'':origin.cwd);setText('');setNewSession(true);}}

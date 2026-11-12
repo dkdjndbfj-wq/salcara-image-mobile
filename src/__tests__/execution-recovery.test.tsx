@@ -8,7 +8,7 @@ jest.mock('react-native',()=>{const actual=jest.requireActual('react-native'),Re
 jest.mock('expo-clipboard',()=>({setStringAsync:jest.fn(async()=>{})}));
 test.each([
  ['upstream_unauthorized','api',false],['usage_limit','api',true],['upstream_rate_limit','api',true],['model_capacity','model',true],
- ['context_limit','new',false],['session_budget','new',false],['policy_rejected',undefined,false],['sandbox_error',undefined,false],
+ ['context_limit','new',false],['session_budget','new',false],['session_source_frozen','new',false],['policy_rejected',undefined,false],['sandbox_error',undefined,false],
  ['computer_offline','connection',false],['response_stream_interrupted','connection',true],
 ] as const)('typed %s keeps the correct action even when text mentions invalid API key', (code,action,retry)=>{
  const value=executionRecovery('invalid API key HTTP 401',code);expect(value.action).toBe(action);expect(value.retry).toBe(retry);

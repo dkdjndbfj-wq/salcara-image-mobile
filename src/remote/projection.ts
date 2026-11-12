@@ -236,7 +236,8 @@ export function fallbackAgentProfiles(device?: DeviceStatus): AgentProfile[] {
 }
 
 /** Short, human description of the API remote tasks will use. */
-export function agentApiLabel(agent: Pick<AgentProfile, 'api' | 'name'>): string {
+export function agentApiLabel(agent: Pick<AgentProfile, 'api' | 'name'> & Partial<Pick<AgentProfile, 'id' | 'tool'>>): string {
+  if ((agent.id === 'hermes' || agent.tool && !['codex', 'claude'].includes(agent.tool)) && agent.api.source === 'tool') return agent.api.configured ? '使用电脑上的配置' : '请配置 API 和模型';
   if (agent.api.source === 'tool') return `${agent.name} 自己的登录`;
   return agent.api.name || '电脑上的 API';
 }

@@ -12,7 +12,8 @@ const message = (deviceId = 'pc', sessionKey = session.sessionKey, tool = 'codex
 
 test('parses an opaque older-history cursor and keeps only events for the requested direct session', () => {
   const page = parseDirectHistoryPage({ session, events: [message(), message('other-pc'), message('pc', 'claude:thread-2', 'claude')], nextCursor: 'opaque-cursor' }, 'pc', session);
-  expect(page).toEqual({ session, events: [message()], nextCursor: 'opaque-cursor' });
+  expect(page).toEqual({ session, events: [message()], freshSource: true, nextCursor: 'opaque-cursor' });
+  expect(parseDirectHistoryPage({ session, events: [message()], nextCursor: 'older-cursor' }, 'pc', session, 'opaque-cursor').freshSource).toBe(false);
 });
 
 test('rejects mismatched sessions, oversized pages and cursors that do not advance', () => {

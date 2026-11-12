@@ -56,6 +56,72 @@ beforeEach(() => {
 });
 afterEach(() => { resetRemoteForTests(); setHubFetch(null); });
 
+test.each(['text', 'enum'] as const)('cold-start Hermes %s clarification reads host-advertised capabilities after start/open', async inputType => {
+  capabilities!.questions = false; await pair();
+  const key = 'hermes:created', nativeId = 'native-prompt-1', approvalId = 'hermes:created:native-prompt-1';
+  const question = { id: nativeId, question: 'Which value?', inputType, required: true, allowCustom: true,
+    ...(inputType === 'enum' ? { options: [{ label: 'raw, choice' }] } : {}) };
+  commandHandler = input => {
+    if (input.type === 'session.start') capabilities!.questions = true;
+    if (input.type === 'session.open') return { ok: true, result: { session: info('hermes', key), events: [{
+      type: 'approval.request', deviceId: 'pc', sessionKey: key, tool: 'hermes', ts: Date.now(), approvalId,
+      kind: 'question', title: 'Hermes 需要补充信息', questionMode: 'hermes', questions: [question],
+      approvalOptions: { version: 1, decisions: ['allow'] },
+    }] } };
+    return defaultCommand(input);
+  };
+  expect(await startSession('pc', { tool: 'hermes', cwd: 'C:/fixture', prompt: 'synthetic', approval: 'ask' })).toBe(key);
+  expect(commands.some(input => input.type === 'session.open')).toBe(false);
+  await openSession('pc', key);
+  const sequence = commands.map(input => input.type);
+  expect(sequence.lastIndexOf('agents.status')).toBeGreaterThan(sequence.indexOf('session.open'));
+  expect(sequence.indexOf('session.open')).toBeGreaterThan(sequence.indexOf('session.start'));
+  expect(getRemoteState().agents.pc.list.find(profile => profile.id === 'hermes')?.capabilities?.questions).toBe(true);
+  expect(getRemoteState().timelines[timelineKey('pc', key)].items.find(item => item.kind === 'approval')).toMatchObject({
+    state: 'pending', questionMode: 'hermes', questions: [question], approvalOptions: { version: 1, decisions: ['allow'] },
+  });
+  const answer = inputType === 'enum' ? 'raw, choice' : 'custom text';
+  await respondApproval({ approvalId, deviceId: 'pc', sessionKey: key }, 'allow', undefined, { [nativeId]: [answer] });
+  const responses = commands.filter(input => input.type === 'approval.respond');
+  expect(responses).toHaveLength(1);
+  expect(responses[0]).toMatchObject({ approvalId, sessionKey: key, decision: 'allow', answers: { [nativeId]: [answer] } });
+  expect(responses[0]).not.toHaveProperty('message');
+});
+
+test('an unadvertised Hermes question stays gated and repeated history repair cannot poll profiles indefinitely', async () => {
+  capabilities!.questions = false; await pair();
+  commandHandler = input => input.type === 'session.open' ? { ok: true, result: { session: info(), events: [{
+    type: 'approval.request', deviceId: 'pc', sessionKey: 'hermes:original', tool: 'hermes', ts: Date.now(), approvalId: 'q',
+    kind: 'question', title: 'Hermes 需要补充信息', questionMode: 'hermes', questions: [{ id: 'native', question: 'Text?',
+      inputType: 'text', required: true, allowCustom: true }], approvalOptions: { version: 1, decisions: ['allow'] },
+  }] } } : defaultCommand(input);
+  await openSession('pc', 'hermes:original');
+  await openSession('pc', 'hermes:original', { background: true });
+  await openSession('pc', 'hermes:original');
+  expect(commands.filter(input => input.type === 'agents.status')).toHaveLength(2);
+  await expect(respondApproval({ approvalId: 'q', deviceId: 'pc', sessionKey: 'hermes:original' }, 'allow', undefined, { native: ['text'] }))
+    .rejects.toMatchObject({ code: 'agent_capability_unavailable' });
+  expect(commands.some(input => input.type === 'approval.respond')).toBe(false);
+  capabilities!.questions = true;
+  await openSession('pc', 'hermes:original', { refreshAgentProfile: true });
+  expect(commands.filter(input => input.type === 'agents.status')).toHaveLength(3);
+  expect(getRemoteState().agents.pc.list.find(profile => profile.id === 'hermes')?.capabilities?.questions).toBe(true);
+});
+
+test('a post-open Hermes profile read failure preserves the successful snapshot and never restarts creation', async () => {
+  capabilities!.questions = false; await pair();
+  commandHandler = input => input.type === 'agents.status'
+    ? { ok: false, error: 'status temporarily unavailable', code: 'agent_unavailable' } : defaultCommand(input);
+  const key = await startSession('pc', { tool: 'hermes', cwd: 'C:/fixture', prompt: 'synthetic', approval: 'ask' });
+  await expect(openSession('pc', key)).resolves.toBeUndefined();
+  expect(getRemoteState().timelines[timelineKey('pc', key)]).toMatchObject({ session: { sessionKey: key }, loading: false });
+  expect(getRemoteState().timelines[timelineKey('pc', key)].error).toBeUndefined();
+  expect(getRemoteState().agents.pc.list.find(profile => profile.id === 'hermes')?.capabilities?.questions).toBe(false);
+  await openSession('pc', key, { background: true });
+  expect(commands.filter(input => input.type === 'session.start')).toHaveLength(1);
+  expect(commands.filter(input => input.type === 'agents.status')).toHaveLength(2);
+});
+
 test('a creation-only model capability accepts the first turn but refuses later overrides and effort', async () => {
   capabilities!.modelOverride=false;capabilities!.startModelOverride=true;await pair();
   await expect(startSession('pc',{tool:'hermes',cwd:'C:/fixture',prompt:'synthetic',approval:'ask',model:'synthetic-model'})).resolves.toBe('hermes:created');

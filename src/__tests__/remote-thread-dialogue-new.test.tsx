@@ -39,6 +39,9 @@ const mockLoadEarlier = jest.fn(async (..._args: unknown[]) => undefined);
 const mockStart = jest.fn(async (..._args: unknown[]) => 'codex:new');
 const mockSend = jest.fn(async (..._args: unknown[]) => undefined);
 const mockContinue = jest.fn(async (..._args: unknown[]) => undefined);
+let mockQueueCancel = false;
+const mockQueueAction = jest.fn<Promise<'withdraw' | 'reconcile' | undefined>, unknown[]>();
+const mockWithdrawQueue = jest.fn<Promise<import('../remote/store').QueuedMessageResolution>, unknown[]>();
 let mockHubSteer = false;
 let mockHubContext = false;
 let mockHubSideQuestion = false;
@@ -254,6 +257,9 @@ jest.mock('../remote/store', () => ({
   readSessionContext: (...args: unknown[]) => mockReadContext(...args), compactSessionContext: (...args: unknown[]) => mockCompactContext(...args),
   cancelPendingRemoteMessage: (...args: unknown[]) => mockCancelPending(...args), openOnDesktop: (...args: unknown[]) => mockOpenDesktop(...args), interruptSession: jest.fn(), continueSession: (...args: unknown[]) => mockContinue(...args),
   pausePendingRemoteMessage: jest.fn(async () => undefined),
+  hubSupportsQueueCancel: () => mockQueueCancel,
+  queuedRemoteMessageAction: (...args: unknown[]) => mockQueueAction(...args),
+  withdrawQueuedRemoteMessage: (...args: unknown[]) => mockWithdrawQueue(...args),
   syncSessionEvents: jest.fn(), remoteDeliveryScope: () => mockDeliveryScope, listProjects: async (deviceId: string) => mockRemote.devices.find(device => device.deviceId === deviceId)?.projects ?? [],
 }));
 
@@ -519,7 +525,10 @@ beforeEach(() => {
     reset: () => undefined,
   }));
   mockSend.mockResolvedValue(undefined);
+  jest.requireMock('../remote/store').pausePendingRemoteMessage.mockReset().mockResolvedValue(undefined);
+  jest.requireMock('../remote/store').interruptSession.mockReset();
   mockContinue.mockReset().mockResolvedValue(undefined);
+  mockQueueCancel = false; mockQueueAction.mockReset(); mockWithdrawQueue.mockReset();
   mockRespond.mockReset().mockResolvedValue(undefined);
   mockPickImages.mockReset().mockResolvedValue([]);
   mockLoadPrefs.mockReset().mockResolvedValue({});
@@ -731,6 +740,28 @@ test('opening a listed computer conversation reads its original history without 
   expect(mockStart).not.toHaveBeenCalled();
   expect(mockSend).not.toHaveBeenCalled();
   expect(mockSetApi).not.toHaveBeenCalled();
+});
+
+test.each(['saved', 'failed'] as const)('Hermes frozen source preserves the draft and history before opening a new conversation: %s', async outcome => {
+  const profile:AgentProfile={...originalAgent,id:'hermes',tool:'hermes',name:'Hermes Agent',execution:{tool:'hermes',controlSurface:'cli'},
+    capabilities:{list:true,read:true,send:true,interrupt:true,approval:true,questions:false,modelOverride:false} as AgentCapabilities};
+  const session:SessionInfo={...originalSession,sessionKey:'hermes:original',tool:'hermes',client:'Hermes Agent'};
+  mockRemote.agents.pc.list=[profile];mockRemote.sessions.pc.list=[session];
+  mockRemote.timelines={'pc|hermes:original':{session,loading:false,sourceFrozen:true,items:[oldReply,
+    {kind:'notice',id:'notice:item:hermes-frozen-source',level:'warn',errorCode:'session_source_frozen',noticeKind:'session_source_frozen',text:'此对话仍使用创建时的配置',ts:2}]}};
+  const onNew=jest.fn();
+  const view=await render(<ThreadView visible deviceId="pc" sessionKey={session.sessionKey} agent={profile} onClose={jest.fn()} onCreated={jest.fn()} onNew={onNew}/>);
+  expect(view.getByLabelText('发送')).toBeDisabled();
+  expect(view.getByText('原来的回复')).toBeTruthy();
+  mockComposerSave.mockClear();
+  if(outcome==='failed')mockComposerSave.mockRejectedValueOnce(new Error('草稿保存失败'));
+  await fireEvent.press(view.getByLabelText('用当前配置新建'));
+  expect(mockComposerSave).toHaveBeenCalledWith(expect.stringContaining('hermes:original'),mockDeliveryScope,expect.objectContaining({text:'原草稿'}));
+  if(outcome==='saved')expect(onNew).toHaveBeenCalledWith('code',session.cwd);
+  else expect(onNew).not.toHaveBeenCalled();
+  expect(mockComposerConsume).not.toHaveBeenCalled();expect(mockStart).not.toHaveBeenCalled();expect(mockSend).not.toHaveBeenCalled();
+  expect(view.getByText('原来的回复')).toBeTruthy();expect(view.getByLabelText('给电脑上的 Agent 发消息').props.value).toBe('原草稿');
+  await view.unmount();
 });
 
 test('Hermes resumes its original model without a catalogue or stale override', async () => {
@@ -1777,6 +1808,224 @@ test('queue consumption during edited repair cannot send using the next submissi
   expect(view.getByLabelText('排队中：next untouched')).toBeTruthy();
 });
 
+function prepareStopRecovery() {
+  enableFeatures(); Object.assign(mockRemote.agents.pc.list[0].capabilities!, { preciseInterrupt: true });
+  mockComposerRestore.mockResolvedValue({ scope: mockDeliveryScope, text: '', images: [], revision: 1, imageCount: 0 });
+  const interrupt = jest.requireMock('../remote/store').interruptSession as jest.Mock;
+  const pause = jest.requireMock('../remote/store').pausePendingRemoteMessage as jest.Mock;
+  interrupt.mockResolvedValue({ status: 'requested', turnId: 'stop-turn' });
+  setStopRecoveryTimeline('codex:original', 'stop-turn');
+  return { interrupt, pause };
+}
+function setStopRecoveryTimeline(key: string, turnId: string, items?: TimelineItem[]) {
+  const session: SessionInfo = { ...originalSession, sessionKey: key, status: 'running', activeTurnId: turnId };
+  mockRemote.timelines[`pc|${key}`] = { session, snapshotAt: Date.now(), loading: false,
+    items: items ?? [{ kind: 'turn', id: `start:${turnId}`, status: 'started', turnId, ts: 1 }] };
+}
+function stopRecoveryView(key = 'codex:original', visible = true) {
+  return <ThreadView visible={visible} deviceId="pc" sessionKey={key} agent={originalAgent} onClose={jest.fn()} onCreated={jest.fn()} />;
+}
+async function pressStopRecovery(view: Awaited<ReturnType<typeof render>>) {
+  await fireEvent.press(view.getByLabelText('更多'));
+  await fireEvent.press(view.getByLabelText('停止任务'));
+}
+
+test('stop recovery: a failed local pause can retry without sending any interrupt or message first', async () => {
+  const { interrupt, pause } = prepareStopRecovery();
+  pause.mockRejectedValueOnce(new Error('fixture SQLite unavailable'));
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(interrupt).not.toHaveBeenCalled();
+  expect(view.getByLabelText('停止')).toBeEnabled();
+  expect(view.queryByLabelText('停止待确认')).toBeNull();
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(interrupt).toHaveBeenCalledTimes(1);
+  expect(interrupt).toHaveBeenLastCalledWith('pc', 'codex:original', 'stop-turn');
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test('stop recovery: a failed queue save can retry and preserves its paused row', async () => {
+  const { interrupt } = prepareStopRecovery();
+  mockLoadQueued.mockResolvedValueOnce([queueFixture('keep queued')]);
+  const view = await render(stopRecoveryView());
+  mockSaveQueued.mockRejectedValueOnce(new Error('fixture queue write unavailable'));
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(interrupt).not.toHaveBeenCalled();
+  expect(view.getByLabelText('排队中：keep queued')).toBeTruthy();
+  expect(view.getByLabelText('停止')).toBeEnabled();
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(interrupt).toHaveBeenCalledTimes(1);
+  expect(mockSaveQueued.mock.calls.at(-1)?.[1]).toEqual([expect.objectContaining({ text: 'keep queued', state: 'blocked' })]);
+  expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test.each([
+  ['offline', 409, 'computer_offline'],
+  ['local store preflight', 200, 'interrupt_not_dispatched'],
+  ['stale turn', 200, 'turn_control_stale'],
+] as const)('stop recovery: a definite %s refusal releases only the stop lock', async (_label, status, code) => {
+  const { interrupt } = prepareStopRecovery();
+  interrupt.mockRejectedValueOnce(new HubError('fixture definite refusal', status, code));
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(view.getByLabelText('停止')).toBeEnabled();
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(interrupt).toHaveBeenCalledTimes(2);
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test.each(['stopped', 'already_finished'] as const)('stop recovery: %s survives a later refresh failure and keeps the draft', async status => {
+  const { interrupt } = prepareStopRecovery();
+  interrupt.mockResolvedValueOnce({ status, turnId: 'stop-turn' });
+  const view = await render(stopRecoveryView());
+  await fireEvent.changeText(view.getByLabelText('给电脑上的 Agent 发消息'), 'keep my next draft');
+  mockOpen.mockClear(); mockOpen.mockRejectedValueOnce(new Error('fixture snapshot read failed'));
+  await pressStopRecovery(view);
+  expect(mockOpen).toHaveBeenCalledTimes(1);
+  expect(mockToast).toHaveBeenCalledWith(status === 'stopped' ? '已停止' : '这一轮已经结束', 'stop');
+  expect(view.queryByLabelText('停止待确认')).toBeNull();
+  expect(view.getByLabelText('给电脑上的 Agent 发消息').props.value).toBe('keep my next draft');
+  expect(view.getByLabelText('排队发送')).toBeEnabled();
+  // Real user retry must reach the callback, not only change a toast.
+  await fireEvent.changeText(view.getByLabelText('给电脑上的 Agent 发消息'), '');
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(interrupt).toHaveBeenCalledTimes(2);
+  expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test.each([
+  ['Hub timeout', 0, 'hub_timeout'],
+  ['lost connection', 0, 'hub_unreachable'],
+  ['queued receipt', 409, 'command_receipt_pending'],
+  ['invalid receipt', 409, 'command_delivery_uncertain'],
+  ['server failure', 503, 'upstream_unavailable'],
+] as const)('stop recovery: %s stays locked through hide and rejects another interrupt', async (_label, status, code) => {
+  const { interrupt } = prepareStopRecovery();
+  interrupt.mockRejectedValueOnce(new HubError('fixture uncertain result', status, code));
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  await view.rerender(stopRecoveryView('codex:original', false));
+  await view.rerender(stopRecoveryView());
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  await pressStopRecovery(view);
+  expect(interrupt).toHaveBeenCalledTimes(1);
+  expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test('stop recovery: only the live parent terminal settles an unknown receipt', async () => {
+  const { interrupt } = prepareStopRecovery();
+  interrupt.mockRejectedValueOnce(new HubError('fixture lost receipt', 0, 'hub_timeout'));
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  const start: TimelineItem = { kind: 'turn', id: 'start:stop-turn', turnId: 'stop-turn', status: 'started', ts: 1 };
+  const terminal: TimelineItem = { kind: 'turn', id: 'end:stop-turn', turnId: 'stop-turn', status: 'interrupted', ts: 2 };
+  setStopRecoveryTimeline('codex:original', 'stop-turn', [start,
+    { ...terminal, id: 'other', turnId: 'other-turn' }, { ...terminal, id: 'child', parentId: 'child' }]);
+  await view.rerender(stopRecoveryView());
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  setStopRecoveryTimeline('codex:original', 'stop-turn', [start, terminal]);
+  mockRemote.timelines['pc|codex:original'].cachedAt = Date.now();
+  await view.rerender(stopRecoveryView());
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  delete mockRemote.timelines['pc|codex:original'].cachedAt;
+  mockRemote.timelines['pc|codex:original'].session = { ...originalSession, status: 'idle', lastTerminalTurnId: 'stop-turn' };
+  await view.rerender(stopRecoveryView());
+  expect(view.queryByLabelText('停止待确认')).toBeNull();
+  expect(view.getByLabelText('继续')).toBeEnabled();
+  expect(interrupt).toHaveBeenCalledTimes(1); expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test('stop recovery: hiding local preparation cancels it and reopening permits a new stop', async () => {
+  const { interrupt, pause } = prepareStopRecovery();
+  let finish!: () => void;
+  pause.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  await view.rerender(stopRecoveryView('codex:original', false));
+  await act(async () => { finish(); });
+  expect(interrupt).not.toHaveBeenCalled();
+  await view.rerender(stopRecoveryView());
+  expect(view.getByLabelText('停止')).toBeEnabled();
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(interrupt).toHaveBeenCalledTimes(1); expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test('stop recovery: an already dispatched receipt settles while its conversation is hidden', async () => {
+  const { interrupt } = prepareStopRecovery();
+  let finish!: () => void;
+  interrupt.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({ status: 'stopped', turnId: 'stop-turn' }); }));
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  await view.rerender(stopRecoveryView('codex:original', false));
+  mockToast.mockClear();
+  await act(async () => { finish(); });
+  expect(mockToast).not.toHaveBeenCalled();
+  await view.rerender(stopRecoveryView());
+  expect(view.getByLabelText('停止')).toBeEnabled();
+  expect(interrupt).toHaveBeenCalledTimes(1); expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test('stop recovery: an old preparation cannot block or persist the next conversations queue', async () => {
+  const { interrupt, pause } = prepareStopRecovery();
+  setStopRecoveryTimeline('codex:other', 'other-turn');
+  mockLoadQueued.mockImplementation(async key => key.endsWith('|codex:other') ? [queueFixture('B only')] : []);
+  let finish!: () => void;
+  pause.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  await view.rerender(stopRecoveryView('codex:other'));
+  expect(view.getByLabelText('排队中：B only')).toBeTruthy();
+  mockSaveQueued.mockClear();
+  await act(async () => { finish(); });
+  expect(mockSaveQueued).not.toHaveBeenCalled();
+  expect(view.getByLabelText('排队中：B only')).toBeTruthy();
+  expect(view.getByLabelText('停止')).toBeEnabled();
+  expect(interrupt).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(interrupt).toHaveBeenLastCalledWith('pc', 'codex:other', 'other-turn');
+  expect(mockSaveQueued.mock.calls.at(-1)?.[0]).toBe(`${mockDeliveryScope}|pc|codex:other`);
+  expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test('stop recovery: an old reply cannot release the next conversations pending stop', async () => {
+  const { interrupt } = prepareStopRecovery();
+  setStopRecoveryTimeline('codex:other', 'other-turn');
+  let finishA!: () => void;
+  interrupt.mockImplementationOnce(() => new Promise(resolve => { finishA = () => resolve({ status: 'stopped', turnId: 'stop-turn' }); }));
+  interrupt.mockResolvedValueOnce({ status: 'requested', turnId: 'other-turn' });
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  await view.rerender(stopRecoveryView('codex:other'));
+  await fireEvent.press(view.getByLabelText('停止'));
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  mockToast.mockClear();
+  await act(async () => { finishA(); });
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  expect(mockToast).not.toHaveBeenCalled();
+  await pressStopRecovery(view);
+  expect(interrupt).toHaveBeenCalledTimes(2);
+  await view.rerender(stopRecoveryView());
+  expect(view.getByLabelText('停止')).toBeEnabled();
+  await view.rerender(stopRecoveryView('codex:other'));
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test('stop recovery: foreground changes do not resend or erase a dispatched unknown stop', async () => {
+  const { interrupt } = prepareStopRecovery();
+  interrupt.mockRejectedValueOnce(new HubError('fixture timeout', 0, 'hub_timeout'));
+  const view = await render(stopRecoveryView());
+  await fireEvent.press(view.getByLabelText('停止'));
+  const listeners = (AppState.addEventListener as jest.Mock).mock.calls.map(call => call[1] as (state: string) => void);
+  await act(async () => { jest.replaceProperty(AppState, 'currentState', 'background'); listeners.forEach(change => change('background')); });
+  await act(async () => { jest.replaceProperty(AppState, 'currentState', 'active'); listeners.forEach(change => change('active')); });
+  expect(view.getByLabelText('停止待确认')).toBeDisabled();
+  expect(interrupt).toHaveBeenCalledTimes(1); expect(mockSend).not.toHaveBeenCalled(); await view.unmount();
+});
+
 test('stop adopts the filtered queue after accepted receipt cleanup', async () => {
   enableFeatures(); Object.assign(mockRemote.agents.pc.list[0].capabilities!, { preciseInterrupt: true });
   setItems([], { ...originalSession, status: 'running', activeTurnId: 'stop-turn' });
@@ -2772,8 +3021,9 @@ test.each(['allow', 'deny'] as const)('submitting %s restores the draft and atta
 });
 
 test('definitive question rejection restores the answer for correction without losing the draft', async () => {
-  setItems([oldReply, compactQuestion()]); mockRespond.mockRejectedValueOnce(new Error('fixture disconnected'));
+  setItems([oldReply, compactQuestion()]); mockRespond.mockRejectedValueOnce(new HubError('fixture rejected', 200, 'approval_rejected'));
   const view = await render(viewThread());
+  mockOpen.mockRejectedValueOnce(new Error('fixture head read failed'));
   await fireEvent.press(view.getByRole('radio', { name: 'A' }));
   await fireEvent.press(view.getByLabelText('提交回答'));
   expect(view.getByRole('radio', { name: 'A' }).props.accessibilityState.checked).toBe(true);
@@ -2785,6 +3035,13 @@ test('definitive question rejection restores the answer for correction without l
   expect(mockRespond).toHaveBeenCalledTimes(1);
   mockRemote.devices[0].online = true;
   await view.rerender(viewThread());
+  expect(view.getByLabelText('提交回答').props.accessibilityState.disabled).toBe(true);
+  const rejected = JSON.parse(mockQuestionStorage.get('remote_question_outbox_v1')!)[0] as QuestionReceipt;
+  expect(rejected).toMatchObject({ blocked: 'approval_rejected', rejectedAt: expect.any(Number) });
+  jest.advanceTimersByTime(1);
+  Object.assign(mockRemote.timelines['pc|codex:original'], { snapshotStartedAt: Date.now(), snapshotAt: Date.now() });
+  await view.rerender(viewThread());
+  await waitFor(() => expect(view.getByLabelText('提交回答').props.accessibilityState.disabled).toBe(false));
   expect(view.getByRole('radio', { name: 'A' }).props.accessibilityState.checked).toBe(true);
   await fireEvent.press(view.getByLabelText('提交回答'));
   expect(mockRespond).toHaveBeenCalledTimes(2);
@@ -2980,6 +3237,54 @@ test('restored answers wait for a fresh snapshot and then reuse the journaled UU
   setItems([oldReply, { ...compactQuestion('restored'), state: 'allow' } as TimelineItem]); mockRemote.timelines['pc|codex:original'].snapshotAt = Date.now();
   await view.rerender(viewThread()); await act(async () => { acknowledge(); await response; });
   expect(mockSend).not.toHaveBeenCalled(); expect(mockRespond).toHaveBeenCalledTimes(1);
+});
+
+test('ordinary approval typed HTTP 200 uncertainty keeps one choice and UUID across remount and read-only verification', async () => {
+  const approval: TimelineItem = { kind: 'approval', id: 'ordinary-uncertain', approval: 'tool', title: 'Approve once',
+    state: 'pending', ts: Date.now(), approvalOptions: { version: 1, decisions: ['allow', 'deny'] } };
+  setItems([oldReply, approval], { ...originalSession, status: 'waiting_approval' });
+  mockRespond.mockRejectedValue(new HubError('Native result unavailable', 200, 'command_delivery_uncertain'));
+  let view = await render(viewThread());
+  await waitFor(() => expect(view.getByRole('button', { name: '允许' })).toBeEnabled());
+  await fireEvent.press(view.getByRole('button', { name: '允许' }));
+  await waitFor(() => expect(view.getByLabelText('核对审批结果')).toBeTruthy());
+  expect(mockRespond).toHaveBeenCalledTimes(1);
+  const original = JSON.parse(mockQuestionStorage.get('remote_question_outbox_v1')!)[0] as QuestionReceipt;
+  expect(original).toMatchObject({ scope: mockDeliveryScope, deviceId: 'pc', sessionKey: originalSession.sessionKey,
+    approvalId: approval.id, decision: 'allow', attempted: true });
+  expect(original.command).toMatchObject({ approvalId: approval.id, decision: 'allow', operationId: original.requestId });
+  expect(mockRespond.mock.calls[0][4]).toMatchObject({ requestId: original.requestId, retrying: false });
+  await view.unmount();
+  view = await render(viewThread());
+  await waitFor(() => expect(view.getByLabelText('核对审批结果')).toBeTruthy());
+  expect(view.getByRole('button', { name: '允许' })).toBeDisabled();
+  expect(view.getByRole('button', { name: '拒绝' })).toBeDisabled();
+  await fireEvent.press(view.getByRole('button', { name: '拒绝' }));
+  const reads = mockOpen.mock.calls.length;
+  await fireEvent.press(view.getByLabelText('核对审批结果'));
+  await waitFor(() => expect(mockOpen.mock.calls.length).toBeGreaterThan(reads));
+  await act(async () => { jest.advanceTimersByTime(10_000); });
+  expect(mockRespond).toHaveBeenCalledTimes(1); expect(mockSend).not.toHaveBeenCalled(); expect(mockStart).not.toHaveBeenCalled();
+  const retained = JSON.parse(mockQuestionStorage.get('remote_question_outbox_v1')!) as QuestionReceipt[];
+  expect(retained).toHaveLength(1);
+  expect(retained[0]).toMatchObject({ requestId: original.requestId, decision: 'allow', command: original.command, attempted: true });
+  await view.unmount();
+});
+
+test('ordinary approval transport loss pauses after one submission instead of using the question retry loop', async () => {
+  setItems([oldReply, { kind: 'approval', id: 'ordinary-lost', approval: 'tool', title: 'Approve once', state: 'pending', ts: Date.now(),
+    approvalOptions: { version: 1, decisions: ['allow', 'deny'] } }], { ...originalSession, status: 'waiting_approval' });
+  mockRespond.mockRejectedValue(new HubError('Connection lost', 0));
+  const view = await render(viewThread());
+  await waitFor(() => expect(view.getByRole('button', { name: '允许' })).toBeEnabled());
+  await fireEvent.press(view.getByRole('button', { name: '允许' }));
+  await waitFor(() => expect(view.getByLabelText('核对审批结果')).toBeTruthy());
+  await act(async () => { jest.advanceTimersByTime(20_000); });
+  expect(mockRespond).toHaveBeenCalledTimes(1);
+  expect(view.getByRole('button', { name: '拒绝' })).toBeDisabled();
+  const receipts = JSON.parse(mockQuestionStorage.get('remote_question_outbox_v1')!) as QuestionReceipt[];
+  expect(receipts).toHaveLength(1); expect(receipts[0]).toMatchObject({ decision: 'allow', attempted: true });
+  await view.unmount();
 });
 
 function holdQuestionHttpReceipt() {
@@ -3351,6 +3656,60 @@ const openNewTaskMenu = async (view: Awaited<ReturnType<typeof render>>) => {
   await act(async () => { jest.advanceTimersByTime(REMOTE_STATUS_NOTICE_DELAY_MS); });
   await fireEvent.press(view.getByText(deliveryRetryState(newTaskReceipt()).message));
 };
+
+test('queue cancellation UI: a claim winner restores the original created session and preserves later draft edits', async () => {
+  mockQueueCancel = true; mockQueueAction.mockResolvedValue('reconcile');
+  const receipt = { ...newTaskReceipt(), durableProtocol: 2 as const, executionId: '0199aaa1-1234-4678-9abc-999999999991' };
+  mockPendingNew.mockResolvedValue(receipt);
+  mockComposerRestore.mockResolvedValue({ scope: mockDeliveryScope, revision: 8, identity: '0199aaa1-1234-4678-9abc-000000000002', text: 'keep newer edits', images: [], imageCount: 0 });
+  mockComposerConsume.mockResolvedValue(false);
+  mockWithdrawQueue.mockResolvedValue({ state: 'accepted', sessionKey: 'codex:originally-created', composerDraft: receipt.composerDraft });
+  const created = jest.fn(), view = await render(newTaskView(created));
+  await act(async () => { jest.advanceTimersByTime(REMOTE_STATUS_NOTICE_DELAY_MS); });
+  await fireEvent.press(view.getByText(deliveryRetryState(receipt).message));
+  await fireEvent.press(await view.findByLabelText('核对撤回结果'));
+  expect(mockWithdrawQueue).toHaveBeenCalledWith('pc', receipt.sessionKey, receipt.requestId, mockDeliveryScope);
+  expect(created).toHaveBeenCalledWith('codex:originally-created');
+  expect(view.getByLabelText('给电脑上的 Agent 发消息').props.value).toBe('keep newer edits');
+  expect(mockComposerConsume).toHaveBeenCalledWith(receipt.composerDraft!.key, mockDeliveryScope, 7, receipt.composerDraft!.identity);
+  expect(mockStart).not.toHaveBeenCalled(); expect(mockSend).not.toHaveBeenCalled(); expect(mockRetryNew).not.toHaveBeenCalled();
+  expect(mockToast).not.toHaveBeenCalledWith('已撤回，未发送到电脑', 'checkCircle'); await view.unmount();
+});
+
+test('queue cancellation UI: 503 preserves the pending task and offers result reconciliation with the same ID', async () => {
+  mockQueueCancel = true; mockQueueAction.mockResolvedValue('withdraw');
+  const receipt = { ...newTaskReceipt(), durableProtocol: 2 as const, executionId: '0199aaa1-1234-4678-9abc-999999999991' };
+  mockPendingNew.mockResolvedValue(receipt);
+  mockWithdrawQueue.mockRejectedValueOnce(new HubError('fixture cancellation unconfirmed', 503, 'operation_cancel_unavailable'))
+    .mockResolvedValueOnce({ state: 'cancelled', message: '已撤回，未发送到电脑' });
+  const created = jest.fn(), view = await render(newTaskView(created));
+  await act(async () => { jest.advanceTimersByTime(REMOTE_STATUS_NOTICE_DELAY_MS); });
+  await fireEvent.press(view.getByText(deliveryRetryState(receipt).message));
+  await fireEvent.press(await view.findByLabelText('撤回待发'));
+  expect(created).not.toHaveBeenCalled(); expect(mockToast).not.toHaveBeenCalledWith('已撤回，未发送到电脑', 'checkCircle');
+  mockQueueAction.mockResolvedValue('reconcile');
+  await fireEvent.press(view.getByText('fixture cancellation unconfirmed'));
+  await fireEvent.press(await view.findByLabelText('核对撤回结果'));
+  expect(mockWithdrawQueue.mock.calls).toEqual([
+    ['pc', receipt.sessionKey, receipt.requestId, mockDeliveryScope],
+    ['pc', receipt.sessionKey, receipt.requestId, mockDeliveryScope],
+  ]);
+  expect(mockToast).toHaveBeenCalledWith('已撤回，未发送到电脑', 'checkCircle');
+  expect(mockStart).not.toHaveBeenCalled(); expect(mockSend).not.toHaveBeenCalled(); expect(mockRetryNew).not.toHaveBeenCalled(); await view.unmount();
+});
+
+test.each(['failed', 'not_dispatched'] as const)('queue cancellation UI: %s never claims the task was withdrawn or succeeded', async state => {
+  mockQueueCancel = true; mockQueueAction.mockResolvedValue('reconcile');
+  const receipt = { ...newTaskReceipt(), durableProtocol: 2 as const, executionId: '0199aaa1-1234-4678-9abc-999999999991' };
+  mockPendingNew.mockResolvedValue(receipt);
+  mockWithdrawQueue.mockResolvedValue({ state, message: state === 'failed' ? '原任务执行失败' : '原任务未派发' });
+  const created = jest.fn(), view = await render(newTaskView(created));
+  await act(async () => { jest.advanceTimersByTime(REMOTE_STATUS_NOTICE_DELAY_MS); });
+  await fireEvent.press(view.getByText(deliveryRetryState(receipt).message));
+  await fireEvent.press(await view.findByLabelText('核对撤回结果'));
+  expect(created).not.toHaveBeenCalled(); expect(mockToast).not.toHaveBeenCalledWith('已撤回，未发送到电脑', 'checkCircle');
+  expect(mockStart).not.toHaveBeenCalled(); expect(mockSend).not.toHaveBeenCalled(); expect(mockRetryNew).not.toHaveBeenCalled(); await view.unmount();
+});
 
 test('legacy new-task acceptance without draft identity preserves local edits instead of guessing by revision', async () => {
   const receipt = newTaskReceipt(); delete receipt.composerDraft!.identity;

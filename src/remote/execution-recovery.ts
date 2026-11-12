@@ -4,6 +4,7 @@ export interface ExecutionRecovery { label: string; action?: ExecutionRecoveryAc
 /** Prefer the backend's error category. Incidental words in command output
  * never turn a policy/disk/runtime failure into an API-key action. */
 export function executionRecovery(message = '', code?: string): ExecutionRecovery {
+  if (code === 'session_source_frozen') return { label: '此对话保留原配置，旧记录仍可查看', action: 'new', actionLabel: '用当前配置新建', retry: false };
   if(code==='computer_offline')return {label:'电脑已离线，连接后核对本轮结果',action:'connection',actionLabel:'检查连接',retry:false};
   const api = apiProblem(message, code);
   if (api) {

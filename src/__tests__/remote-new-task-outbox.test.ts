@@ -3,6 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { setHubFetch, type FetchLike } from '../remote/client';
 import { acknowledgeNewSession, bootRemote, cachedAgentFeatures, connectStation, getPendingNewSession, getRemoteState, listAgentFeatures, loadAgentProfiles, newSessionReceiptKey, pairRemoteQr, parseRemoteQr, refreshDevices, remoteDeliveryScope, resetRemoteForTests, retryNewSession, sendToSession, startSession, timelineKey } from '../remote/store';
 import { resetDeliveryForTests } from '../remote/delivery';
+import { withdrawQueuedRemoteMessage } from '../remote/store';
 import { decodeNewTask, encodeNewTask } from '../remote/new-task';
 import { diffSelectionReference, parseDiffForAnnotations } from '../remote/diff-annotations';
 
@@ -54,6 +55,92 @@ beforeEach(()=>{
   installTransport();
 });
 afterEach(()=>{resetRemoteForTests();setHubFetch(null);(AppState as unknown as {currentState:string}).currentState='active';});
+
+function installQueuedStartFixture(holdOriginal = false) {
+  const operationId = '0199aaa1-1234-4678-9abc-999999999991';
+  const ticket = { operationId, ticket: 'original-store-ticket', storageEpoch: 'store-epoch', dispatchNotAfter: Date.now() + 600_000 };
+  let state = 'prepared', prepares = 0, starts = 0, cancels = 0, finishOriginal: (() => void) | undefined;
+  let notifyStarted!: () => void;
+  const started = new Promise<void>(resolve => { notifyStarted = resolve; });
+  const failed = (code: string, status: number) => ({ ok: false, status, text: async () => JSON.stringify({ ok: false, operationId, code, error: code }) });
+  setHubFetch((async (endpoint, init) => {
+    if (endpoint.endsWith('/ping')) return response({ service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, authModes: ['device-pairing'],
+      capabilities: ['device.identity.v1','pair.qr.v1','session.remote.v1','pair.revoke.v1','commands.idempotency.v1','commands.durable.v2','commands.queue-cancel.v1'] });
+    if (endpoint.endsWith('/app/pair/qr')) return response({ pair_token: 'a'.repeat(64), device });
+    if (endpoint.endsWith('/app/devices')) return response({ devices: [device] });
+    if (endpoint.endsWith('/app/commands/prepare')) {
+      prepares++; return response({ ...ticket, state: 'prepared' });
+    }
+    if (endpoint.includes('/app/operations?')) {
+      const url = new URL(endpoint);
+      expect(url.searchParams.get('operationId')).toBe(operationId);
+      expect(url.searchParams.get('ticket')).toBe(ticket.ticket);
+      return response({ ...ticket, state, ok: state === 'prepared' || state === 'completed',
+        ...(state === 'completed' ? { result: { sessionKey: 'codex:original-created' } } : {}) });
+    }
+    if (endpoint.endsWith('/app/operations/cancel')) {
+      cancels++; expect(JSON.parse(String(init.body))).toEqual({ deviceId: 'pc', operationId, ticket: ticket.ticket });
+      state = 'completed'; return failed('operation_not_cancellable', 409);
+    }
+    if (endpoint.endsWith('/app/operations/ack')) return response({ ok: true });
+    if (endpoint.endsWith('/app/commands')) {
+      const body = JSON.parse(String(init.body));
+      if (body.command.type === 'agents.status') return response({ ok: true, result: { agents: [
+        { id: 'codex', available: true, api: { configured: true, accountId: 'api_fixture', source: 'computer' } },
+        { id: 'claude', available: true, api: { configured: true, accountId: 'api_claude', source: 'computer' } },
+      ] } });
+      expect(body.command.type).toBe('session.start'); starts++; writes.push(body);
+      expect(body).toMatchObject({ requestId: operationId, executionTicket: ticket.ticket, command: { operationId } });
+      state = 'queued'; notifyStarted();
+      if (holdOriginal) return new Promise<ReturnType<typeof response>>(resolve => {
+        finishOriginal = () => resolve(response({ ok: true, result: { sessionKey: 'codex:original-created' } }));
+      });
+      return response({ ok: false, state: 'queued' });
+    }
+    throw new Error('unexpected queued-start fixture route');
+  }) as FetchLike);
+  return { operationId, started, finish: () => finishOriginal!(), counts: () => ({ prepares, starts, cancels }) };
+}
+
+test('queue cancellation store integration: a claim winner restores the exact new-session receipt and survives local ACK failure', async () => {
+  const fixture = installQueuedStartFixture(); await pair();
+  await expect(startSession('pc', baseInput)).rejects.toThrow();
+  const pending = (await getPendingNewSession('pc', 'codex'))!, scope = remoteDeliveryScope();
+  expect(pending).toMatchObject({ durableProtocol: 2, executionId: fixture.operationId });
+  expect(pending.requestId).not.toBe(fixture.operationId);
+  const result = await withdrawQueuedRemoteMessage('pc', newSessionReceiptKey('codex'), pending.requestId, scope);
+  expect(result).toEqual({ state: 'accepted', sessionKey: 'codex:original-created', composerDraft: baseInput.composerDraft });
+  expect(await getPendingNewSession('pc', 'codex')).toMatchObject({
+    requestId: pending.requestId, executionId: fixture.operationId, pausedByStop: true,
+    acceptedSessionKey: 'codex:original-created', composerDraft: baseInput.composerDraft,
+  });
+  // This path is the existing accepted-receipt recovery, never another start.
+  await expect(retryNewSession('pc', 'codex', false, pending.requestId)).resolves.toBe('codex:original-created');
+  mockFailCleanup = true;
+  await expect(acknowledgeNewSession('pc', 'codex', false, 'codex:original-created', scope)).rejects.toThrow('synthetic storage failure');
+  expect((await getPendingNewSession('pc', 'codex'))!.requestId).toBe(pending.requestId);
+  mockFailCleanup = false;
+  await acknowledgeNewSession('pc', 'codex', false, 'codex:original-created', scope);
+  expect(await getPendingNewSession('pc', 'codex')).toBeUndefined();
+  expect(fixture.counts()).toEqual({ prepares: 1, starts: 1, cancels: 1 });
+});
+
+test('queue cancellation store integration: a late successful original HTTP cannot recreate a receipt already consumed by recovery', async () => {
+  const fixture = installQueuedStartFixture(true); await pair();
+  const original = startSession('pc', baseInput);
+  await fixture.started;
+  const pending = (await getPendingNewSession('pc', 'codex'))!, scope = remoteDeliveryScope();
+  const result = await withdrawQueuedRemoteMessage('pc', newSessionReceiptKey('codex'), pending.requestId, scope);
+  expect(result).toMatchObject({ state: 'accepted', sessionKey: 'codex:original-created' });
+  await acknowledgeNewSession('pc', 'codex', false, 'codex:original-created', scope);
+  fixture.finish();
+  await expect(original).resolves.toBe('codex:original-created');
+  expect(await getPendingNewSession('pc', 'codex')).toBeUndefined();
+  expect(fixture.counts()).toEqual({ prepares: 1, starts: 1, cancels: 1 });
+  expect(JSON.parse(mockSettings.get('remote.durable.commands.v2')!)[0]).toMatchObject({
+    intentId: pending.requestId, cancelRequested: true, completed: { ok: true, result: { sessionKey: 'codex:original-created' } },
+  });
+});
 
 test('image-only new tasks retain empty text and immutable images through the outbox', async () => {
   await pair();

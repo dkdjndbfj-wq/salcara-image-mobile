@@ -1,6 +1,7 @@
 const mockListeners = new Map<string, Set<(event: any) => void>>(), mockStore = new Map<string, string>();
 let mockWriteGate: (() => Promise<void>) | undefined;
 const mockClose = jest.fn();
+const mockRetireApprovals = jest.fn(async (_scope: string) => {});
 jest.mock('../../modules/salcara-direct-transport', () => ({
   connect: () => queueMicrotask(() => mockListeners.get('onState')?.forEach(listener => listener({ state: 'open' }))),
   send: () => queueMicrotask(() => mockListeners.get('onMessage')?.forEach(listener => listener({ text: JSON.stringify({ type: 'auth_ok', deviceId: 'pc-a' }) }))),
@@ -19,14 +20,16 @@ jest.mock('../remote/direct-message-queue', () => ({ clearDirectMessageQueueScop
 jest.mock('../remote/direct-pending-operation', () => ({ clearDirectPendingOperationScope: async () => {} }));
 jest.mock('../remote/direct-api-selection', () => ({ clearDirectApiSelectionScope: async () => {} }));
 jest.mock('../remote/agent-preferences', () => ({ clearPreferredAgent: async () => {} }));
+jest.mock('../remote/question-outbox', () => ({ retireQuestionScope: (scope: string) => mockRetireApprovals(scope) }));
 import { disconnectDirect, forgetDirectPairing, getDirectConnectionState, listDirectPairings, pairDirectQr,
-  reconnectDirect, resetDirectPairingForTests } from '../remote/direct-pairing';
+  reconnectDirect, resetDirectPairingForTests, directDeliveryScope } from '../remote/direct-pairing';
 const key = 'salcara-direct-pair-v1-pc-a', index = 'salcara-direct-pair-index-v1';
 const record = { version: 1, deviceId: 'pc-a', deviceName: 'Computer', phoneId: 'b'.repeat(64), secret: 'c'.repeat(64),
   fingerprint: 'd'.repeat(64), urls: ['wss://192.168.1.8:47832/direct/ws'], pairedAt: 1 };
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
 beforeEach(() => {
   resetDirectPairingForTests(); mockListeners.clear(); mockStore.clear(); mockClose.mockClear(); mockWriteGate = undefined;
+  mockRetireApprovals.mockClear();
   mockStore.set(key, JSON.stringify(record)); mockStore.set(index, JSON.stringify(['pc-a']));
 });
 afterEach(() => { resetDirectPairingForTests(); });
@@ -38,6 +41,7 @@ test('stale unpair identity does not disconnect or delete a new credential with 
   await expect(forgetDirectPairing('pc-a', expected)).rejects.toThrow('绑定已改变');
   expect(JSON.parse(mockStore.get(key)!).secret).toBe('f'.repeat(64));
   expect(getDirectConnectionState().status).toBe('connected'); expect(mockClose).toHaveBeenCalledTimes(closes);
+  expect(mockRetireApprovals).not.toHaveBeenCalled();
 });
 
 test('the storage queue CAS protects a same-ID replacement committed after the confirmation snapshot', async () => {
@@ -62,6 +66,8 @@ test('the expected snapshot is frozen before queueing, and endpoint changes also
 
 test('the unchanged binding remains removable after an ordinary disconnect and reconnect', async () => {
   const [expected] = await listDirectPairings(); await reconnectDirect('pc-a'); disconnectDirect(); await reconnectDirect('pc-a');
+  const scope = directDeliveryScope();
   await forgetDirectPairing('pc-a', expected);
+  expect(mockRetireApprovals).toHaveBeenCalledWith(scope);
   expect(mockStore.has(key)).toBe(false); expect(mockStore.has(index)).toBe(false); expect(getDirectConnectionState().status).toBe('idle');
 });

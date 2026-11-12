@@ -24,7 +24,7 @@ export function directRetryTarget(timeline:Timeline):DirectRetryTarget|undefined
 
 /** A remote error may itself report ambiguous dispatch, even with a valid RPC envelope. */
 export function directActionUncertain(reason:unknown):boolean {
-  const code=reason&&typeof reason==='object'&&'code'in reason?String(reason.code):'';
+  const code=reason&&typeof reason==='object'&&'remoteCode'in reason&&reason.remoteCode?String(reason.remoteCode):reason&&typeof reason==='object'&&'code'in reason?String(reason.code):'';
   const message=reason instanceof Error?reason.message:String(reason??'');
   return ['timeout','disconnected','protocol','command_delivery_uncertain'].includes(code)
     || /(?:delivery_uncertain|unconfirmed|送达.*未确认|结果未确认|可能.*(?:已执行|已接收|已开始))/i.test(message);

@@ -1,7 +1,7 @@
 import { HubError } from '../remote/client';
 import { DELIVERY_RETRY_WINDOW_MS } from '../remote/offline-policy';
 import { deliverQuestionAnswer } from '../remote/question-delivery';
-import { blockQuestionReceipt, finishQuestionReceipt, markQuestionAttempt, pendingQuestionReceipts, prepareQuestionReceipt, reconcileQuestionReceipts, resetQuestionOutboxForTests } from '../remote/question-outbox';
+import { blockQuestionReceipt, finishQuestionReceipt, markQuestionAttempt, markQuestionRejected, pendingQuestionReceipts, prepareQuestionReceipt, reconcileQuestionReceipts, resetQuestionOutboxForTests } from '../remote/question-outbox';
 const mockSettings = new Map<string, string>();
 let mockUuid = 0;
 jest.mock('expo-crypto', () => ({ randomUUID: () => `0199aaa1-1234-4678-9abc-${String(++mockUuid).padStart(12, '0')}` }));
@@ -11,6 +11,34 @@ const target = { scope: 'paired|credential-a', deviceId: 'pc', sessionKey: 'code
 const answer = { ...target, approvalId: 'question-a', decision: 'allow' as const, answers: { value: [' A ', ''] } };
 beforeEach(() => { mockSettings.clear(); resetQuestionOutboxForTests(); jest.useFakeTimers(); jest.setSystemTime(1_900_000_000_000); });
 afterEach(() => jest.useRealTimers());
+test('definite rejection survives restart and only a strictly newer head can unlock a still-pending card', async () => {
+ const receipt = await prepareQuestionReceipt(answer); await markQuestionAttempt(receipt);
+ jest.advanceTimersByTime(10); const rejectedAt = Date.now();
+ expect(await markQuestionRejected(receipt)).toBe(true);
+ resetQuestionOutboxForTests();
+ expect((await pendingQuestionReceipts(target))[0]).toMatchObject({ requestId: receipt.requestId, decision: 'allow', attempted: true, blocked: 'approval_rejected', rejectedAt });
+ // Even an empty old snapshot is not allowed to clear the newer refusal lock.
+ await reconcileQuestionReceipts(target, [], rejectedAt - 1);
+ await reconcileQuestionReceipts(target, [], rejectedAt);
+ expect(await pendingQuestionReceipts(target)).toHaveLength(1);
+ await expect(prepareQuestionReceipt({ ...answer, decision: 'deny' })).rejects.toMatchObject({ code: 'approval_rejected' });
+ await reconcileQuestionReceipts({ ...target, scope: 'other-scope' }, [], rejectedAt + 1);
+ expect(await pendingQuestionReceipts(target)).toHaveLength(1);
+ await reconcileQuestionReceipts(target, [answer.approvalId], rejectedAt + 1);
+ expect(await pendingQuestionReceipts(target)).toEqual([]);
+ expect((await prepareQuestionReceipt({ ...answer, decision: 'deny' })).requestId).not.toBe(receipt.requestId);
+});
+
+test.each(['restored', 'uncertain'] as const)('an old %s attempt cannot become a definite rejection marker', async scenario => {
+ const original = await prepareQuestionReceipt(answer); await markQuestionAttempt(original);
+ if (scenario === 'uncertain') await blockQuestionReceipt(original, 'command_delivery_uncertain');
+ const candidate = scenario === 'restored' ? (await pendingQuestionReceipts(target))[0] : original;
+ expect(await markQuestionRejected(candidate)).toBe(false);
+ expect((await pendingQuestionReceipts(target))[0].rejectedAt).toBeUndefined();
+ await reconcileQuestionReceipts(target, [answer.approvalId], Date.now() + 1);
+ expect((await pendingQuestionReceipts(target))[0].requestId).toBe(original.requestId);
+});
+
 test('process restart restores exact answer, original deadline and attempted UUID', async () => {
  const original = await prepareQuestionReceipt(answer); await markQuestionAttempt(original);
  resetQuestionOutboxForTests(); const restored = (await pendingQuestionReceipts(target))[0];

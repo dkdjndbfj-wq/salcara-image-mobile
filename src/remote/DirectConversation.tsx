@@ -70,9 +70,9 @@ export function DirectConversation(props:Parameters<typeof DirectConversationCon
   return <WorkbenchPresentationProvider presentation={tablet?'tablet':'phone'}><DirectConversationContent {...props}/></WorkbenchPresentationProvider>;
 }
 function DirectConversationContent({ runtime, deviceId, profile, session, timeline, workspaceMode, text, onText, loading, loadingMore,
-  sending, canSend, uncertain, stopPending=false, error, onSend, onRevert, onStop, onRespond, onEarlier, onRefresh, onBack, onOpenSession, onNew, onMobileWorkspaceVisibilityChange,onContinue,onRetry,onRecoverDelivery,onRecoverMissingDraft,apiControl,onResolveApi,onRegisterBack }: {
+  sending, canSend, uncertain, stopPending=false, approvalReady=true, approvalPending=false, error, onSend, onRevert, onStop, onRespond, onEarlier, onRefresh, onBack, onOpenSession, onNew, onMobileWorkspaceVisibilityChange,onContinue,onRetry,onRecoverDelivery,onRecoverMissingDraft,apiControl,onResolveApi,onRegisterBack }: {
   runtime: WorkspaceRuntime; deviceId: string; profile: AgentProfile; session: SessionInfo; timeline: Timeline; workspaceMode: WorkspaceMode;
-  text: string; onText: (value: string) => void; loading: boolean; loadingMore: boolean; sending: boolean; canSend: boolean; uncertain: boolean; stopPending?:boolean; error: string;
+  text: string; onText: (value: string) => void; loading: boolean; loadingMore: boolean; sending: boolean; canSend: boolean; uncertain: boolean; stopPending?:boolean; approvalReady?:boolean; approvalPending?:boolean; error: string;
   onSend: (options:DirectComposerSubmission,observe?:(outcome:DirectSendOutcome)=>void) => Promise<boolean|undefined>; onStop: () => void; onRespond: (id: string, decision: Decision, answers?: QuestionAnswers) => void;
   onRevert?:(message:import('./sent-message-revision').SentUserMessage,operationId:string)=>Promise<void>;
   onEarlier: () => void; onRefresh: () => void; onBack: () => void; onOpenSession: (key: string) => void; onNew: (mode?: WorkspaceMode, cwd?: string, projectless?: true) => void;
@@ -137,7 +137,7 @@ function DirectConversationContent({ runtime, deviceId, profile, session, timeli
   const services=useMemo(()=>captureDirectSessionServices(deviceId,session,profile,()=>mounted.current&&sourceRef.current===source&&sourceVersion.current.epoch===sourceEpoch),[source,sourceEpoch]);
   const queue=useDirectMessageQueue({pairing:runtime.scope,deviceId,workspaceMode,services,profile,session,timeline,canSend,sending,uncertain,
     autoAll:runtime.remote.agents?.[deviceId]?.autoAll===true,onRefresh});
-  const pendingDelivery=uncertain||stopPending||queue.unconfirmed;
+  const pendingDelivery=uncertain||stopPending||approvalPending||queue.unconfirmed;
   const actionBusy=sending||queue.dispatching||editBusy;
   const queueAction=(action:()=>Promise<unknown>)=>{void action().catch(reason=>showToast(reason instanceof Error?reason.message:'排队操作失败','alert'));};
   const stopTask=()=>queueAction(async()=>{await queue.pause();onStop();});
@@ -286,9 +286,15 @@ function DirectConversationContent({ runtime, deviceId, profile, session, timeli
     if(!services.isCurrent())return;
     if(action==='connection'){onRefresh();showToast('正在读取电脑连接与会话状态，不会重发消息','code');return;}
     if(actionBusy||pendingDelivery||hostWorkActive){showToast('请先等待当前任务结束或核对待确认消息','alert');return;}
+    if(profile.id==='hermes'&&(action==='api'||action==='model'))action='new';
     if(action==='api'){if(onResolveApi)onResolveApi();else showToast('当前连接未提供 API 切换，请在电脑检查','alert');}
     if(action==='model'){if(profile.capabilities?.modelOverride)recoveryRef.current?.model();else showToast('当前 Agent 尚未提供远程模型切换，请在电脑检查','alert');}
-    if(action==='new')onNew();
+    if(action==='new')void (async()=>{
+      const saved=await recoveryRef.current?.saveDraft?.();
+      if(!services.isCurrent())return;
+      if(!saved){showToast('草稿尚未保存，请重试','alert');return;}
+      onNew(workspaceMode,session.projectless?'':session.cwd,...(session.projectless?[true as const]:[]));
+    })().catch(reason=>{if(services.isCurrent())showToast(reason instanceof Error?reason.message:'草稿尚未保存，请重试','alert');});
   };
   return <WorkspaceRuntimeContext.Provider value={runtime}><ThreadUi.Provider value={{onResolveFailure:resolveFailure,presentation:tablet?'tablet':'mobile',currentSessionKey:session.sessionKey,
     editDraftScope:runtime.scope,editDraftDeviceId:deviceId,latestEditableMessageId:onRevert&&profile.capabilities?.latestTurnRevert===true&&session.latestTurnRevert===true?latestEditable?.id:undefined,onEditMessage:editLatest,editMessageDisabledReason:running?'请先停止当前任务，再编辑最新消息':actionBusy||pendingDelivery||!canSend?'请先等待操作完成并核对连接':queue.entries.length?'请先处理排队消息':editBackup.blocked?'请先核对上次编辑保留的内容':undefined,
@@ -332,7 +338,8 @@ function DirectConversationContent({ runtime, deviceId, profile, session, timeli
             </View>;}}/>
           <JumpToLatest visible={jump.visible&&!searchOpen} unseen={jump.unseen} onPress={()=>{readingPosition.interact();atBottom.current=true;dragging.current=false;setJump({visible:false,unseen:false});list.current?.scrollToEnd({animated:true});}}/>
         </View>
-        {approval && !question ? <ApprovalCard approval={approval} more={pending.length-1} tool={profile.tool} busy={actionBusy} disabled={pendingDelivery||!profile.capabilities?.approval} onDecide={decision=>onRespond(approval.id,decision)} onDeny={()=>onRespond(approval.id,'deny')}/> : null}
+        {approval && !question ? <ApprovalCard approval={approval} more={pending.length-1} tool={profile.tool} busy={actionBusy} disabled={pendingDelivery||!approvalReady||!profile.capabilities?.approval} onDecide={decision=>onRespond(approval.id,decision)} onDeny={()=>onRespond(approval.id,'deny')}/> : null}
+        {approvalPending ? <Pressable accessibilityRole="button" accessibilityLabel="核对审批结果" onPress={onRefresh} style={[local.notice,{minHeight:44}]}><Text style={{color:d.warn}}>审批结果待确认，刷新原会话核对；不会重复提交</Text></Pressable> : null}
         {approval&&!question&&!profile.capabilities?.approval?<Text style={[local.notice,{color:d.muted}]}>当前 Agent 不支持手机审批，请在电脑处理</Text>:null}
         {error ? <Text accessibilityRole="alert" style={[local.notice,{color:d.bad}]}>{error}</Text> : null}
         {questionDraft.error?<Pressable accessibilityRole="button" accessibilityLabel="重新读取问答草稿" onPress={questionDraft.retry} style={local.notice}><Text style={{color:d.bad}}>{questionDraft.error} · 重试</Text></Pressable>:null}
@@ -355,7 +362,7 @@ function DirectConversationContent({ runtime, deviceId, profile, session, timeli
         <TaskProgressDock items={timeline.items} activeTurnId={session.activeTurnId} running={running} scopeKey={services.scope}/>
         <LimitRetryNotice failure={retryTarget?.failed} scopeKey={JSON.stringify([source, profile.api])} cancelKey={text + composerDraftSignature}
           enabled={canContinue && !actionBusy && !retryHasImages && Boolean(onRetry) && !hostWorkActive} onRetry={() => onRetry?.()} />
-        <QuestionDock question={questionDraft.ready?question:null} busy={actionBusy||!questionDraft.ready} initialDraft={questionDraft.draft} draftIdentity={questionDraft.identity} onDraftChange={questionDraft.save}
+        <QuestionDock question={questionDraft.ready?question:null} busy={actionBusy||!questionDraft.ready||!approvalReady} initialDraft={questionDraft.draft} draftIdentity={questionDraft.identity} onDraftChange={questionDraft.save}
           blocked={question&&(!profile.capabilities?.approval||!profile.capabilities.questions||!approvalDecisions(question).includes('allow'))?'请在电脑回答':pendingDelivery?'请刷新后核对问题状态':questionDraft.error}
           canCancel={Boolean(question&&profile.capabilities?.approval&&profile.capabilities.questions&&approvalDecisions(question).includes('deny'))} cancelBlocked={pendingDelivery} onAnswer={answers=>{if(question)onRespond(question.id,'allow',answers);}} onCancel={()=>{if(question)onRespond(question.id,'deny');}}>
           <DirectComposer onRegisterBack={composerBack.register} key={services.scope} onNew={onNew} onOpenSession={onOpenSession} onArchive={onBack} onReviewStarted={onRefresh} onSideChat={()=>{if(services.isCurrent()){setSideChatRequest(value=>({scope:source,nonce:(value?.nonce??0)+1}));reveal();}}} filesAppenderRef={filesAppender} onPickFiles={()=>filePicker.current?.pick()} recoveryRef={recoveryRef} editRestoreRef={editRestoreRef} workspaceMode={workspaceMode} onRecoverMissingDraft={onRecoverMissingDraft} onDraftSignatureChange={setComposerDraftSignature} onModelChange={modelChanges.record} imageAnnotationRef={imageAnnotationAppender} services={services} runtime={runtime} deviceId={deviceId} profile={profile} session={session} timeline={timeline} tablet={tablet} text={text} getLatestText={()=>textRef.current} onText={value=>{if(services.isCurrent()){textRef.current=value;onText(value);}}} sending={actionBusy} canSend={canSend&&!editBackup.blocked&&queue.ready&&!queue.error&&(running||!queue.entries.length)} uncertain={pendingDelivery} onSend={onSend} onContinue={canContinue?onContinue:undefined} onQueue={queue.ready?queue.enqueue:undefined} onStop={stopTask} restoreRequest={restoreRequest} onRestoreConsumed={()=>setRestoreRequest(undefined)} reference={reference} onReferenceConsumed={()=>setReference(undefined)} onDraftReadyChange={ready=>{composerReady.current=ready;}}/>

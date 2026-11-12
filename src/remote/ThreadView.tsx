@@ -4,6 +4,7 @@ import {mergeSentEditRecovery,type SentEditRestorer} from './sent-edit-recovery'
 import {useConversationSyncNotice} from './useConversationSyncNotice';
 import {latestRevisableMessage,type SentMessageRevisionHandler} from './sent-message-revision';
 import {latestEditableTurn} from './session-revert';
+import { stopDefinitelyRejected } from './stop-recovery';
 import {getRemoteState,hubSupportsLatestTurnRevert,revertLatestSessionTurn} from './store';
 import {appendComposerFiles,type ComposerFilesAppender} from './composer-files';
 import {promptHistory,promptHistoryIdentity,type PromptHistoryEntry} from './prompt-history';
@@ -43,9 +44,10 @@ import { apiProblem, modelCapabilityProblem, modelCatalogProblem, type ApiProble
 import { QuestionDock } from './QuestionDock';
 import { ApprovalQueueBar } from './ApprovalQueueBar';
 import { approvalDecisions } from './approvals';
+import { approvalResultUncertain, APPROVAL_PENDING_MESSAGE } from './approval-result';
 import type { QuestionDraft } from './QuestionCard';
 import { deliverQuestionAnswer, QuestionDeliveryCancelled } from './question-delivery';
-import { blockQuestionReceipt, finishQuestionReceipt, markQuestionAttempt, pendingQuestionReceipts, prepareQuestionReceipt, reconcileQuestionReceipts, type QuestionReceipt } from './question-outbox';
+import { blockQuestionReceipt, finishQuestionReceipt, markQuestionAttempt, markQuestionRejected, pendingQuestionReceipts, prepareQuestionReceipt, reconcileQuestionReceipts, type QuestionReceipt } from './question-outbox';
 import { MAX_REMOTE_IMAGES, pickRemoteImages, type RemoteImage } from './attachments';
 import { handleSystemPermissionError } from '../system-permissions';
 import { DeliveryPendingError, type DeliveryDraftOwner } from './delivery';
@@ -85,6 +87,7 @@ import { askTemporarySideChat, readTemporarySideChat, hubSupportsTemporarySideCh
 import { askSessionSideQuestion, deleteSessionSideQuestion, hubSupportsSideQuestions, readSessionSideQuestion, sessionSideQuestionScope, sessionSideQuestionStorageScope, sessionSideQuestionHistoryOwner, restoreSessionSideQuestionStorageScope, loadSessionSideQuestionHistoryScopes } from './store';
 import { hubSupportsSessionActions, hubSupportsSessionWorkflows } from './store';
 import { hubSupportsContext, sessionContextScope, snapshotQuestionCommand } from './store';
+import { hubSupportsQueueCancel, queuedRemoteMessageAction, withdrawQueuedRemoteMessage } from './store';
 import { insertSkillMention, reconcileSkillMentions, restoreSkillMentions, stripSkillMentions, type SkillMention } from './skill-mentions';
 import { SlashCommandMenu } from './SlashCommandMenu';
 import { applySlashCommand, buildSlashCommands, parseSlashQuery, slashCommandDisabled, type SlashCommandEntry } from './slash-commands';
@@ -121,6 +124,8 @@ import { claudeApiAdmissionReady } from './api-admission';
 import { SkeletonGroup, SkeletonThread } from '../components/Skeleton';
 import { hasActiveAgentWork } from './work-activity';
 const appForeground = () => AppState.currentState == null || AppState.currentState === 'active';
+type PendingThreadStop = { key: string; scope: string; turnId?: string; attempt: number; epoch: number;
+  phase: 'preparing' | 'requesting' | 'requested' | 'unconfirmed' };
 export const REMOTE_STATUS_NOTICE_DELAY_MS = 30_000;
 export const REMOTE_RETRY_INDICATOR_DELAY_MS = 8_000;
 
@@ -327,12 +332,18 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
     durableRevision?: number; durableIdentity?: string; durableSnapshot?: ComposerDraftInput; snapshot: ComposerDraftInput } | undefined>(undefined);
   const composerMissing = useRef<{ key: string; count: number } | undefined>(undefined);
   const [sending, setSending] = useState(false);
-  const [stopState, setStopState] = useState<{ key: string; turnId?: string; phase: 'requesting' | 'requested' | 'unconfirmed' } | null>(null);
+  // A hidden conversation still owns a dispatched stop. Keep its receipt
+  // separate from another conversation's stop until it is reconciled.
+  const stopRecords = useRef(new Map<string, PendingThreadStop>());
+  const stopSequence = useRef(0);
+  const [, setStopRevision] = useState(0);
+  const stopState = stopRecords.current.get(draftKey) ?? null;
   const stopRef = useRef(stopState); stopRef.current = stopState;
   const [foreground, setForeground] = useState(appForeground);
   const [watchUntil, setWatchUntil] = useState(0);
   type PendingDeliveryView = { requestId?: string; executionId?: string; text: string; retryable: boolean; message: string; createdAt?: number; attempted?: boolean; acceptedSessionKey?: string; composerDraft?: { key: string; revision: number; identity?: string } };
   const [pendingDelivery, setPendingDelivery] = useState<PendingDeliveryView | null>(null);
+  const pendingDeliveryRef = useRef(pendingDelivery); pendingDeliveryRef.current = pendingDelivery;
   const [pendingChecked, setPendingChecked] = useState(false);
   const offlineSince = useRef(Date.now());
   const wasOnline = useRef(online);
@@ -420,6 +431,8 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   useEffect(() => { setAttachMenu(false); }, [visible, draftKey, apiIdentity]);
   const [remoteFilePicker, setRemoteFilePicker] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [withdrawalAction, setWithdrawalAction] = useState<{ key: string; action: 'withdraw' | 'reconcile' }>();
+  const withdrawalFlight = useRef<string | undefined>(undefined);
   const menuAnchor = useRef<View>(null);
   const [sessionManagement, setSessionManagement] = useState(false);
   const [sessionWorkflows, setSessionWorkflows] = useState(false);
@@ -439,6 +452,8 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   const [reason, setReason] = useState('');
   const [busyApproval, setBusyApproval] = useState<string | null>(null);
   const [questionProblem, setQuestionProblem] = useState('');
+  const [approvalRecovery, setApprovalRecovery] = useState<{ key: string; id: string; message: string } | null>(null);
+  const [approvalReadyKey, setApprovalReadyKey] = useState('');
   const answerDraft = useRef<{ scope: string; id: string; answers?: QuestionAnswers } | null>(null);
   const questionDrafts = useRef({ scope: draftKey, values: new Map<string, QuestionDraft>() });
   // Fence synchronously: a child mounts before passive scope-cleanup effects.
@@ -694,7 +709,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   const desktopCanStop = !readOnly && !desktopLive && currentAgent?.capabilities?.preciseInterrupt === true;
   const desktopCanApprove = !desktopLive || desktopApprovalFor(currentAgent, sessionKey) && timeline.items.some(item => item.kind === 'approval' && item.state === 'pending' && item.approvalTransport === 'codex-hook-v1' && Boolean(item.expiresAt && item.expiresAt > Date.now()));
   const execution = resolveAgentExecution(currentAgent ?? undefined);
-  const desktopCanSend = !readOnly && !session?.archived && !claudeSessionAdmissionBlocked(session) && (desktopLive
+  const desktopCanSend = !readOnly && !session?.archived && !timeline.sourceFrozen && !claudeSessionAdmissionBlocked(session) && (desktopLive
     ? desktopLiveFor(currentAgent, sessionKey) && currentAgent?.desktopLive?.capabilities?.send === true
     : Boolean(currentAgent && execution && execution.tool === tool && execution.controlSurface === 'cli'
       && agentSupports(currentAgent, currentAgent.id, 'send') && claudeApiAdmissionReady(currentAgent)));
@@ -711,6 +726,27 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   const interactionCurrent = () => threadMounted.current && interactionOwner.current.visible
     && interactionOwner.current.epoch === interactionEpoch && draftRef.current === draftKey
     && remoteDeliveryScope() === operationScope;
+  const updateOwnedStop = (pending: PendingThreadStop, phase: PendingThreadStop['phase'] | null) => {
+    if (!threadMounted.current || remoteDeliveryScope() !== pending.scope
+      || stopRecords.current.get(pending.key)?.attempt !== pending.attempt) return false;
+    const next = phase ? { ...pending, phase } : null;
+    if (next) stopRecords.current.set(pending.key, next); else stopRecords.current.delete(pending.key);
+    if (draftRef.current === pending.key) stopRef.current = next;
+    setStopRevision(value => value + 1);
+    return true;
+  };
+  useEffect(() => {
+    let changed = false;
+    for (const pending of stopRecords.current.values()) {
+      // Retired authority cannot own this UI. Visibility only cancels local
+      // preparation; it must not erase an already dispatched unknown result.
+      if (pending.scope !== operationScope || pending.phase === 'preparing'
+        && (pending.key !== draftKey || pending.epoch !== interactionEpoch || !visible || !foreground)) {
+        stopRecords.current.delete(pending.key); changed = true;
+      }
+    }
+    if (changed) { stopRef.current = stopRecords.current.get(draftKey) ?? null; setStopRevision(value => value + 1); }
+  }, [draftKey, operationScope, interactionEpoch, visible, foreground]);
   const startCooperation = (targetSessionKey?: string) => {
     if (!interactionCurrent() || !cooperationSupported || !sessionKey) return;
     if (targetSessionKey && (targetSessionKey === sessionKey || targetSessionKey.split(':')[0] !== tool)) return;
@@ -1078,22 +1114,27 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
     }
   }, [pending]);
   useEffect(() => {
-    if (!visible || !deviceId || !sessionKey || timeline.loading || timeline.error || !timeline.snapshotAt || freshSnapshot.current !== draftKey) return;
+    if (!visible || !deviceId || !sessionKey) return;
     let active = true;
     const target = { scope: remoteDeliveryScope(), deviceId, sessionKey };
     // Local clock expiry only hides a form; it is not an authoritative withdrawal.
     // Retain its receipt tombstone until the computer actually resolves/removes it.
-    const ids = timeline.items.filter((item): item is ApprovalItem => item.kind === 'approval' && item.approval === 'question'
+    const ids = timeline.items.filter((item): item is ApprovalItem => item.kind === 'approval'
       && (item.state === 'pending' || item.by === 'timeout')).map(item => item.id);
-    void reconcileQuestionReceipts(target, ids, timeline.snapshotStartedAt ?? timeline.snapshotAt).then(() => pendingQuestionReceipts(target)).then(receipts => {
+    const fresh = !timeline.loading && !timeline.error && Boolean(timeline.snapshotAt) && freshSnapshot.current === draftKey;
+    void (fresh ? reconcileQuestionReceipts(target, ids, timeline.snapshotStartedAt ?? timeline.snapshotAt) : Promise.resolve()).then(() => pendingQuestionReceipts(target)).then(receipts => {
       if (!active || draftRef.current !== draftKey) return;
-      const receipt = receipts.find(value => value.approvalId === activeApproval?.id && activeApproval?.approval === 'question');
-      if (!receipt) return;
+      setApprovalReadyKey(JSON.stringify([draftKey, operationScope]));
+      const receipt = receipts.find(value => value.approvalId === activeApproval?.id);
+      setApprovalRecovery(receipt && activeApproval?.approval !== 'question' ? { key: draftKey, id: receipt.approvalId, message: APPROVAL_PENDING_MESSAGE } : null);
+      if (!receipt) { if (fresh) setQuestionProblem(''); return; }
+      if (!fresh) return;
       answerDraft.current = { scope: draftKey, id: receipt.approvalId, answers: receipt.answers };
-      if (receipt.blocked) { setQuestionProblem('请在电脑核对回答'); return; }
+      if (receipt.blocked) { if (activeApproval?.approval === 'question') setQuestionProblem('请在电脑核对回答'); return; }
+      if (activeApproval?.approval !== 'question' && receipt.attempted) return;
       const approval = pending.find(value => value.id === receipt.approvalId);
       if (approval && online && !approvalRequest.current) void decide(approval, receipt.decision, receipt.message, receipt.answers, receipt);
-    }).catch(() => { if (active) setQuestionProblem('回答记录未恢复，请在电脑核对'); });
+    }).catch(() => { if (active) { setQuestionProblem('回答记录未恢复，请在电脑核对'); setApprovalRecovery({ key: draftKey, id: activeApproval?.id ?? '', message: '审批记录未恢复，请刷新后核对' }); } });
     return () => { active = false; };
   }, [visible, draftKey, operationScope, online, timeline.snapshotAt, timeline.loading, timeline.error, pendingSignature, activeApproval?.id, restoreGeneration]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -1226,7 +1267,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   const refresh = async () => {
     if (!interactionCurrent() || !deviceId || !sessionKey) return;
     const key = draftKey;
-    await openSession(deviceId, sessionKey, desktopLive ? { controlSurface: 'desktop' } : undefined);
+    await openSession(deviceId, sessionKey, desktopLive ? { controlSurface: 'desktop' } : { refreshAgentProfile: true });
     if (interactionCurrent() && draftRef.current === key) setWatchUntil(Date.now() + 120_000);
   };
   const recordApiError = (error: unknown) => {
@@ -1850,50 +1891,71 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
   };
 
   const stop = () => {
-    if (!interactionCurrent() || !deviceId || !sessionKey || !desktopCanStop || stopRef.current?.key === draftKey) return;
+    if (!interactionCurrent() || !appForeground() || !deviceId || !sessionKey || !desktopCanStop || stopRef.current?.key === draftKey) return;
     const turnId = turnControlTarget(timeline, 'stop');
     queueStopEpoch.current += 1;
-    const next = { key: draftKey, turnId, phase: 'requesting' as const };
-    stopRef.current = next; setStopState(next);
+    const pending: PendingThreadStop = { key: draftKey, scope: operationScope, turnId,
+      attempt: ++stopSequence.current, epoch: interactionEpoch, phase: 'preparing' };
+    stopRecords.current.set(draftKey, pending); stopRef.current = pending; setStopRevision(value => value + 1);
+    const ownsStop = () => threadMounted.current && remoteDeliveryScope() === operationScope
+      && stopRecords.current.get(draftKey)?.attempt === pending.attempt;
+    const canPrepare = () => ownsStop() && interactionCurrent() && appForeground();
+    let requestStarted = false;
     if (pendingDelivery) setPendingDelivery({ ...pendingDelivery, retryable: false, message: '已暂停此消息的重发，请先核对原会话' });
     void (async () => {
-      await pausePendingRemoteMessage(deviceId, sessionKey, operationScope);
-      const blocked = queuedRef.current.map(item => ({ ...item, attempted: item.attempted ?? item.state !== 'waiting', state: 'blocked' as const }));
-      if (blocked.length) {
-        updateQueue(blocked); const saved = await saveQueuedDraftsSafe(draftKey, blocked);
-        if (interactionCurrent()) updateQueue(saved);
+      try {
+        await pausePendingRemoteMessage(deviceId, sessionKey, operationScope);
+        // Check before reading shared refs: a different session may have
+        // restored its own queue while the local pause was awaiting storage.
+        if (!canPrepare()) { updateOwnedStop(pending, null); return; }
+        const blocked = queuedRef.current.map(item => ({ ...item, attempted: item.attempted ?? item.state !== 'waiting', state: 'blocked' as const }));
+        if (blocked.length) {
+          updateQueue(blocked);
+          const saved = await saveQueuedDraftsSafe(draftKey, blocked);
+          if (!canPrepare()) { updateOwnedStop(pending, null); return; }
+          updateQueue(saved);
+        }
+        if (!canPrepare()) { updateOwnedStop(pending, null); return; }
+        if (!turnId) throw new Error('当前轮次尚未确认，请先刷新原会话');
+        updateOwnedStop(pending, 'requesting'); requestStarted = true;
+        const result = await interruptSession(deviceId, sessionKey, turnId);
+        if (!ownsStop()) return;
+        if (result.status === 'stopped' || result.status === 'already_finished') {
+          updateOwnedStop(pending, null);
+          if (interactionCurrent() && appForeground()) showToast(result.status === 'stopped' ? '已停止' : '这一轮已经结束', 'stop');
+        } else {
+          updateOwnedStop(pending, result.status === 'requested' ? 'requested' : 'unconfirmed');
+          if (interactionCurrent() && appForeground()) showToast(result.status === 'requested' ? '已请求停止' : '停止结果待确认', 'stop');
+        }
+      } catch (error) {
+        if (!ownsStop()) return;
+        updateOwnedStop(pending, !requestStarted || stopDefinitelyRejected(error) ? null : 'unconfirmed');
+        if (interactionCurrent() && appForeground()) showToast(error instanceof Error ? error.message : '停止结果未确认，请刷新原会话', 'alert');
+        return;
       }
-      if (!interactionCurrent()) return;
-      if (!turnId) {
-        // A refresh may later supply the exact turn ID.  Keep the composer
-        // usable for reconciliation rather than leaving it permanently in a
-        // disabled "waiting" state.
-        stopRef.current = null; setStopState(null);
-        throw new Error('当前轮次尚未确认，请先刷新原会话');
+      // A failed read cannot overturn a verified stop receipt.
+      if (interactionCurrent() && appForeground()) {
+        try { await refresh(); }
+        catch (error) { if (interactionCurrent() && appForeground()) showToast(error instanceof Error ? error.message : '读取失败，请刷新原会话', 'alert'); }
       }
-      const result = await interruptSession(deviceId, sessionKey, turnId);
-      if (!interactionCurrent()) return;
-      if (result.status === 'stopped' || result.status === 'already_finished') {
-        stopRef.current = null; setStopState(null);
-        showToast(result.status === 'stopped' ? '已停止' : '这一轮已经结束', 'stop');
-      } else {
-        const state = { key: draftKey, turnId, phase: result.status === 'requested' ? 'requested' as const : 'unconfirmed' as const };
-        stopRef.current = state; setStopState(state);
-        showToast(result.status === 'requested' ? '已请求停止' : '停止结果待确认', 'stop');
-      }
-      await refresh();
-    })().catch((error: Error) => {
-      if (interactionCurrent()) {
-        if (!turnId) { stopRef.current = null; setStopState(null); showToast(error.message, 'alert'); return; }
-        const state = { key: draftKey, turnId, phase: 'unconfirmed' as const }; stopRef.current = state; setStopState(state); showToast(error.message, 'alert');
-      }
-    });
+    })();
   };
+  const withdrawalKey = JSON.stringify([operationScope, deviceId, draftKey, pendingDelivery?.requestId]);
   useEffect(() => {
-    if (!stopState || stopState.key !== draftKey || !stopState.turnId) return;
+    let active = true; setWithdrawalAction(undefined);
+    const pendingKey = sessionKey ?? (agent ? newSessionReceiptKey(agent.tool, agent.id === 'claude-desktop') : undefined);
+    if (menu && visible && deviceId && pendingKey && pendingDelivery?.requestId && hubSupportsQueueCancel?.()) {
+      void queuedRemoteMessageAction(deviceId, pendingKey, pendingDelivery.requestId, operationScope)
+        .then(action => { if (active && action) setWithdrawalAction({ key: withdrawalKey, action }); }).catch(() => undefined);
+    }
+    return () => { active = false; };
+  }, [menu, visible, withdrawalKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!stopState || stopState.key !== draftKey || !stopState.turnId || !timeline.snapshotAt
+      || timeline.loading || timeline.cachedAt || timeline.error) return;
     const terminal = timeline.items.find(item => item.kind === 'turn' && !item.parentId && item.turnId === stopState.turnId && item.status !== 'started');
-    if (terminal) { stopRef.current = null; setStopState(null); }
-  }, [draftKey, stopState, timeline.items]);
+    if (terminal) updateOwnedStop(stopState, null);
+  }, [draftKey, stopState, timeline.items, timeline.snapshotAt, timeline.loading, timeline.cachedAt, timeline.error]);
   const continueTask = () => {
     if (contextBusyRef.current) return;
     if (featureEligible && (!featureGenerationCurrent() || (collaborationChoice || selectedSkills.length) && !featureCatalogCurrent())) return;
@@ -1916,15 +1978,18 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
       || !latest || latest.state !== 'pending' || !approvalDecisions(latest).includes(decision) || (latest.expiresAt && latest.expiresAt <= Date.now()) || approvalRequest.current?.scope === draftKey) return;
     approval = latest;
     const isQuestion = approval.approval === 'question';
+    if (!restored && !desktopLive && (approvalReadyKey !== JSON.stringify([draftKey, operationScope]) || approvalRecovery?.key === draftKey && approvalRecovery.id === approval.id)) return;
     if (isQuestion) answerDraft.current = { scope: draftKey, id: approval.id, answers };
     const request = { scope: draftKey, id: approval.id, controller: new AbortController() };
     approvalRequest.current = request;
     setBusyApproval(approval.id);
     setQuestionProblem('');
     let persisted: QuestionReceipt | undefined;
+    let dispatched = false;
+    let retriedApproval = false, refreshRejected = false;
     try {
       const target = { approvalId: approval.id, deviceId, sessionKey, ...(desktopLive ? { controlSurface: 'desktop' as const } : {}) };
-      if (isQuestion) {
+      if (isQuestion || !desktopLive) {
         const scope = remoteDeliveryScope();
         // Freeze choices before dispatch; hidden UI content is never discarded.
         const frozen = answers ? Object.fromEntries(Object.entries(answers).map(([key, values]) => [key, [...values]])) : undefined;
@@ -1933,37 +1998,59 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
         persisted = await prepareQuestionReceipt({ scope, deviceId, sessionKey, approvalId: approval.id, decision, message, answers: frozen, expiresAt: approval.expiresAt,
           command: restored?.command ?? snapshotQuestionCommand(target, decision, message, frozen) });
         const receipt = persisted;
-        await deliverQuestionAnswer({ signal: request.controller.signal, expiresAt: approval.expiresAt,
+        if (isQuestion) await deliverQuestionAnswer({ signal: request.controller.signal, expiresAt: approval.expiresAt,
           receipt, beforeAttempt: () => markQuestionAttempt(receipt),
           active: () => interactionCurrent() && approvalRequest.current === request && draftRef.current === request.scope,
           canSend: () => AppState.currentState == null || AppState.currentState === 'active',
           recover: () => syncSessionEvents(deviceId, sessionKey),
-          perform: (requestId, retrying) => respondApproval(target, decision, message, frozen, { requestId, retrying, scope, expiresAt: approval.expiresAt, signal: request.controller!.signal, command: receipt.command }),
+          perform: (requestId, retrying) => { dispatched = true; retriedApproval ||= retrying; return respondApproval(target, decision, message, frozen, { requestId, retrying, scope, expiresAt: approval.expiresAt, signal: request.controller!.signal, command: receipt.command }); },
         });
-        await finishQuestionReceipt(receipt);
+        else {
+          await markQuestionAttempt(receipt);
+          if (!interactionCurrent() || request.controller.signal.aborted || !appForeground()) throw new QuestionDeliveryCancelled();
+          dispatched = true;
+          await respondApproval(target, decision, message, frozen, { requestId: receipt.requestId, retrying: receipt.attempted, scope,
+            expiresAt: approval.expiresAt, signal: request.controller.signal, command: receipt.command });
+        }
+        // The host has confirmed this result; a local cleanup failure must not
+        // turn it into an uncertain approval. A fresh read retries cleanup.
+        await finishQuestionReceipt(receipt).catch(() => undefined);
+        if (interactionCurrent()) setApprovalRecovery(null);
       } else await respondApproval(target, decision, message, answers, {
         requestId: randomUUID(), retrying: false, scope: remoteDeliveryScope(), expiresAt: approval.expiresAt, signal: request.controller.signal,
       });
       if (approvalRequest.current === request) setWatchUntil(Date.now() + 60_000);
     } catch (error) {
       if (persisted && error instanceof QuestionDeliveryCancelled) {
+        if (!dispatched && !persisted.attempted) await finishQuestionReceipt(persisted).catch(() => undefined);
         // The resolved event can cancel the POST wait before its response. A
         // same-scope, newer terminal event is proof; hiding/expiry/absence is not.
         const context = questionContext.current;
-        const resolved = context.items.find((item): item is ApprovalItem => item.kind === 'approval' && item.approval === 'question' && item.id === approval.id);
-        if (context.scope === request.scope && remoteDeliveryScope() === persisted.scope && resolved && resolved.state !== 'pending'
-          && (resolved.by === 'phone' || resolved.by === 'desktop') && resolved.ts >= approval.ts
+        const resolved = context.items.find((item): item is ApprovalItem => item.kind === 'approval' && item.id === approval.id);
+        if (context.scope === request.scope && remoteDeliveryScope() === persisted.scope && resolved && resolved.approval === approval.approval && resolved.state !== 'pending'
+          && (resolved.by === 'phone' || resolved.by === 'desktop' || resolved.state === 'resolved') && resolved.ts >= approval.ts
           && (resolved.seq === undefined || approval.seq === undefined || resolved.seq > approval.seq)) {
           await finishQuestionReceipt(persisted).catch(() => undefined);
         }
       } else if (persisted) {
-        if (error instanceof HubError && ['command_delivery_uncertain', 'command_receipt_missing', 'command_receipt_pending', 'request_id_conflict', 'question_retry_unsupported', 'question_source_unconfirmed', 'question_expired', 'question_clock_changed', 'request_scope_changed'].includes(error.code ?? '') || error instanceof HubError && (error.status === 401 || error.status === 403)) {
+        if (dispatched && !persisted.attempted && !retriedApproval && !approvalResultUncertain(error)) {
+          refreshRejected = await markQuestionRejected(persisted).catch(() => false);
+          if (interactionCurrent()) {
+            setQuestionProblem('审批未采纳，请刷新核对当前问题');
+            if (!isQuestion) setApprovalRecovery({ key: draftKey, id: approval.id, message: '审批未采纳，请刷新核对当前问题' });
+          }
+        } else if (dispatched && approvalResultUncertain(error) || persisted.attempted || retriedApproval || error instanceof HubError && ['command_delivery_uncertain', 'command_receipt_missing', 'command_receipt_pending', 'request_id_conflict', 'question_retry_unsupported', 'question_source_unconfirmed', 'question_expired', 'question_clock_changed', 'request_scope_changed'].includes(error.code ?? '') || error instanceof HubError && (error.status === 401 || error.status === 403)) {
           await blockQuestionReceipt(persisted, error instanceof HubError ? error.code ?? 'question_auth_failed' : 'question_failed').catch(() => undefined);
           if (interactionCurrent() && draftRef.current === request.scope) setQuestionProblem('请在电脑核对回答');
+          if (!isQuestion && interactionCurrent()) setApprovalRecovery({ key: draftKey, id: approval.id, message: APPROVAL_PENDING_MESSAGE });
         } else await finishQuestionReceipt(persisted).catch(() => undefined); // Definitively rejected answers may be corrected with a new UUID.
       }
       if (approvalRequest.current === request && !(error instanceof QuestionDeliveryCancelled)) {
         approvalRequest.current = null; setBusyApproval(null); showToast((error as Error).message, 'alert');
+      }
+      if (refreshRejected && interactionCurrent()) {
+        try { await refresh(); }
+        catch { if (interactionCurrent()) setQuestionProblem('读取失败，请刷新核对当前问题'); }
       }
     } finally {
       // A question stays in the spinner state until its actual resolved event arrives.
@@ -2342,9 +2429,18 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
     if(!interactionCurrent()||apiIdentityRef.current!==apiIdentity)return;
     if(action==='connection'){void refresh().catch(reason=>{if(interactionCurrent()&&apiIdentityRef.current===apiIdentity)showToast(reason instanceof Error?reason.message:'连接检查失败，请稍后重试','alert');});showToast('正在读取电脑连接与会话状态，不会重发消息','code');return;}
     if(sending||apiSwitching||pendingDelivery||hostWorkActive){showToast('请先等待当前任务结束或核对待确认消息','alert');return;}
+    if(agent?.id==='hermes'&&(action==='api'||action==='model'))action='new';
     if(action==='api')openApi();
     if(action==='model')openModels();
-    if(action==='new'){if(onNew)onNew(workspaceMode, session?.projectless || projectless ? '' : session?.cwd || cwd, ...(session?.projectless || projectless ? [true as const] : []));else showToast('请返回项目目录新建对话，原草稿已保留','code');}
+    if(action==='new')void (async()=>{
+      const owner=composerContext.current;
+      if(!owner?.ready||owner.busy||owner.submitting)throw new Error('草稿尚未保存，请稍后重试');
+      const snapshot=copyComposerSnapshot(owner.snapshot);await persistComposer(snapshot,owner);
+      if(!interactionCurrent()||apiIdentityRef.current!==apiIdentity||composerContext.current!==owner)return;
+      if(!sameComposerSnapshot(snapshot,owner.snapshot))throw new Error('输入已变化，请重试；原草稿保留');
+      if(onNew)onNew(workspaceMode,session?.projectless||projectless?'':session?.cwd||cwd,...(session?.projectless||projectless?[true as const]:[]));
+      else showToast('请返回项目目录新建对话，原草稿已保留','code');
+    })().catch(reason=>{if(interactionCurrent())showToast(reason instanceof Error?reason.message:'草稿保存失败，请重试','alert');});
   };
   const threadUi = useMemo(() => ({ editDraftScope:operationScope,editDraftDeviceId:deviceId??undefined,latestEditableMessageId:!readOnly&&!desktopLive&&typeof hubSupportsLatestTurnRevert==='function'&&hubSupportsLatestTurnRevert()&&currentAgent?.capabilities?.latestTurnRevert===true&&session?.latestTurnRevert===true?latestEditable?.id:undefined,onEditMessage:editLatest,editMessageDisabledReason:running?'请先停止当前任务，再编辑最新消息':sending||pendingDelivery||!online?'请先等待操作完成并核对连接':queuedItems.length?'请先处理排队消息':editBackup.blocked?'请先核对上次编辑保留的内容':undefined,onResolveFailure:resolveFailure,openPlan, openDiff, openChanges, openBrowser, undoChanges: undoUnavailable ? undefined : undoChanges, undoUnavailable, openDiffInToolPanel: true, openImage:openConversationImage, artifactScope:outputScope, onOpenArtifact:openArtifact, onArtifactCompose:appendArtifactToComposer, requestAttachment, getAttachmentThumbnail, openAttachment, openLink: openConversationLink, openAnnotation: navigateAnnotation,
     childTitle: (key: string) => {
@@ -2383,7 +2479,7 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
     {effortEditable ? <MainEffortControl levels={scrubLevels} value={effectiveEffort} scopeKey={`${catalogScope}|${capabilityModel}`}
       disabled={apiSwitching || Boolean(pendingDelivery) || !foreground} open={picker === 'effort'} onClose={() => setPicker(current => current === 'effort' ? null : current)} onSelect={chooseEffort} onScrub={onScrub} /> : null}
     {running && !isNew && !desktopLive && !readOnly && !slashQuery && currentAgent?.capabilities?.steer === true && hubSupportsSteer?.() && text.trim()
-      ? <IconButton icon="chevronRight" label="引导当前轮次" size={34} iconSize={17}
+      ? <IconButton icon="chevronRight" label="引导当前轮次" size={44} iconSize={17}
         disabled={verifying || sending || apiSwitching || !desktopCanSend || !online || externalBusy || Boolean(busyApproval) || !pendingChecked || Boolean(pendingDelivery)
           || Boolean(images.length || queuedItems.length) || stopState?.key === draftKey || !turnControlTarget(timeline, 'stop')}
         onPress={() => void send('steer')} /> : null}
@@ -2594,7 +2690,11 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
 
       <View>
       {!readOnly && activeApproval?.approval !== 'question' ? <ApprovalQueueBar count={pending.length} disabled={Boolean(busyApproval)} onMove={moveApproval} /> : null}
-      {!readOnly && activeApproval && activeApproval.approval !== 'question' ? <ApprovalCard approval={activeApproval} more={0} tool={tool} busy={Boolean(busyApproval)} disabled={!online || !desktopCanApprove} allowSession={!desktopLive}
+      {!readOnly && activeApproval?.approval !== 'question' && approvalRecovery?.key === draftKey ? <View style={{ padding: 12, gap: 4 }}>
+        <Text style={{ color: dk.muted }}>{approvalRecovery.message}</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="核对审批结果" disabled={!online || Boolean(busyApproval)} onPress={() => void refresh().catch(error => showToast(error.message, 'alert'))} style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: dk.accentText }}>核对审批结果</Text></Pressable>
+      </View> : null}
+      {!readOnly && activeApproval && activeApproval.approval !== 'question' ? <ApprovalCard approval={activeApproval} more={0} tool={tool} busy={Boolean(busyApproval)} disabled={!online || !desktopCanApprove || !desktopLive && (approvalReadyKey !== JSON.stringify([draftKey, operationScope]) || approvalRecovery?.key === draftKey && approvalRecovery.id === activeApproval.id)} allowSession={!desktopLive}
         onDecide={(decision) => void decide(activeApproval, decision)} onDeny={() => { setReason(''); setDenying(activeApproval); }} /> : null}
       </View>
 
@@ -2770,6 +2870,36 @@ function ThreadViewContent({ visible, deviceId, sessionKey, agent, workspaceMode
 
 
     <ToolbarMenu visible={menu} anchorRef={menuAnchor} label="对话菜单" testID="conversation-actions-menu" onClose={() => setMenu(false)} actions={[
+      ...(pendingDelivery ? [{ label: '暂停重试', icon:'hourglass' as const, tone:'secondary' as const, onPress: () => {
+        if (!interactionCurrent() || !deviceId) return;
+        const pendingKey = sessionKey ?? (agent ? newSessionReceiptKey(agent.tool, agent.id === 'claude-desktop') : undefined);
+        if (!pendingKey) return; setMenu(false);
+        void pausePendingRemoteMessage(deviceId, pendingKey, operationScope, pendingDelivery.requestId).then(() => { if (interactionCurrent() && pendingDeliveryRef.current?.requestId === pendingDelivery.requestId) {
+          setPendingDelivery({ ...pendingDelivery, retryable: false, message: '已暂停后续重试，任务仍可能执行；请核对原会话' });
+          showToast('已暂停后续重试，任务仍可能执行；原编号已保留', 'code');
+        } }).catch(reason => { if (interactionCurrent()) showToast(reason.message, 'alert'); });
+      } }] : []),
+      ...(pendingDelivery && withdrawalAction?.key === withdrawalKey ? [{ label: withdrawalAction.action === 'withdraw' ? '撤回待发' : '核对撤回结果', icon:'close' as const, tone:'danger' as const, onPress: () => {
+        if (!interactionCurrent() || !deviceId || sending || withdrawalFlight.current || !pendingDelivery.requestId) return;
+        const requestId = pendingDelivery.requestId, composer = isNew ? composerContext.current : undefined;
+        if (isNew && !composer?.ready) return;
+        const pendingKey = sessionKey ?? (agent ? newSessionReceiptKey(agent.tool, agent.id === 'claude-desktop') : undefined);
+        if (!pendingKey) return; withdrawalFlight.current = withdrawalKey; setMenu(false); setSending(true);
+        const current = () => interactionCurrent() && pendingDeliveryRef.current?.requestId === requestId;
+        void withdrawQueuedRemoteMessage(deviceId, pendingKey, requestId, operationScope).then(async result => {
+          if (!current() || result.state === 'stale') return;
+          if (result.state === 'accepted') {
+            if (composer && composerContext.current === composer) await acceptNewTask(result.sessionKey, composer, result.composerDraft ?? pendingDelivery.composerDraft);
+            else if (!isNew) { setPendingDelivery(value => value?.requestId === requestId ? null : value); showToast('原任务已送达，未撤回', 'checkCircle'); await refresh(); }
+          } else if (result.state === 'failed') {
+            setPendingDelivery(value => value?.requestId === requestId ? { ...value, retryable: false, message: result.message } : value);
+            showToast(result.message, 'alert');
+          } else {
+            setPendingDelivery(value => value?.requestId === requestId ? null : value); showToast(result.message, 'checkCircle');
+          }
+        }).catch(reason => { if (current()) { setPendingDelivery(value => value?.requestId === requestId ? { ...value, retryable: false, message: reason.message } : value); showToast(reason.message, 'alert'); } })
+          .finally(() => { if (withdrawalFlight.current === withdrawalKey) { withdrawalFlight.current = undefined; if (interactionCurrent()) setSending(false); } });
+      } }] : []),
       ...(pendingDelivery?.retryable && pendingDelivery.requestId ? [{ label: '重试原消息', icon:'retry' as const, tone: 'secondary' as const, onPress: () => {
         if (!interactionCurrent() || sending) return;
         setMenu(false); setSending(true);

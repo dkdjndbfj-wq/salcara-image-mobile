@@ -41,7 +41,7 @@ import { appendComposerFiles, type ComposerFilesAppender } from './composer-file
 import {mergeSentEditRecovery,type SentEditRestorer} from './sent-edit-recovery';
 import {requireHistoryCapabilities} from './history-input';
 
-export interface ComposerRecoveryHandle { model:()=>void }
+export interface ComposerRecoveryHandle { model:()=>void; saveDraft?:()=>Promise<boolean> }
 export type DirectSendOutcome='sent'|'not-sent'|'unknown';
 
 export interface DirectComposerSubmission extends TurnFeatures { owner:string; inputText?:string; draftReceipt?:{revision:number;identity:string}; model?:string; effort?:Effort; attachments?:string[]; permissionMode?:PermissionMode; approval?:ApprovalMode }
@@ -187,10 +187,18 @@ export function DirectComposer({services,runtime,deviceId,profile,session,timeli
   const retainModelEffort=(next:string)=>{const same=next===modelRuntime.current.effectiveModel,supported=reportedEfforts(modelRuntime.current.catalog?.modelCapabilities?.[next]);setEffort(current=>same||!current||supported.includes(current)?current:'');};
   const locked=sending||uploading||uncertain||contextBusy||missingRecoveryBusy||!draftReady||Boolean(restoreRequest),controlsLocked=locked||running&&!onQueue;
   useEffect(()=>{
-    const handle={model:()=>{if(!sourceCurrent()||controlsLocked||!canChooseModel)return;setPicker('model');void loadModels(true);}};
+    const handle={model:()=>{if(!sourceCurrent()||controlsLocked||!canChooseModel)return;setPicker('model');void loadModels(true);},
+      saveDraft:async()=>{
+        const owner=draftSession.current,value=draftValue.current;
+        if(!sourceCurrent()||locked||!owner||!readyRef.current)return false;
+        const signature=draftSignature(value);await owner.save(value);
+        if(!sourceCurrent()||draftSession.current!==owner)return false;
+        if(signature!==draftSignature(draftValue.current))throw new Error('输入已变化，请重试；原草稿保留');
+        return true;
+      }};
     if(recoveryRef)recoveryRef.current=handle;
     return()=>{if(recoveryRef?.current===handle)recoveryRef.current=undefined;};
-  },[recoveryRef,source,services,controlsLocked,canChooseModel]);
+  },[recoveryRef,source,services,controlsLocked,canChooseModel,locked]);
   const autoAll=runtime.remote.agents[deviceId]?.autoAll===true;
   const permissions:Array<PermissionMode|ApprovalMode>=profile.tool==='codex'?(profile.capabilities?.permissionModes??[]).filter(isPermissionMode):(profile.capabilities?.approvalModes??[]).filter(isApprovalMode);
   const permissionLabel=(value:string)=>isPermissionMode(value)?PERMISSION_LABEL[value]:value==='auto_edits'?'自动批准编辑':value==='auto_all'?'全部自动':'权限';

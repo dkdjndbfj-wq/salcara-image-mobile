@@ -35,7 +35,7 @@ export function useDirectApiSelection({ pairing, generation, deviceId, connected
   const flightRef = useRef<object | undefined>(undefined);
   const mounted = useRef(true);
   const unavailable = blocked || (!connected ? '直连已断开' : !profile?.available ? '当前 Agent 不可用'
-    : sessionKey && !profile.conversationApiSwitch ? '请先更新电脑端 Bridge 后切换会话 API'
+    : sessionKey && !profile.conversationApiSwitch ? profile.id === 'hermes' ? '此对话使用创建时的 API；更换配置后请新建对话' : '请先更新电脑端 Bridge 后切换会话 API'
     : profile.api.pending ? '电脑正在切换 API，请先核对状态' : '');
   const current = useRef({ owner, source, pairing, deviceId, family, unavailable, onStatus });
   current.current = { owner, source, pairing, deviceId, family, unavailable, onStatus };

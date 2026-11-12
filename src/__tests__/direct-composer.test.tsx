@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { AppState, BackHandler, Pressable, Text, View } from 'react-native';
 import { act, fireEvent, render } from '@testing-library/react-native';
-import { DirectComposer } from '../remote/DirectComposer';
+import { DirectComposer, type ComposerRecoveryHandle } from '../remote/DirectComposer';
 import type {SlashCommandMenuProps} from '../remote/SlashCommandMenu';
 import type { DirectSessionServices } from '../remote/direct-session-services';
 import type { AgentProfile, SessionInfo } from '../remote/client';
@@ -33,9 +33,9 @@ const featureCatalog={collaborationModes:['default','plan'],skillsSupported:true
 const runtime={scope:'binding',remote:{agents:{pc:{autoAll:false}},devices:[],sessions:{pc:{list:[]}}}} as unknown as WorkspaceRuntime;
 const models=jest.fn(),features=jest.fn(),guard=jest.fn(),send=jest.fn();
 let services:DirectSessionServices;
-function Harness({status='idle',uncertain=false,sending=false,canSend=true,currentSettings,onContinue,onQueue,restoreRequest,onRestoreConsumed,agentProfile=profile,onNew,onSideChat}: {status?:SessionInfo['status'];uncertain?:boolean;sending?:boolean;canSend?:boolean;currentSettings?:Partial<SessionInfo>;onContinue?:any;onQueue?:any;restoreRequest?:any;onRestoreConsumed?:()=>void;agentProfile?:AgentProfile;onNew?:()=>void;onSideChat?:()=>void}){
+function Harness({status='idle',uncertain=false,sending=false,canSend=true,currentSettings,onContinue,onQueue,restoreRequest,onRestoreConsumed,agentProfile=profile,onNew,onSideChat,recoveryRef}: {status?:SessionInfo['status'];uncertain?:boolean;sending?:boolean;canSend?:boolean;currentSettings?:Partial<SessionInfo>;onContinue?:any;onQueue?:any;restoreRequest?:any;onRestoreConsumed?:()=>void;agentProfile?:AgentProfile;onNew?:()=>void;onSideChat?:()=>void;recoveryRef?:React.RefObject<ComposerRecoveryHandle|undefined>}){
   const [text,setText]=useState('update this');
-  return <DirectComposer services={services} runtime={runtime} deviceId="pc" profile={agentProfile} session={{...session,...currentSettings,status}} timeline={{items:[],loading:false}} tablet text={text} onText={setText} sending={sending} canSend={canSend} uncertain={uncertain} onSend={send} onContinue={onContinue} onQueue={onQueue} onStop={()=>{}} onReferenceConsumed={()=>{}} restoreRequest={restoreRequest} onRestoreConsumed={onRestoreConsumed} onNew={onNew} onSideChat={onSideChat}/>;
+  return <DirectComposer recoveryRef={recoveryRef} services={services} runtime={runtime} deviceId="pc" profile={agentProfile} session={{...session,...currentSettings,status}} timeline={{items:[],loading:false}} tablet text={text} onText={setText} sending={sending} canSend={canSend} uncertain={uncertain} onSend={send} onContinue={onContinue} onQueue={onQueue} onStop={()=>{}} onReferenceConsumed={()=>{}} restoreRequest={restoreRequest} onRestoreConsumed={onRestoreConsumed} onNew={onNew} onSideChat={onSideChat}/>;
 }
 beforeEach(()=>{
   jest.clearAllMocks();guard.mockReset();models.mockResolvedValue({models:['model-a','model-b'],modelCapabilities:{'model-b':{source:'codex-model-list',reasoningKnown:true,reasoningEfforts:['high']}}});features.mockResolvedValue(featureCatalog);send.mockResolvedValue(true);
@@ -46,6 +46,31 @@ beforeEach(()=>{
 afterEach(()=>{jest.restoreAllMocks();});
 
 async function choosePlan(view:Awaited<ReturnType<typeof render>>){if(view.queryByLabelText('切换计划模式'))await fireEvent.press(view.getByLabelText('切换计划模式'));else{await fireEvent.press(view.getByLabelText('添加到对话'));await fireEvent.press(view.getByLabelText('计划模式'));}}
+
+test('source recovery saves the existing Direct draft without consuming or sending even when old-source sending is disabled',async()=>{
+  const recoveryRef={current:undefined as ComposerRecoveryHandle|undefined};
+  const view=await render(<Harness recoveryRef={recoveryRef}/>);
+  await fireEvent.changeText(view.getByLabelText('给电脑上的 Agent 发消息'),'保留旧会话草稿');
+  await view.rerender(<Harness canSend={false} recoveryRef={recoveryRef}/>);
+  await act(async()=>{expect(await recoveryRef.current?.saveDraft?.()).toBe(true);});
+  expect(mockDraftSave).toHaveBeenCalledWith(expect.objectContaining({text:'保留旧会话草稿'}));
+  expect(mockDraftConsume).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();
+  expect(view.getByLabelText('给电脑上的 Agent 发消息').props.value).toBe('保留旧会话草稿');
+  await view.unmount();
+});
+
+test('source recovery cannot navigate using a saved draft after its Direct owner changes',async()=>{
+  const recoveryRef={current:undefined as ComposerRecoveryHandle|undefined};
+  const view=await render(<Harness recoveryRef={recoveryRef}/>);
+  let release!:(value:any)=>void;
+  mockDraftSave.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve;}));
+  const saving=recoveryRef.current!.saveDraft!();
+  services={...services,scope:'binding/other/session',isCurrent:()=>false};
+  await view.rerender(<Harness recoveryRef={recoveryRef}/>);
+  await act(async()=>release({revision:1,identity:'saved'}));
+  expect(await saving).toBe(false);expect(mockDraftConsume).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();
+  await view.unmount();
+});
 
 test('system Back dismisses the inline slash menu without consuming text or sending',async()=>{
   let back:Parameters<typeof BackHandler.addEventListener>[1]|undefined;

@@ -127,7 +127,7 @@ function useApiChoice({ visible, deviceId, agent, apis, onClose, onChanged, onFa
 }) {
   const remote = useRemote();
   const styles = useStyles();
-  const unavailable = blocked || (agent.api.pending ? 'API 正在切换，请稍候' : sessionKey && agent.conversationApiSwitch !== true ? '请先更新电脑端 Bridge' : '');
+  const unavailable = blocked || (agent.api.pending ? 'API 正在切换，请稍候' : sessionKey && agent.conversationApiSwitch !== true ? agent.id === 'hermes' ? '此对话使用创建时的 API；更换配置后请新建对话' : '请先更新电脑端 Bridge' : '');
   const unavailableRef = useRef(unavailable); unavailableRef.current = unavailable;
   const externalBusyRef = useRef(externalBusy); externalBusyRef.current = externalBusy;
   const current = agent.api.source === 'phone' ? agent.api.accountId ?? '' : '';

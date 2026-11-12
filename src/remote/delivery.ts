@@ -287,9 +287,26 @@ export async function deliveryUsesDurableProtocol(scope: string, deviceId: strin
 }
 
 /** Stop never deletes an uncertain send or assumes that an in-flight write was cancelled. */
-export async function pausePendingDelivery(scope: string, deviceId: string, sessionKey: string): Promise<void> {
+export async function pausePendingDelivery(scope: string, deviceId: string, sessionKey: string, expectedRequestId?: string): Promise<void> {
   await edit(list => { const item = list.find(row => row.scope === scope && row.deviceId === deviceId && row.sessionKey === sessionKey);
+    if (expectedRequestId && item?.requestId !== expectedRequestId) throw new DeliveryPendingError('原任务的记录已改变，请核对', false, expectedRequestId);
     if (item) item.pausedByStop = true;
+  });
+}
+
+/** Apply a verified old operation result to only its original local receipt. */
+export async function settleQueuedDelivery(scope: string, deviceId: string, sessionKey: string, requestId: string,
+  acceptedSessionKey?: string): Promise<PendingDelivery | undefined> {
+  return edit(list => {
+    requireActiveScope(scope, requestId, false);
+    const index = list.findIndex(item => item.scope === scope && item.deviceId === deviceId && item.sessionKey === sessionKey);
+    if (index < 0 || list[index].requestId !== requestId) return undefined;
+    const item = list[index];
+    if (acceptedSessionKey) {
+      if (!validAcceptedReceipt({ ...item, acceptedSessionKey })) throw new DeliveryPendingError('原任务的完成结果归属不一致，请核对', false, requestId);
+      item.acceptedSessionKey = acceptedSessionKey;
+    } else list.splice(index, 1);
+    return { ...item };
   });
 }
 
@@ -420,7 +437,11 @@ export function deliverMessage(input: Pick<PendingDelivery, 'scope' | 'deviceId'
       await retiredScopes();
       requireActiveScope(receipt.scope, receipt.requestId, prepared.createdByCall);
       const current = (await records()).find(item => item.scope === receipt.scope && item.requestId === receipt.requestId);
-      if (!current || current.pausedByStop) throw pendingError('已暂停此消息的重发，请先核对原会话', false);
+      if (!current || current.pausedByStop && !current.acceptedSessionKey) throw pendingError('已暂停此消息的重发，请先核对原会话', false);
+      if (current.acceptedSessionKey) {
+        receipt = { ...receipt, acceptedSessionKey: current.acceptedSessionKey };
+        if (receipt.draftOwner && receipt.acceptedSessionKey === receipt.sessionKey) return;
+      }
       const outcome = await input.perform(receipt);
       acknowledged = true;
       if (outcome) {

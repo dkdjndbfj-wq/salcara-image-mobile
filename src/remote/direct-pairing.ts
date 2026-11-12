@@ -682,6 +682,7 @@ export async function forgetDirectPairing(deviceId: string, expected?: { pairing
       (require('./drafts') as typeof import('./drafts')).clearRemoteQueuedScope(removedScope),
       (require('./direct-message-queue') as typeof import('./direct-message-queue')).clearDirectMessageQueueScope(removedScope),
       (require('./direct-pending-operation') as typeof import('./direct-pending-operation')).clearDirectPendingOperationScope(removedScope),
+      (require('./question-outbox') as typeof import('./question-outbox')).retireQuestionScope(removedScope),
       (require('./direct-api-selection') as typeof import('./direct-api-selection')).clearDirectApiSelectionScope(removedScope),
       // This optional navigation preference cannot authorize a new pairing;
       // unavailable preference storage must not make unpairing fail.

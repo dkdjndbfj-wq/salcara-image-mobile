@@ -15,10 +15,12 @@ const mockClearDrafts=jest.fn(async(_scope:string)=>{});
 const mockClearQueue=jest.fn(async(_scope:string)=>{});
 const mockClearPending=jest.fn(async(_scope:string)=>{});
 const mockClearApiSelections=jest.fn(async(_scope:string)=>{});
+const mockRetireApprovals=jest.fn(async(_scope:string)=>{});
 jest.mock('../remote/drafts',()=>({clearRemoteQueuedScope:(scope:string)=>mockClearDrafts(scope)}));
 jest.mock('../remote/direct-message-queue',()=>({clearDirectMessageQueueScope:(scope:string)=>mockClearQueue(scope)}));
 jest.mock('../remote/direct-pending-operation',()=>({clearDirectPendingOperationScope:(scope:string)=>mockClearPending(scope)}));
 jest.mock('../remote/direct-api-selection',()=>({clearDirectApiSelectionScope:(scope:string)=>mockClearApiSelections(scope)}));
+jest.mock('../remote/question-outbox',()=>({retireQuestionScope:(scope:string)=>mockRetireApprovals(scope)}));
 
 jest.mock('../../modules/salcara-direct-transport', () => ({
   connect: (...args: unknown[]) => mockConnect(...args as [string, string]),
@@ -51,6 +53,7 @@ const qr = (overrides: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   mockClearApiSelections.mockReset().mockResolvedValue(undefined);
+  mockRetireApprovals.mockReset().mockResolvedValue(undefined);
   resetDirectPairingForTests();
   mockListeners.clear(); mockStore.clear(); mockConnect.mockClear(); mockSend.mockClear(); mockClose.mockClear(); mockClearDrafts.mockReset().mockResolvedValue(undefined); mockClearQueue.mockReset().mockResolvedValue(undefined); mockBeforeWrite = null;
 });
@@ -161,6 +164,7 @@ test('forgetting the active pairing clears the visible peer state and index', as
   expect(mockClearQueue).toHaveBeenCalledWith(scope);
   expect(mockClearPending).toHaveBeenCalledWith(scope);
   expect(mockClearApiSelections).toHaveBeenCalledWith(scope);
+  expect(mockRetireApprovals).toHaveBeenCalledWith(scope);
 });
 
 test('draft cleanup failure after permanent unbind does not restore the deleted credential',async()=>{

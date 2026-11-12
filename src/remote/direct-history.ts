@@ -5,6 +5,7 @@ import { parseBrowserNavigation } from './browser-navigation';
 import { parseComputerActivity } from './computer-activity';
 import { MAX_OUTPUT_ATTACHMENTS } from './attachment-ref';
 import { executionRetryAt, validRetryAt } from './execution-retry';
+import { hermesSettlement, normalizeHermesEvent } from './hermes-event-compat';
 
 const MAX_EVENTS = 800;
 const MAX_SESSIONS = 20;
@@ -69,6 +70,7 @@ type DirectWireEvent = Exclude<HubEvent, {type:'message'|'reasoning'}>
   | (Omit<Extract<HubEvent, {type:'reasoning'}>, 'text'|'final'> & {text?:string;final?:boolean});
 
 export function isDirectEvent(value: unknown, deviceId: string, sessionKey: string): value is DirectWireEvent {
+  value = normalizeHermesEvent(value);
   if (!isRecord(value) || value.deviceId !== deviceId || value.sessionKey !== sessionKey || typeof value.tool !== 'string'
     || !Number.isSafeInteger(value.ts) || (value.ts as number) < 0
     || value.seq !== undefined && (!Number.isSafeInteger(value.seq) || (value.seq as number) < 0)
@@ -98,7 +100,8 @@ export function isDirectEvent(value: unknown, deviceId: string, sessionKey: stri
       && typeof value.approvalId === 'string' && value.approvalId.length > 0 && value.approvalId.length <= 512
       && ['command', 'file_change', 'tool', 'permission', 'question'].includes(String(value.kind)) && typeof value.title === 'string' && value.title.length <= 4096;
     case 'approval.resolved': return fields('approvalId', 'decision', 'by') && typeof value.approvalId === 'string'
-      && ['allow', 'allow_session', 'deny'].includes(String(value.decision)) && ['phone', 'desktop', 'timeout'].includes(String(value.by));
+      && (hermesSettlement(value) && value.decision === 'unknown' || ['allow', 'allow_session', 'deny'].includes(String(value.decision)))
+      && (hermesSettlement(value) && value.by === 'unknown' || ['phone', 'desktop', 'timeout'].includes(String(value.by)));
     case 'turn': return fields('id', 'status', 'error', 'errorCode', 'retryAt', 'usage', 'durationMs') && ['started', 'completed', 'failed', 'interrupted'].includes(String(value.status))
       && (value.id === undefined || typeof value.id === 'string' && value.id.length <= 512)
       && (value.retryAt === undefined || validRetryAt(value.retryAt));
@@ -110,12 +113,14 @@ export function isDirectEvent(value: unknown, deviceId: string, sessionKey: stri
 }
 
 export interface DirectHistoryPage {
+  freshSource?: boolean;
   session: SessionInfo;
   events: HubEvent[];
   nextCursor?: string;
 }
 
 export function normalizeDirectEvent(value: DirectWireEvent, deviceId: string): HubEvent {
+  value = normalizeHermesEvent(value);
   if (value.type === 'message' || value.type === 'reasoning') return {...value, deviceId, text:value.text ?? '', final:value.final ?? false};
   if (value.type === 'turn' || value.type === 'notice') {
     const { retryAt, ...event } = value;
@@ -166,6 +171,7 @@ export function parseDirectHistoryPage(
   }
   return {
     session: raw.session,
+    freshSource: !cursor,
     events: raw.events.filter((value): value is DirectWireEvent => isDirectEvent(value, deviceId, expected.sessionKey))
       .map(value => normalizeDirectEvent(value, deviceId)),
     nextCursor,
@@ -179,7 +185,7 @@ export function mergeDirectHistoryPage(current: Timeline, page: DirectHistoryPag
     // its turn after a concurrent revert; preserve live events and re-read.
     return { ...queuedEvents.reduce(applyEvent, current), historyInvalidated: true };
   }
-  let merged = mergeHistory(current, page.session, page.events);
+  let merged = mergeHistory(current, page.session, page.events, new Set(), page.freshSource !== false);
   for (const event of queuedEvents) merged = applyEvent(merged, event);
   return merged;
 }

@@ -1,9 +1,11 @@
 import {missingSessionReadCode} from './missing-session-error';
+import { stopNotDispatched } from './stop-recovery';
 import {latestEditableTurn,parseSessionRevertResult,type SessionRevertRequest} from './session-revert';
 import type {SentUserMessage} from './sent-message-revision';
 import { executionRetryAt } from './execution-retry';
 import { cooperationCandidate, parseCooperationReading, readCooperationReceipts, saveCooperationReceipt, type CooperationReading, type CooperationReceipt } from './cooperation';
-import { durableExecutionId, executeDurableCommand, pruneDurableCommandBodies, supportsDurableCommand } from './durable-commands';
+import { durableExecutionId, executeDurableCommand, pruneDurableCommandBodies, supportsDurableCommand, durableQueueAction, withdrawDurableQueue } from './durable-commands';
+import { settleQueuedDelivery } from './delivery';
 import { bindDeliveryExecution, deliveryUsesDurableProtocol } from './delivery';
 import { commitDurableEvents, loadDurableEvents, pruneDurableEvents } from './durable-events';
 import { collectAttachmentCache } from './attachment-cache-policy';
@@ -39,6 +41,7 @@ import { rememberSideQuestionHistoryScope, restoreSideQuestionHistoryScope } fro
 import { rememberSideQuestionPairing, sideQuestionHistoryScopes } from './side-question-history';
 import { boundedClientId, messageOrigin, messageSkills } from './conversation-metadata';
 import { approvalDecisions, normalizeApprovalOptions } from './approvals';
+import { hermesSettlement, normalizeHermesEvent } from './hermes-event-compat';
 import type { ApprovalOptions } from './client';
 import { claudeSessionAdmissionBlocked, CONTINUE_PROMPT, turnControlTarget, validTurnId } from './turn-control';
 import { claudeApiAdmissionReady } from './api-admission';
@@ -71,9 +74,9 @@ export type TimelineItem = { turnId?: string } & (
   | { kind: 'message'; id: string; role: 'user' | 'assistant'; text: string; final: boolean; streamState?: 'terminal-unconfirmed' | 'incomplete'; ts: number; seq?: number; orderSeq?: number; local?: boolean; images?: string[]; attachments?: LocalAttachment[]; parentId?: string; clientId?: string; messagePhase?: 'commentary' | 'final_answer'; messageOrigin?: MessageOrigin; skills?: SkillReference[]; contextReferences?: ContextReference[] }
   | { kind: 'reasoning'; id: string; text: string; final: boolean; ts: number; seq?: number; orderSeq?: number; parentId?: string }
   | { kind: 'tool'; id: string; tool: ToolKind; title: string; detail?: string; status: 'running' | 'done' | 'failed' | 'interrupted'; output?: string; outputFinal?: boolean; planKind?: 'proposal' | 'tasks'; diff?: string; exitCode?: number; startedAt?: number; durationMs?: number; ts: number; seq?: number; orderSeq?: number; parentId?: string; childSessionKeys?: string[]; attachments?: LocalAttachment[]; browser?: BrowserNavigation; computer?: ComputerActivity }
-  | { kind: 'approval'; id: string; approval: ApprovalKind; title: string; detail?: string; diff?: string; cwd?: string; state: 'pending' | Decision; by?: 'phone' | 'desktop' | 'timeout'; ts: number; seq?: number; orderSeq?: number; questions?: RemoteQuestion[]; questionMode?: string; expiresAt?: number; approvalTransport?: 'codex-hook-v1'; approvalOptions?: ApprovalOptions; parentId?: string }
+  | { kind: 'approval'; id: string; approval: ApprovalKind; title: string; detail?: string; diff?: string; cwd?: string; state: 'pending' | 'resolved' | Decision; by?: 'phone' | 'desktop' | 'timeout'; ts: number; seq?: number; orderSeq?: number; questions?: RemoteQuestion[]; questionMode?: string; expiresAt?: number; approvalTransport?: 'codex-hook-v1'; approvalOptions?: ApprovalOptions; parentId?: string }
   | { kind: 'turn'; id: string; status: 'started' | 'completed' | 'failed' | 'interrupted'; error?: string; errorCode?: string; retryAt?: number; usage?: Usage; durationMs?: number; ts: number; seq?: number; orderSeq?: number; turnId?: string; parentId?: string }
-  | { kind: 'notice'; id: string; level: 'info' | 'warn' | 'error'; text: string; errorCode?: string; retryAt?: number; retrying?: boolean; noticeKind?: 'context_compaction'; progress?: boolean; ts: number; seq?: number; orderSeq?: number; parentId?: string });
+  | { kind: 'notice'; id: string; level: 'info' | 'warn' | 'error'; text: string; errorCode?: string; retryAt?: number; retrying?: boolean; noticeKind?: 'context_compaction' | 'session_source_frozen'; progress?: boolean; ts: number; seq?: number; orderSeq?: number; parentId?: string });
 export type ApprovalKind = 'command' | 'file_change' | 'tool' | 'permission' | 'question';
 
 /** An attachment reference plus an optional URI already materialized on phone. */
@@ -88,6 +91,8 @@ export interface Timeline { items: TimelineItem[]; session?: SessionInfo; /** Lo
 // A sequenced notification is only an invalidation hint; its payload is not
 // admitted as current usage without a fresh source-bound context read.
 export interface Timeline { contextSignal?: number; workflowSignal?: number }
+/** Current full-snapshot source restriction, separate from historical notices. */
+export interface Timeline { sourceFrozen?: boolean }
 export interface Timeline { revertedTurns?: string[]; revertedItems?: string[]; revertOperations?:string[]; revertSignal?: number }
 export const EMPTY_TIMELINE: Timeline = { items: [], loading: false };
 let localPromptSequence = 0;
@@ -133,6 +138,17 @@ function sameMessageContext(previous: MessageIdentity, current: MessageIdentity)
  */
 function mergeTimelineItem(existing: TimelineItem, incoming: TimelineItem): TimelineItem {
   if (existing.kind !== incoming.kind || existing.id !== incoming.id) return incoming;
+  if (existing.kind === 'approval' && incoming.kind === 'approval') {
+    const known = (value: typeof existing) => value.state !== 'pending' && value.state !== 'resolved' && value.by !== 'timeout';
+    // A local deadline disables controls but cannot contradict a later
+    // authoritative settlement whose actual decision is unavailable.
+    if (existing.state === 'resolved' && incoming.by === 'timeout') return existing;
+    if (existing.by === 'timeout' && incoming.state === 'resolved') return { ...existing, ...incoming, by: incoming.by,
+      orderSeq: existing.orderSeq ?? incoming.orderSeq ?? incoming.seq };
+    if (known(existing) && incoming.state === 'resolved') return existing;
+    if (existing.state === 'resolved' && known(incoming)) return { ...existing, ...incoming, by: incoming.by,
+      orderSeq: existing.orderSeq ?? incoming.orderSeq ?? incoming.seq };
+  }
   if (existing.seq !== undefined && incoming.seq !== undefined && incoming.seq < existing.seq) return existing;
 
   // Legacy Bridges do not provide `seq`.  Their timestamp is still useful for
@@ -198,6 +214,7 @@ function mergeTimelineItem(existing: TimelineItem, incoming: TimelineItem): Time
   // otherwise the same command can jump below the turn boundary merely
   // because its completion arrived with a newer wall-clock timestamp.
   return { ...existing, ...defined, ts: existing.seq === undefined && incoming.seq === undefined ? existing.ts : incoming.ts,
+    ...(existing.kind === 'approval' && incoming.kind === 'approval' && existing.state !== incoming.state ? { by: incoming.by } : {}),
     seq: incoming.seq ?? existing.seq, orderSeq: existing.orderSeq ?? incoming.orderSeq ?? incoming.seq,
     // Reset metadata belongs to this exact error observation. A later event
     // without a reset time must not inherit an old scheduled retry.
@@ -285,6 +302,10 @@ function messageEchoMatches(local: { text: string; clientId?: string; attachment
 
 /** Folds one hub event into a session timeline: streamed items replace by id, approvals move pending → resolved. */
 export function applyEvent(timeline: Timeline, event: HubEvent): Timeline {
+  event = normalizeHermesEvent(event);
+  if (event.type === 'approval.resolved' && (event.decision === 'unknown' || event.by === 'unknown') && !hermesSettlement(event)) return timeline;
+  if (event.type === 'approval.resolved' && (typeof event.approvalId !== 'string' || !event.approvalId || event.approvalId.length > 4096
+    || !['allow', 'allow_session', 'deny', 'unknown'].includes(event.decision) || !['phone', 'desktop', 'timeout', 'unknown'].includes(event.by))) return timeline;
   if(event.type==='session.reverted') {
     const reverted=event;
     if(timeline.revertOperations?.includes(event.operationId))return timeline;
@@ -375,8 +396,11 @@ export function applyEvent(timeline: Timeline, event: HubEvent): Timeline {
     }
     case 'approval.resolved': {
       const existing = timeline.items.find((item) => item.kind === 'approval' && item.id === event.approvalId);
-      const base = existing?.kind === 'approval' ? existing : { kind: 'approval' as const, id: event.approvalId, approval: 'tool' as const, title: '操作', ts };
-      return { ...timeline, items: upsert(timeline.items, { ...base, state: event.decision, by: event.by, ts, seq }) };
+      const base: Extract<TimelineItem, { kind: 'approval' }> = existing?.kind === 'approval' ? existing : { kind: 'approval', id: event.approvalId, approval: 'tool', title: '操作', state: 'pending', ts };
+      const known = base.state !== 'pending' && base.state !== 'resolved' && base.by !== 'timeout' ? base.state : undefined;
+      const decision = event.decision === 'unknown' ? undefined : event.decision;
+      return { ...timeline, items: upsert(timeline.items, { ...base, state: decision ?? known ?? 'resolved',
+        by: decision === undefined && known ? base.by : event.by === 'unknown' ? known !== undefined && decision === known ? base.by : undefined : event.by, ts, seq }) };
     }
     case 'turn': {
       const stableTurn = typeof event.turnId === 'string' && event.turnId.trim() ? event.turnId.trim() : undefined;
@@ -411,7 +435,9 @@ export function applyEvent(timeline: Timeline, event: HubEvent): Timeline {
       const nativeId = typeof event.id === 'string' && event.id.length > 0 && event.id.length <= 512 ? event.id : undefined;
       const id = nativeId ? `notice:item:${nativeId}` : `notice:${ts}:${text}`;
       if (!nativeId && timeline.items.some((item) => item.id === id)) return timeline;
-      return { ...timeline, items: upsert(timeline.items, { kind: 'notice', id, level: event.level, text, errorCode: event.errorCode, retryAt: executionRetryAt(event.errorCode, event.retryAt), retrying: typeof event.retrying === 'boolean' ? event.retrying : undefined, noticeKind: event.noticeKind === 'context_compaction' ? event.noticeKind : undefined, progress: event.noticeKind === 'context_compaction' ? event.progress === true : event.progress === true || undefined, ts, seq, parentId: event.parentId }) };
+      const sourceFrozen = event.tool === 'hermes' && event.id === 'hermes-frozen-source' && !event.parentId
+        && event.errorCode === 'session_source_frozen' && (!timeline.session || timeline.session.sessionKey === event.sessionKey);
+      return { ...timeline, ...(sourceFrozen ? { sourceFrozen: true } : {}), items: upsert(timeline.items, { kind: 'notice', id, level: event.level, text, errorCode: event.errorCode, retryAt: executionRetryAt(event.errorCode, event.retryAt), retrying: typeof event.retrying === 'boolean' ? event.retrying : undefined, noticeKind: event.noticeKind === 'context_compaction' || event.noticeKind === 'session_source_frozen' ? event.noticeKind : undefined, progress: event.noticeKind === 'context_compaction' ? event.progress === true : event.progress === true || undefined, ts, seq, parentId: event.parentId }) };
     }
     default:
       return timeline;
@@ -468,7 +494,7 @@ function filterRevertedHistory(current: Timeline, history: HubEvent[]): { events
 }
 
 /** A bounded computer snapshot is not proof that older, already displayed history was deleted. */
-export function mergeHistory(current: Timeline, session: SessionInfo | undefined, history: HubEvent[], concurrentApprovals = new Set<string>()): Timeline {
+export function mergeHistory(current: Timeline, session: SessionInfo | undefined, history: HubEvent[], concurrentApprovals = new Set<string>(), freshSource = true): Timeline {
   const preferredSession = current.session && session && current.session.updatedAt > session.updatedAt ? current.session : session ?? current.session;
   const knownMessages = new Map(current.items.filter((item): item is Extract<TimelineItem, { kind: 'message' }> => item.kind === 'message' && !item.local).map(item => [item.id, item]));
   const filtered = filterRevertedHistory(current, history);
@@ -483,10 +509,13 @@ export function mergeHistory(current: Timeline, session: SessionInfo | undefined
     next = applyEvent(next, replay.type === 'message' && known && replay.skills === undefined && sameMessageContext(known, replay)
       ? { ...replay, skills: messageSkills(known.skills) } : replay);
   }
+  next.sourceFrozen = freshSource && session?.tool === 'hermes' ? history.some(event => event.type === 'notice' && event.id === 'hermes-frozen-source'
+    && event.tool === 'hermes' && !event.parentId && event.sessionKey === session.sessionKey && event.errorCode === 'session_source_frozen') : current.sourceFrozen;
   const knownItems = new Set(next.items.map(item => `${item.kind}:${item.id}`));
   const confirmed = next.items.filter((item): item is Extract<TimelineItem, { kind: 'message' }> => item.kind === 'message' && item.role === 'user' && !item.local && !item.parentId && !messageOrigin(item.messageOrigin));
   const replacedOptimistic = new Set<string>();
   for (const originalItem of current.items) {
+    if (freshSource && !next.sourceFrozen && originalItem.kind === 'notice' && originalItem.id === 'notice:item:hermes-frozen-source' && originalItem.errorCode === 'session_source_frozen') continue;
     if(originalItem.turnId&&next.revertedTurns?.includes(originalItem.turnId)||next.revertedItems?.includes(originalItem.id))continue;
     const item = upgradeTurnBoundary(originalItem);
     if (item.kind === 'turn' && !item.parentId && next.items.some(child => isUnscopedChildBoundary(item, child))) continue;
@@ -590,6 +619,7 @@ const MAX_INCOMPLETE_TURN_REPAIRS = 3;
 const INCOMPLETE_TURN_REPAIR_DELAYS = [1_000, 5_000, 15_000];
 const INCOMPLETE_TURN_GRACE_MS = 60_000;
 const sessionRequests = new Map<string, number>();
+const sessionQuestionProfileReads = new Map<string, string>();
 const snapshotFlights = new Map<string, { owner: Hub; surface: 'desktop' | 'history'; promise: Promise<void> }>();
 const directoryPreloads = new Map<string, AbortController>();
 const agentRequests = new Map<string, number>();
@@ -962,6 +992,7 @@ function resetConnection(patch: Partial<RemoteState>, active?: { owner: Hub; cap
       return () => hub === owner && generation === connectionGeneration && pairing === pairingGeneration && (!inherited || inherited());
     };
   }
+  sessionQuestionProfileReads.clear();
   hubCapabilities = new Set(active?.capabilities ?? []); sessionCursors.clear(); sessionEpochs.clear(); sessionApprovalSnapshots.clear(); incompleteTurnRepairs.clear(); sessionRequests.clear(); snapshotFlights.clear(); modelCache.clear(); modelRequests.clear(); apiChanges.clear();
   set({ ...initial, phase: 'setup', connections: state.connections, botGroups: state.botGroups ?? [], probes: state.probes, ...patch });
 }
@@ -2044,7 +2075,50 @@ export async function cancelPendingRemoteMessage(deviceId: string, sessionKey: s
   if (receipt?.draftOwner && receipt.acceptedSessionKey === sessionKey) { await settleAcceptedRemoteMessage(receipt); return; }
   return cancelPendingDelivery(scope, deviceId, sessionKey);
 }
-export function pausePendingRemoteMessage(deviceId: string, sessionKey: string, scope = remoteDeliveryScope()) { return pausePendingDelivery(scope, deviceId, sessionKey); }
+export function pausePendingRemoteMessage(deviceId: string, sessionKey: string, scope = remoteDeliveryScope(), requestId?: string) { return pausePendingDelivery(scope, deviceId, sessionKey, requestId); }
+export function hubSupportsQueueCancel(): boolean { return hubCapabilities.has('commands.queue-cancel.v1'); }
+export async function queuedRemoteMessageAction(deviceId: string, sessionKey: string, requestId: string, scope: string): Promise<'withdraw' | 'reconcile' | undefined> {
+  if (!hubSupportsQueueCancel() || scope !== remoteDeliveryScope()) return;
+  const owner = need(), receipt = await pendingDelivery(scope, deviceId, sessionKey);
+  if (!receipt || receipt.requestId !== requestId || receipt.durableProtocol !== 2 || receipt.surface !== 'cli' || receipt.sendOptions?.control) return;
+  return durableQueueAction({ owner, scope, deviceId, intentId: requestId, active: () => owner === hub && scope === remoteDeliveryScope() });
+}
+export type QueuedMessageResolution = { state: 'cancelled' | 'not_dispatched' | 'failed'; message: string }
+  | { state: 'accepted'; sessionKey: string; composerDraft?: NewTaskSnapshot['composerDraft'] } | { state: 'stale' };
+export async function withdrawQueuedRemoteMessage(deviceId: string, sessionKey: string, requestId: string, scope: string): Promise<QueuedMessageResolution> {
+  if (!hubSupportsQueueCancel() || scope !== remoteDeliveryScope()) throw new Error('当前连接不支持撤回待发，请回原会话核对');
+  const owner = need(), receipt = await pendingDelivery(scope, deviceId, sessionKey);
+  if (!receipt || receipt.requestId !== requestId || receipt.durableProtocol !== 2 || receipt.surface !== 'cli' || receipt.sendOptions?.control) throw new Error('原待发任务已变化，请刷新核对');
+  await pausePendingDelivery(scope, deviceId, sessionKey, requestId);
+  const resolved = await withdrawDurableQueue({ owner, scope, deviceId, intentId: requestId, active: () => owner === hub && scope === remoteDeliveryScope() });
+  if (owner !== hub || scope !== remoteDeliveryScope()) throw new Error('连接已切换，请回原任务核对');
+  if (resolved.state === 'cancelled' || resolved.state === 'not_dispatched') {
+    const original = await settleQueuedDelivery(scope, deviceId, sessionKey, requestId);
+    return original ? { state: resolved.state, message: resolved.state === 'cancelled' ? '已撤回，未发送到电脑'
+      : resolved.completion.error || '原任务未发送到电脑' } : { state: 'stale' };
+  }
+  if (!resolved.completion.ok) return { state: 'failed', message: resolved.completion.error || '原任务执行失败，请查看原会话；没有撤回已执行任务' };
+  const result = resolved.completion.result ?? {};
+  // The start outbox key is deliberately not a valid native session ID.
+  // Match its exact canonical shape before validating a real session key.
+  const prefix = sessionKey.slice(0, sessionKey.indexOf(':'));
+  const newTask = validAgentId(prefix) && sessionKey === newSessionReceiptKey(prefix, false);
+  const tool = newTask ? prefix : sessionAgentId(sessionKey);
+  let acceptedKey = sessionKey, composerDraft: NewTaskSnapshot['composerDraft'] = undefined;
+  if (newTask) {
+    const snapshot = decodeNewTask(receipt.text);
+    if (snapshot.desktop || snapshot.tool !== tool || typeof result.sessionKey !== 'string' || sessionAgentId(result.sessionKey) !== tool) {
+      throw new HubError('原任务的完成会话尚未确认，请核对', 409, 'command_delivery_uncertain');
+    }
+    acceptedKey = result.sessionKey; composerDraft = snapshot.composerDraft;
+  } else if (result.sessionKey !== undefined && result.sessionKey !== sessionKey) {
+    throw new HubError('原任务的完成会话尚未确认，请核对', 409, 'command_delivery_uncertain');
+  }
+  const settled = await settleQueuedDelivery(scope, deviceId, sessionKey, requestId, newTask || receipt.draftOwner ? acceptedKey : undefined);
+  if (!settled) return { state: 'stale' };
+  if (!newTask && settled.draftOwner) await settleAcceptedRemoteMessage(settled);
+  return { state: 'accepted', sessionKey: acceptedKey, ...(composerDraft ? { composerDraft } : {}) };
+}
 
 /**
  * Returns whether any outgoing message or approval answer for this computer is
@@ -2508,10 +2582,11 @@ function publishAgentStatus(deviceId: string, parsed: AgentStatus): void {
 
 /** Reads which agents are installed and which API remote tasks will use. Never applies keys or restarts tools. */
 export async function loadAgentProfiles(deviceId: string): Promise<void> {
-  const owner = need();
+  const owner = need(), generation = connectionGeneration, pairing = pairingGeneration;
   const revision = (agentRequests.get(deviceId) ?? 0) + 1;
   agentRequests.set(deviceId, revision);
-  const current = () => owner === hub && agentRequests.get(deviceId) === revision;
+  const current = () => owner === hub && generation === connectionGeneration && pairing === pairingGeneration
+    && agentRequests.get(deviceId) === revision;
   const entry = state.agents[deviceId] ?? { list: [], apis: [], loading: false, loaded: false };
   set((previous) => ({ agents: { ...previous.agents, [deviceId]: { ...entry, loading: true, error: undefined } } }));
   try {
@@ -3052,6 +3127,8 @@ interface SessionReadOptions {
   background?: boolean; preload?: boolean; signal?: AbortSignal; controlSurface?: 'desktop'; silent?: boolean;
   /** Internal recovery after the relay explicitly invalidates its old sequence range. */
   resetEventSequence?: boolean;
+  /** An explicit user refresh may retry the otherwise bounded profile read. */
+  refreshAgentProfile?: boolean;
 }
 
 export function openSession(deviceId: string, sessionKey: string, options?: SessionReadOptions): Promise<void> {
@@ -3185,6 +3262,16 @@ async function readSessionSnapshot(deviceId: string, sessionKey: string, options
     } else {
       if (!hubCapabilities.has('events.durable.v1')) advanceSessionCursor(key, baseline);
       sessionApprovalSnapshots.set(key, Math.max(sessionApprovalSnapshots.get(key) ?? 0, baseline));
+    }
+    const profileScope = JSON.stringify([generation, pairing]);
+    if (currentRequest() && result.session.tool === 'hermes'
+      && (options?.refreshAgentProfile || state.agents[deviceId]?.list.find(item => item.id === 'hermes')?.capabilities?.questions !== true)
+      && (options?.refreshAgentProfile || sessionQuestionProfileReads.get(key) !== profileScope)) {
+      sessionQuestionProfileReads.set(key, profileScope);
+      // Runtime negotiation happens during start/open. The status reply is
+      // authoritative; a question event itself cannot enable answering.
+      // Failure must not turn this successful snapshot into a failed session.
+      await loadAgentProfiles(deviceId).catch(() => undefined);
     }
   } catch (error) {
     // Leaving the thread/backgrounding deliberately aborts this read. Do not
@@ -3878,18 +3965,24 @@ export async function revertLatestSessionTurn(deviceId:string,sessionKey:string,
   }finally{endApiRead(lock);}
 }
 export async function interruptSession(deviceId: string, sessionKey: string, targetTurnId?: string): Promise<InterruptResult> {
-  if (isReadOnlyDesktopSession(sessionKey)) throw new Error('这个桌面对话目前只支持查看');
-  if (isNativeSession(deviceId, sessionKey)) throw new HubError('这个桌面请求请在电脑处理', 200, 'desktop_capability_unavailable');
-  requireAgentCapability(deviceId, sessionAgentId(sessionKey), 'interrupt');
-  requireAgentCapability(deviceId, sessionAgentId(sessionKey), 'preciseInterrupt');
-  const owner = need(), scope = remoteDeliveryScope();
-  const expectedTurnId = targetTurnId ?? turnControlTarget(state.timelines[timelineKey(deviceId, sessionKey)], 'stop');
-  if (!validTurnId(expectedTurnId)) throw new Error('当前轮次尚未确认，请先刷新');
+  let owner: Hub, scope: string, expectedTurnId: string;
+  try {
+    if (isReadOnlyDesktopSession(sessionKey)) throw new Error('这个桌面对话目前只支持查看');
+    if (isNativeSession(deviceId, sessionKey)) throw new HubError('这个桌面请求请在电脑处理', 200, 'desktop_capability_unavailable');
+    requireAgentCapability(deviceId, sessionAgentId(sessionKey), 'interrupt');
+    requireAgentCapability(deviceId, sessionAgentId(sessionKey), 'preciseInterrupt');
+    owner = need(); scope = remoteDeliveryScope();
+    const target = targetTurnId ?? turnControlTarget(state.timelines[timelineKey(deviceId, sessionKey)], 'stop');
+    if (!validTurnId(target)) throw new Error('当前轮次尚未确认，请先刷新');
+    expectedTurnId = target;
+  } catch (error) { throw stopNotDispatched(error); }
   const key = JSON.stringify([scope, deviceId, sessionKey, expectedTurnId]);
   const previous = interruptFlights.get(key); if (previous) return previous;
   const flight = (async () => {
-    await pausePendingDelivery(scope, deviceId, sessionKey);
-    if (owner !== hub || scope !== remoteDeliveryScope()) throw new Error('连接已切换，停止请求未从新连接发送');
+    try {
+      await pausePendingDelivery(scope, deviceId, sessionKey);
+      if (owner !== hub || scope !== remoteDeliveryScope()) throw new Error('连接已切换，停止请求未从新连接发送');
+    } catch (error) { throw stopNotDispatched(error); }
     // The operation ID is also the command idempotency key.  A retry after a
     // relay timeout must address the same turn operation, never create a new
     // interrupt with a different request identity.

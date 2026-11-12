@@ -350,7 +350,10 @@ export const BlockRow = memo(function BlockRow({ block, tool, onOpenChild, stat,
           {compacting && block.item.progress ? <ActivityIndicator size="small" color={dk.accentText} style={{ transform: [{ scale: 0.78 }] }} />
             : retrying ? <ActivityIndicator accessibilityRole="progressbar" accessibilityLabel="请求重试进度" size="small" color={dk.muted} style={{ transform: [{ scale: 0.78 }] }} />
             : <Icon name={error || warning ? 'alert' : compacting ? 'checkCircle' : 'clock'} size={14} color={error ? dk.bad : warning ? dk.warn : compacting ? dk.accentText : dk.muted} />}
-          <Text style={[styles.noticeText, compacting && { color: dk.accentText }, error && { color: dk.bad }, warning && { color: dk.warn }]}>{noticeText}</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.noticeText, { flex: 0 }, compacting && { color: dk.accentText }, error && { color: dk.bad }, warning && { color: dk.warn }]}>{noticeText}</Text>
+            {block.item.errorCode === 'session_source_frozen' && ui.onResolveFailure ? <Pressable accessibilityRole="button" accessibilityLabel="用当前配置新建" style={{ minHeight: 44, justifyContent: 'center' }} onPress={() => ui.onResolveFailure?.('new')}><Text style={{color:dk.accentText}}>用当前配置新建</Text></Pressable> : null}
+          </View>
           {retrying ? <Text accessibilityLabel="正在重试" style={[styles.noticeText, { color: dk.muted, fontSize: 11 }]}>正在重试</Text> : null}
         </View>;
       }
@@ -472,8 +475,8 @@ function WorkItemRow({ item, active = false, searchQuery = '', exactSession = tr
   }
   if (item.kind === 'notice') return <View style={[styles.step, tabletRow]}><Icon name="info" size={14} color={dk.muted} /><Text style={styles.stepText}>{item.text}</Text></View>;
   if (item.kind === 'approval') return <View style={[styles.step, tabletRow]}>
-    <Icon name={item.state === 'pending' ? 'hourglass' : item.state === 'deny' ? 'close' : 'checkCircle'} size={14} color={item.state === 'pending' ? dk.muted : item.state === 'deny' ? dk.bad : dk.ok} />
-    <Text style={styles.stepText} numberOfLines={1}>{item.state === 'pending' ? item.approval === 'question' ? '等待回答' : '待批准' : item.by === 'timeout' ? '超时未处理' : item.approval === 'question' ? item.state === 'deny' ? '已取消回答' : '已回答' : item.state === 'deny' ? '已拒绝' : '已允许'}：{item.title}</Text>
+    <Icon name={item.state === 'pending' ? 'hourglass' : item.state === 'resolved' ? 'info' : item.state === 'deny' ? 'close' : 'checkCircle'} size={14} color={item.state === 'pending' || item.state === 'resolved' ? dk.muted : item.state === 'deny' ? dk.bad : dk.ok} />
+    <Text style={styles.stepText} numberOfLines={1}>{item.state === 'pending' ? item.approval === 'question' ? '等待回答' : '待批准' : item.state === 'resolved' ? '已处理，详情未同步' : item.by === 'timeout' ? '超时未处理' : item.approval === 'question' ? item.state === 'deny' ? '已取消回答' : '已回答' : item.state === 'deny' ? '已拒绝' : '已允许'}：{item.title}</Text>
   </View>;
   if (item.tool === 'file_change') return <View testID={`execution-row:${item.id}`}>
     <Pressable accessibilityRole="button" accessibilityLabel={`查看文件编辑：${item.title}`} accessibilityState={{ expanded: open }} onPress={() => setOpen(value => !value)} style={[styles.step, tabletRow]}>
