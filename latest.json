@@ -1,15 +1,15 @@
 {
-  "version": "1.8.5",
-  "tagName": "v1.8.5",
-  "title": "Salcara AI v1.8.5",
-  "notes": "# Salcara Android 1.8.5\n\n本版完善 Bot 远程连接恢复与通知路由，配套 **Salcara Desktop 1.6.8** 与 **Salcara Hub 0.5.5**。\n\n- Bot 组暂时没有在线电脑时保留组连接；绑定回包丢失后可查询并恢复已确认结果，不盲目重复绑定或执行任务。\n- 完善多电脑的目标选择、发送回执与任务事件恢复；仅收到回执时不会重新执行任务，撤销授权后不再继续发送。\n- Hub 地址迁移时保留原站点身份与组范围，先验证新入口确属原站点，再恢复授权请求；身份不符、旧令牌或已撤销授权不能借恢复流程重新生效。\n- 改进 Android 通知的多电脑路由、前后台交接及重试状态；未经验证的路线保留为可重试，避免临时故障造成永久漏收。\n- 收紧最终发送时的授权检查，前台和原生后台使用一致的路由与身份约束，避免切换连接或撤销期间的迟到结果发往错误目标。\n\n正式包名仍为 `top.salcara.image`，版本 1.8.5（Android versionCode 26；iOS 源码 buildNumber 26）。正式 Android 构建沿用现有发布签名，并核验与 1.8.4 的覆盖升级兼容性。已安装正式版时无需先卸载；建议先备份重要本地数据。\n\n## 验证与使用边界\n\n本轮已完成 JavaScript、类型检查、Android 原生逻辑及隔离 TLS 联调；联调用合成 Agent 验证恢复、迁址、回执、撤销与多电脑路由，不等同于所有真实 Agent 或安卓真机验收。正式 Android 包已通过完整构建、原字节产物校验与同签名覆盖升级检查，并已发布。\n\n电脑需自行安装并配置相应 Agent，各 Agent 的发送、模型、历史和工具能力依实际支持情况开放；本版不接管 Claude 账号登录。Android 后台通知仍受系统、省电、网络及站点推送配置影响，不能保证强制停止后即时送达。锁屏、省电、真实推送及真机安装体验需在实际设备确认。本版不提供新的正式 iPhone 安装渠道。\n",
-  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.5",
-  "publishedAt": "2026-11-11T11:40:19Z",
+  "version": "1.8.6",
+  "tagName": "v1.8.6",
+  "title": "Salcara AI v1.8.6",
+  "notes": "# Salcara Android 1.8.6\n\n本版修复远程连接、审批回执和任务恢复问题，配套 **Salcara Desktop 1.6.9** 与 **Salcara Hub 0.5.6**。\n\n- 改善慢网络下的站点发现与身份确认，减少正常响应被过早判为超时；保留地址轮换、取消和站点身份校验。\n- 修复重新扫码期间旧绑定错误回包干扰新配对，以及旧会话回包覆盖当前连接状态的问题。切换站点身份后，旧请求不再继续发送；绑定已失效时明确提示重新扫码。\n- 审批或停止请求回包丢失时，保留原请求并核对结果，避免重复授权或重复操作；切换会话、离开页面和后台恢复时按原会话处理。\n- 改善 Hermes 历史工具事件、审批结果和首次问答能力的识别；来源不可继续使用时保留历史与草稿，并提供新建会话入口。\n- 支持在配套 Hub 上撤回尚未派发的任务，断线后先核对原任务状态；已执行的任务恢复原结果，不重新发送。\n\n正式包名仍为 `top.salcara.image`，版本 1.8.6（Android versionCode 27；iOS 源码 buildNumber 27）。Android 构建沿用现有正式签名，以 1.8.5 为覆盖升级对照版本。新包可直接覆盖安装正式旧版。\n\n## 使用边界\n\n任务撤回和 Hermes 问答按电脑及 Hub 实际支持能力开放。“暂停重试”只暂停后续重试，当前请求仍可能完成；界面会继续保留并核对原请求状态。\n\n电脑需自行安装并配置相应 Agent，本版不接管 Claude 账号登录。Android 后台通知受系统、省电、网络和站点配置影响；实际安装、锁屏、省电、真实推送与 Agent 使用体验仍需在实际设备确认。本版不提供新的正式 iPhone 安装渠道。\n",
+  "pageUrl": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.6",
+  "publishedAt": "2026-11-12T14:48:35Z",
   "apk": {
-    "name": "salcara-image-android-v1.8.5.apk",
-    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.5/salcara-image-android-v1.8.5.apk",
-    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/735280291",
-    "size": 117493814,
-    "digest": "sha256:9c8b667d9d4ba6a93510792494a50bfea444b0c602b1d114ad663685aff1772e"
+    "name": "salcara-image-android-v1.8.6.apk",
+    "url": "https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/download/v1.8.6/salcara-image-android-v1.8.6.apk",
+    "apiUrl": "https://api.github.com/repos/dkdjndbfj-wq/salcara-image-mobile/releases/assets/739595627",
+    "size": 117535286,
+    "digest": "sha256:2e9856264f72e5f720b442392b1af06989f049c1ab4f238541c1588792830375"
   }
 }
