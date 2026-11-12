@@ -1754,9 +1754,9 @@ export function syncRemoteConnections(force = false): Promise<void> {
 export async function refreshDevices(quiet = false): Promise<void> {
   if (!hub || !hub.pairToken) return;
   const owner = hub;
-  const generation = connectionGeneration;
+  const generation = connectionGeneration, pairing = pairingGeneration;
   const revision = ++devicesRevision;
-  const current = () => owner === hub && generation === connectionGeneration && revision === devicesRevision;
+  const current = () => owner === hub && generation === connectionGeneration && pairing === pairingGeneration && revision === devicesRevision;
   if (owner.botToken) {
     try {
       const profile = state.connections.find(item => item.id === state.connectionId);
@@ -2475,6 +2475,10 @@ async function syncSessionEventsCore(deviceId: string, sessionKey: string, waitS
       if (!result.hasMore || result.nextSeq <= after || result.scannedEventCount === 0) break;
     }
     if (!state.devices.some(device => device.deviceId === deviceId && device.online === false)) await reconcileIncompleteAssistantTurn(deviceId, sessionKey, signal);
+    // The quiet repair can outlive a new QR pairing or credential retirement.
+    // Its own snapshot advances the open revision, so check connection authority
+    // directly instead of treating that normal revision advance as cancellation.
+    if (signal?.aborted || owner !== hub || generation !== connectionGeneration || pairing !== pairingGeneration) return;
     set({ connection: 'open', connectionError: undefined, connectionProblem: undefined });
   } catch (error) {
     // A desktop lease/history error is local to this thread. It must not

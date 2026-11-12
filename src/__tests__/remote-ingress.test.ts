@@ -67,7 +67,7 @@ test('refresh checks all eight signed hints with bounded concurrency, coalescing
   const router = createIngressRouter({ nonce: () => nonce, storage: { read: async () => JSON.stringify(previous), write: async () => undefined },
     fetch: async () => { attempts++; return new Promise(() => undefined); } });
   const rounds = Promise.all([router.refresh(canonical), router.refresh(canonical)]);
-  await jest.advanceTimersByTimeAsync(8000); await rounds;
+  await jest.advanceTimersByTimeAsync(16000); await rounds;
   expect(attempts).toBe(8);
   await router.refresh(canonical); expect(attempts).toBe(8);
 });
@@ -435,7 +435,7 @@ test('a stalled public fetch times out even when the transport ignores abort', a
   jest.useFakeTimers();
   const router = createIngressRouter({ nonce: () => nonce, fetch: () => new Promise(() => undefined) });
   const work = router.refresh(canonical);
-  await flush(); await jest.advanceTimersByTimeAsync(2501); await work;
+  await flush(); await jest.advanceTimersByTimeAsync(5001); await work;
   expect(router.snapshot(canonical)).toBeUndefined();
 });
 

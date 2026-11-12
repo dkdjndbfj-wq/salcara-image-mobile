@@ -665,7 +665,7 @@ export async function discoverStation(stationUrl: string): Promise<HubDiscovery>
   for (const url of remoteDiscoveryCandidates(stationUrl)) {
     let result: Record<string, unknown>;
     try {
-      result = await request({ url }, '/ping', { timeoutMs: 2500, exact: true });
+      result = await request({ url }, '/ping', { timeoutMs: 5_000, exact: true });
     } catch (error) {
       if (!(error instanceof HubError) || error.status !== 404) throw error;
       failure = error;
@@ -684,7 +684,9 @@ export async function discoverSavedStation(hubUrl: string): Promise<HubDiscovery
   if (ingressEnabled) await ingress.refresh(canonical);
   // This read is anonymous. Pair tokens are sent only by the subsequent
   // authenticated request, after the router's fresh pinned identity proof.
-  return discoveryResult(await request({ url: canonical }, '/ping', { timeoutMs: 8000 }), canonical);
+  // Three bounded proof attempts may precede this anonymous read. Leave room
+  // for two unavailable entries and a normal three-second surviving route.
+  return discoveryResult(await request({ url: canonical }, '/ping', { timeoutMs: 20_000 }), canonical);
 }
 
 export async function confirmQrPair(qr: PairQr, phoneId?: string): Promise<{ token: string; device: DeviceStatus }> {

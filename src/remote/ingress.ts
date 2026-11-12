@@ -5,6 +5,7 @@ import type { FetchLike } from './client';
 
 hashes.sha512 = sha512;
 const DAY = 86_400_000, SKEW = 30_000, MAX_BODY = 16_384;
+const PUBLIC_READ_TIMEOUT_MS = 5_000, REFRESH_TIMEOUT_MS = 16_000;
 export interface IngressManifest {
   version: 1; hub_instance_id: string; identity_public_key: string; canonical_url: string;
   revision: number; issued_at: number; expires_at: number;
@@ -100,7 +101,7 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
   async function publicJson(url: string, signal?: AbortSignal): Promise<unknown> {
     const controller = new AbortController(), abort = () => controller.abort();
     if (signal?.aborted) controller.abort(); else signal?.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(abort, 2500);
+    const timer = setTimeout(abort, PUBLIC_READ_TIMEOUT_MS);
     const aborted = new Promise<never>((_, reject) => { if (controller.signal.aborted) reject(new Error('ingress cancelled')); else controller.signal.addEventListener('abort', () => reject(new Error('ingress cancelled')), { once: true }); });
     try {
       return await Promise.race([aborted, (async () => {
@@ -166,12 +167,12 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
     // members. Rotate the remaining slots so no surviving hint is starved.
     if (hints.length) current.hintCursor = (offset + candidates.length - primary.length) % hints.length;
     current.refreshing = (async () => {
-      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
       let identityMismatch = false;
       let newest: IngressManifest | undefined;
       try {
         // Three bounded anonymous probes at a time can examine all eight
-        // hints within the eight-second round, even when early hosts hang.
+        // hints within the sixteen-second round, even when early hosts hang.
         for (let start = 0; start < candidates.length; start += 3) {
           if (current.epoch !== epoch) return;
           if (controller.signal.aborted) break;
@@ -222,11 +223,15 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
   }
   async function prove(canonical: string, current: Entry, manifest: IngressManifest, endpoint: string) {
     const pending = current.proofs.get(endpoint); if (pending) return pending;
+    const epoch = current.epoch;
+    const active = () => entries.get(canonical) === current && current.epoch === epoch && current.confirming === undefined;
     const task = Promise.resolve().then(async () => {
       try {
+        if (!active()) throw new IngressUnavailableError();
         const nonce = options.nonce();
         if (!/^[a-f0-9]{64}$/.test(nonce)) throw new Error('invalid ingress nonce');
         const proof = await publicJson(`${endpoint}/ingress/identity?nonce=${nonce}`);
+        if (!active()) throw new IngressUnavailableError();
         const trusted = current.manifest;
         const checkedAt = now();
         if (manifest.expires_at <= checkedAt || record(proof) && integer(proof.expires_at) && proof.expires_at <= checkedAt) throw new IngressUnavailableError();
@@ -236,7 +241,7 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
           || trusted.expires_at <= now()) throw new IngressUnavailableError();
         current.leases.set(endpoint, Math.min((proof as { expires_at: number }).expires_at, manifest.expires_at, trusted.expires_at, now() + 10_000));
         current.invalidIdentity = false;
-      } catch (error) { fail(canonical, endpoint); throw error; }
+      } catch (error) { if (active()) fail(canonical, endpoint); throw error; }
       finally { current.proofs.delete(endpoint); }
     });
     current.proofs.set(endpoint, task); return task;
@@ -277,27 +282,41 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
     const signal = init.signal as AbortSignal | undefined, attempts = String(init.method ?? 'GET').toUpperCase() === 'GET' ? 2 : 1;
     const headers = init.headers as Record<string, unknown> | undefined;
     const authenticated = headers && Object.keys(headers).some(key => /^(authorization|x-salcara-(pair|bot)-token)$/i.test(key) && headers[key]);
-    const current = entry(canonical); await current.loaded;
+    const current = entry(canonical), epoch = current.epoch;
+    // A new QR confirmation invalidates already-started credential requests,
+    // even if confirmation fails or restores the same pin. A normal signed
+    // revision refresh keeps this epoch and may still update routing.
+    const assertCurrent = () => {
+      if (signal?.aborted) throw new Error('ingress cancelled');
+      if (authenticated && (entries.get(canonical) !== current || current.epoch !== epoch || current.confirming !== undefined)) throw new IngressIdentityError();
+    };
+    await current.loaded; assertCurrent();
     if (authenticated) {
       await refresh(canonical);
+      assertCurrent();
       if (current.manifest && current.manifest.expires_at <= now()) throw current.invalidIdentity ? new IngressIdentityError() : new IngressUnavailableError();
     }
     let last: unknown;
     for (let index = 0; index < attempts; index++) {
+      assertCurrent();
       let endpoint = await resolve(canonical, signal);
+      assertCurrent();
       if (authenticated && current.manifest && endpoint === canonical && (current.leases.get(canonical) ?? 0) <= now()) {
         try { await prove(canonical, current, current.manifest, canonical); }
         catch (error) {
+          assertCurrent();
           endpoint = await resolve(canonical, signal);
+          assertCurrent();
           if (endpoint === canonical) throw error instanceof IngressIdentityError ? error : current.invalidIdentity ? new IngressIdentityError() : new IngressUnavailableError();
         }
       }
-      if (signal?.aborted) throw new Error('ingress cancelled');
+      assertCurrent();
       if (authenticated && current.manifest && (current.manifest.expires_at <= now()
         || !current.manifest.endpoints.some(item => item.url === endpoint)
         || (current.leases.get(endpoint) ?? 0) <= now())) throw new IngressUnavailableError();
       try {
         const response = await options.fetch(`${endpoint}${path}`, { ...init, redirect: 'error', credentials: 'omit' });
+        assertCurrent();
         if (response.status >= 300 && response.status < 400 || response.redirected || response.url && response.url !== `${endpoint}${path}`) { fail(canonical, endpoint); throw new Error('ingress redirect rejected'); }
         if ([502, 503, 504].includes(response.status)) { fail(canonical, endpoint); if (index + 1 < attempts && entries.get(canonical)?.manifest?.expires_at! > now()) continue; }
         if (response.ok) {
@@ -306,7 +325,7 @@ export function createIngressRouter(options: { fetch: FetchLike; nonce: () => st
           current.proofCursor = Math.max(0, [...(current.manifest?.endpoints ?? [])].sort((a, b) => a.priority - b.priority).findIndex(item => item.url === endpoint));
         }
         return { response, endpoint };
-      } catch (error) { last = error; if (!signal?.aborted) fail(canonical, endpoint); if (signal?.aborted || (entries.get(canonical)?.manifest?.expires_at ?? 0) <= now() || index + 1 >= attempts) throw error; }
+      } catch (error) { assertCurrent(); last = error; fail(canonical, endpoint); if ((entries.get(canonical)?.manifest?.expires_at ?? 0) <= now() || index + 1 >= attempts) throw error; }
     }
     throw last;
   }
