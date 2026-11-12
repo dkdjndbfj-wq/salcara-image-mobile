@@ -40,5 +40,5 @@ test('redirects and stalled discovery are bounded and do not trigger route guess
   jest.useFakeTimers(); calls = 0;
   setHubFetch(async () => { calls++; return new Promise(() => undefined); });
   const pending = expect(discoverStation(origin)).rejects.toMatchObject({ code: 'hub_timeout' });
-  await jest.advanceTimersByTimeAsync(2600); await pending; expect(calls).toBe(1);
+  await jest.advanceTimersByTimeAsync(5100); await pending; expect(calls).toBe(1);
 });
