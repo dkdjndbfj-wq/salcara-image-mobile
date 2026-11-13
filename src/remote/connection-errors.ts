@@ -1,11 +1,12 @@
-import { HubError, isExecutionPolicyError, isPairingAuthenticationError } from './client';
+import { CLOCK_SKEW_MESSAGE, HubError, isExecutionPolicyError, isPairingAuthenticationError } from './client';
 
 /** Safe display state: never persist arbitrary service response text in a status label. */
-export type ConnectionProblem = 'pairing' | 'permission' | 'enrollment' | 'identity' | 'unsupported' | 'unavailable' | 'timeout' | 'network';
+export type ConnectionProblem = 'pairing' | 'permission' | 'enrollment' | 'identity' | 'clock_skew' | 'unsupported' | 'unavailable' | 'timeout' | 'network';
 
 export function connectionProblem(error: unknown, pairedRequest = true): ConnectionProblem {
   if (!(error instanceof HubError)) return 'network';
   if (pairedRequest && isPairingAuthenticationError(error)) return 'pairing';
+  if (error.code === 'clock_skew') return 'clock_skew';
   if (error.code === 'hub_identity_changed') return 'identity';
   if (error.code === 'device_credentials_required' || error.code === 'device_credentials_invalid' || error.code === 'device_enrollment_required' || error.code === 'enrollment_claim_invalid') return 'enrollment';
   if (isExecutionPolicyError(error) || error.status === 401 || error.status === 403 || error.status === 423) return 'permission';
@@ -22,6 +23,7 @@ export function connectionFailure(error: unknown, pairedRequest = true) {
     permission: '远程访问受限，请检查电脑端授权；如需恢复本站访问，请联系管理员。普通 API 配置保留',
     enrollment: '电脑的远程登记需要恢复，请在电脑端重新登记；API 和聊天记录保留',
     identity: '连接身份暂未确认，请核对远程连接信息后重试；已保存的配对和聊天记录保留',
+    clock_skew: CLOCK_SKEW_MESSAGE,
     unsupported: '本站没有提供兼容的远程服务，请更新或检查远程入口',
     unavailable: '远程服务暂不可用，请稍后重试；已保存的配对和 API 保留',
     timeout: '远程连接超时，请检查网络后重试；已保存的配对保留',

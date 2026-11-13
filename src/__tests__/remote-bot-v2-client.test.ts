@@ -4,7 +4,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import {
   acknowledgeOperation, acknowledgeSessionEvents, bindBotPhone, botGroupDevices, command, confirmPairingHubIdentity,
   devices, diagnosticProbe, discoverSavedStation, openStream, prepareCommand, readOperation, registerPushToken, revokeBotPhone,
-  sessionEventsPage, setHubFetch, verifyBotBindingStation, type BotBindingPackage, type FetchLike, type Hub,
+  sessionEventsPage, setHubFetch, verifyBotBindingStation, verifyHubAlias, type BotBindingPackage, type FetchLike, type Hub,
 } from '../remote/client';
 import type { IngressManifest } from '../remote/ingress';
 
@@ -28,8 +28,7 @@ const hubId = 'a'.repeat(32);
 const pin = { instanceId: hubId, publicKey };
 const capabilities = ['device.identity.v1', 'pair.qr.v1', 'session.remote.v1', 'pair.revoke.v1', 'bot.phone.binding.v2'];
 const discovery = { service: 'salcara-hub', protocol: 'salcara-remote', protocolVersion: 1, authModes: ['device-pairing'], capabilities };
-function manifest(signed = true, instanceId = hubId, ttl = 86_400_000): IngressManifest {
-  const now = Date.now();
+function manifest(signed = true, instanceId = hubId, ttl = 86_400_000, now = Date.now()): IngressManifest {
   const body = { version: 1 as const, hub_instance_id: instanceId, identity_public_key: publicKey, canonical_url: canonical,
     revision: 3, issued_at: now, expires_at: now + ttl,
     endpoints: [{ id: 'canonical', url: canonical, priority: 100 }, { id: 'backup', url: backup, priority: 50 }] };
@@ -37,8 +36,8 @@ function manifest(signed = true, instanceId = hubId, ttl = 86_400_000): IngressM
   const bytes = Buffer.from(JSON.stringify(body));
   return { ...body, signed_payload: bytes.toString('base64'), signature: sign(null, Buffer.concat([Buffer.from('salcara-ingress-manifest-v1\n'), bytes]), keys.privateKey).toString('base64') };
 }
-function proof(url: string, instanceId = hubId) {
-  const nonce = new URL(url).searchParams.get('nonce'), now = Date.now();
+function proof(url: string, instanceId = hubId, now = Date.now()) {
+  const nonce = new URL(url).searchParams.get('nonce');
   const body = { version: 1, hub_instance_id: instanceId, nonce, issued_at: now, expires_at: now + 30_000 };
   const bytes = Buffer.from(`salcara-ingress-proof-v1\n${instanceId}\n${nonce}\n${body.issued_at}\n${body.expires_at}`);
   return { ...body, signature: sign(null, bytes, keys.privateKey).toString('base64') };
@@ -54,6 +53,60 @@ async function flush() { for (let index = 0; index < 100; index++) await Promise
 
 beforeEach(() => { mockSecrets.clear(); });
 afterEach(() => setHubFetch(null));
+
+test.each(['initial Bot verification', 'saved Bot verification', 'alias', 'pair confirmation', 'ordinary read', 'Bot read'] as const)('%s retains the verified clock disagreement without dispatching credentials', async operation => {
+  mockSecrets.set(pinKey, JSON.stringify(manifest()));
+  let authenticated = 0;
+  setHubFetch(async (url, init) => {
+    const headers = init.headers as Record<string, unknown> | undefined;
+    if (headers?.['X-Salcara-Pair-Token'] || headers?.['X-Salcara-Bot-Token']) authenticated++;
+    return url.endsWith('/ingress/manifest') ? reply(manifest(true, hubId, 86_400_000, Date.now() + (operation === 'pair confirmation' ? 60_001 : 0)))
+      : url.includes('/ingress/identity?') ? reply(proof(url, hubId, Date.now() + 60_001)) : reply(discovery);
+  }, true);
+  const pending = operation === 'initial Bot verification' ? verifyBotBindingStation(canonical)
+    : operation === 'saved Bot verification' ? verifyBotBindingStation(canonical, pin)
+      : operation === 'alias' ? verifyHubAlias(canonical, backup)
+          : operation === 'pair confirmation' ? confirmPairingHubIdentity(canonical, () => true)
+            : operation === 'ordinary read' ? devices({ url: canonical, pairToken: phoneId }) : botGroupDevices(botHub());
+  await expect(pending).rejects.toMatchObject({ name: 'HubError', code: 'clock_skew', status: 409, message: expect.stringContaining('自动日期') });
+  expect(authenticated).toBe(0);
+});
+
+test.each(['initial', 'saved'] as const)('%s Bot verification tries a healthy signed alias after another reports clock disagreement', async mode => {
+  mockSecrets.set(pinKey, JSON.stringify(manifest()));
+  const authenticated: string[] = [];
+  setHubFetch(async (url, init) => {
+    if ((init.headers as Record<string, unknown>)?.['X-Salcara-Bot-Token']) authenticated.push(url);
+    return url.endsWith('/ingress/manifest') ? reply(manifest())
+      : url.includes('/ingress/identity?') ? reply(proof(url, hubId, Date.now() + (url.startsWith(canonical) ? 60_001 : 0)))
+        : url.endsWith('/ping') ? reply(discovery) : reply({ devices: [member()] });
+  }, true);
+  const target = await verifyBotBindingStation(canonical, mode === 'saved' ? pin : undefined);
+  expect(target.endpoint).toBe(backup);
+  expect(authenticated).toEqual([]);
+  await expect(botGroupDevices(botHub(), target)).resolves.toEqual([member()]);
+  expect(authenticated).toEqual([`${backup}/app/devices`]);
+});
+
+test.each(['relay', 'bot'] as const)('a verified clock disagreement closes the %s stream with its safe typed reason, without reconnecting', async mode => {
+  mockSecrets.set(pinKey, JSON.stringify(manifest()));
+  let authenticated = 0;
+  setHubFetch(async (url, init) => {
+    const headers = init.headers as Record<string, unknown> | undefined;
+    if (headers?.['X-Salcara-Pair-Token'] || headers?.['X-Salcara-Bot-Token']) authenticated++;
+    return url.endsWith('/ingress/manifest') ? reply(manifest())
+      : url.includes('/ingress/identity?') ? reply(proof(url, hubId, Date.now() - 60_001)) : reply(discovery);
+  }, true);
+  const states: Array<{ state: string; error?: string; errorCode?: string }> = [], stopped = deferred<void>();
+  const retry = jest.fn(async () => undefined);
+  const handle = openStream({ hub: mode === 'bot' ? botHub() : { url: canonical, pairToken: phoneId }, onEvent: jest.fn(), onDevice: jest.fn(), wait: retry,
+    onState: (state, info) => { states.push({ state, ...info }); if (state === 'closed') stopped.resolve(); } });
+  try {
+    await stopped.promise;
+    expect(states).toEqual([{ state: 'connecting' }, { state: 'closed', errorCode: 'clock_skew', error: expect.stringContaining('自动日期') }]);
+    expect(authenticated).toBe(0); expect(retry).not.toHaveBeenCalled();
+  } finally { handle.close(); }
+});
 
 test('v2 sends exactly the original package and paired attempt fields, and accepts an empty group', async () => {
   const calls: Array<{ url: string; init: Record<string, unknown> }> = [];

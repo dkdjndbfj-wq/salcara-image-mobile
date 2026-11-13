@@ -1,4 +1,4 @@
-import type { DeviceStatus } from './client';
+import { CLOCK_SKEW_MESSAGE, type DeviceStatus } from './client';
 import type { RemoteState } from './store';
 import type { SavedConnectionHealth } from './store';
 
@@ -7,7 +7,7 @@ type DeviceConnection = Pick<DeviceStatus, 'online'> & Partial<Pick<DeviceStatus
 
 export function savedConnectionHealthLabel(health: SavedConnectionHealth | 'checking' | undefined, bot = false): string {
   if (!health || health === 'checking') return '检查中';
-  const labels: Record<Exclude<SavedConnectionHealth, 'unreachable'>, string> = { online: '在线', offline: '电脑离线', reauth: '需要重新绑定', denied: '远程访问受限', enrollment: '电脑需要重新登记', identity: '连接身份待确认', unsupported: '远程服务不兼容', unavailable: '远程服务暂不可用', timeout: '远程连接超时' };
+  const labels: Record<Exclude<SavedConnectionHealth, 'unreachable'>, string> = { online: '在线', offline: '电脑离线', reauth: '需要重新绑定', denied: '远程访问受限', enrollment: '电脑需要重新登记', identity: '连接身份待确认', clock_skew: '设备时间不一致', unsupported: '远程服务不兼容', unavailable: '远程服务暂不可用', timeout: '远程连接超时' };
   return health === 'unreachable' ? bot ? 'Bot 服务不可达' : '中转站不可达' : labels[health];
 }
 
@@ -29,6 +29,7 @@ export function remoteConnectionState(remote: TransportState, device?: DeviceCon
     if (problem === 'pairing') return { tone: 'error' as const, label: '需要重新绑定', detail: mode === 'Bot' ? 'Bot 绑定凭据已失效，请重新绑定 Bot。' : '手机配对已失效，请在电脑端生成二维码后重新扫码。' };
     if (problem === 'enrollment') return { tone: 'error' as const, label: '电脑需要重新登记', detail: '电脑的远程登记已失效，请在电脑端恢复登记后重试；模型 API 和聊天记录保留。' };
     if (problem === 'identity') return { tone: 'error' as const, label: '连接身份待确认', detail: '暂时无法确认这是原来的远程服务，请核对连接信息后重试；已保存的配对和聊天记录保留。' };
+    if (problem === 'clock_skew') return { tone: 'error' as const, label: '设备时间不一致', detail: CLOCK_SKEW_MESSAGE };
     if (problem === 'permission') return { tone: 'error' as const, label: '远程访问受限', detail: '请检查电脑端的远程访问与来源授权，或联系管理员；无需更换模型 API 密钥。' };
     if (problem === 'unsupported') return { tone: 'error' as const, label: '远程服务不兼容', detail: `${mode}未提供兼容的远程接口，请更新服务或检查远程入口；普通 API 仍可使用。` };
     if (problem === 'unavailable') return { tone: 'error' as const, label: '远程服务暂不可用', detail: `${mode}暂时不可用，请稍后重试；已保存的配对和模型 API 保留。` };

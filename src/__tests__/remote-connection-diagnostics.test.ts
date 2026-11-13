@@ -1,4 +1,4 @@
-import { diagnosticProbe, setHubFetch, type FetchLike, type Hub } from '../remote/client';
+import { diagnosticProbe, HubError, setHubFetch, type FetchLike, type Hub } from '../remote/client';
 import { diagnosticSummary, measureConnection } from '../remote/connection-diagnostics';
 import { botStationFixture } from './fixtures/bot-station';
 
@@ -42,6 +42,7 @@ test.each([
   [403, 'source_grant_required', 'denied'], [403, 'station_policy_invalid', 'denied'], [423, 'user_disabled', 'denied'],
   [403, 'unknown_policy', 'denied'],
   [409, 'hub_identity_changed', 'identity'],
+  [409, 'clock_skew', 'clock_skew'],
 ])('HTTP %s %s produces a bounded reason and no fabricated duration', async (status, code, expected) => {
   setHubFetch(async () => reply({ error: `${owner.url} secret-raw-error`, code }, status as number));
   const measured = await measureConnection(owner, owner.deviceId!);
@@ -49,6 +50,21 @@ test.each([
   expect(measured.computer.status).toBe('not_measured');
   expect(JSON.stringify(measured)).not.toContain('secret-raw-error');
   expect(diagnosticSummary(measured)).not.toContain(owner.url);
+});
+
+test.each(['hub', 'device'] as const)('a typed clock error on the %s segment keeps a safe actionable diagnosis', async target => {
+  setHubFetch(async (_endpoint, init) => {
+    const body = JSON.parse(String(init.body));
+    if (body.target === target) throw new HubError('secret-raw-error', 409, 'clock_skew');
+    now += 25; return reply(echo(body));
+  });
+  const measured = await measureConnection(owner, owner.deviceId!);
+  const segment = target === 'hub' ? measured.hub : measured.computer;
+  expect(segment).toMatchObject({ status: 'clock_skew', ms: null });
+  expect(segment.detail).toContain('自动日期');
+  expect(segment.detail).toMatch(/配对.*聊天.*保留/);
+  expect(diagnosticSummary(measured)).toContain('设备时间不一致');
+  expect(JSON.stringify(measured)).not.toMatch(/secret-raw-error|重新配对|电脑离线/);
 });
 
 test('offline computer stops after the Hub exchange', async () => {

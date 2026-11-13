@@ -53,6 +53,55 @@ beforeEach(() => {
 });
 afterEach(() => { resetRemoteForTests(); setHubFetch(null); });
 
+test.each(['relay', 'bot'] as const)('a typed clock disagreement keeps %s credentials and reaches health, connection and Agent hints', async kind => {
+  const selected = kind === 'bot' ? profile('a', 'group') : profile();
+  if (kind === 'bot') await saveBotConnections([selected], botToken);
+  else await saveConnection(selected, token);
+  await bootRemote([]);
+  await useSavedConnection(selected.id, true);
+  setHubFetch(async (endpoint, init) => {
+    if (endpoint.endsWith('/app/devices') || endpoint.endsWith('/app/commands')) return reply({ code: 'clock_skew', error: 'PRIVATE_CREDENTIAL' }, 409);
+    return transport(endpoint, init);
+  });
+  const health = await probeSavedConnections();
+  expect(health).toEqual(Object.fromEntries(getRemoteState().connections.map(item => [item.id, 'clock_skew'])));
+  await refreshDevices(true);
+  expect(getRemoteState()).toMatchObject({ phase: 'ready', connectionId: selected.id, connection: 'error', connectionProblem: 'clock_skew' });
+  expect(getRemoteState().connectionError).toContain('自动日期');
+  await expect(loadAgentProfiles('a')).rejects.toThrow('自动日期');
+  expect(getRemoteState().agents.a.error).toMatch(/配对.*聊天.*保留/);
+  expect(JSON.stringify({ connectionError: getRemoteState().connectionError, agentError: getRemoteState().agents.a.error })).not.toMatch(/PRIVATE_CREDENTIAL|电脑不在线|重新绑定|身份已改变/);
+  expect(await connectionToken(selected)).toBe(kind === 'bot' ? botToken : token);
+  if (kind === 'bot') expect((await getBotGroup(botGroupId(hubUrl, 'group')))?.status).toBe('active');
+});
+
+test.each([-60_001, 60_001])('concurrent saved Pair/Bot profiles retain a signed nonce clock disagreement of %s ms without credential dispatch', async skew => {
+  await saveMixed();
+  await useSavedConnection(profile().id);
+  const profiles = getRemoteState().connections;
+  expect(profiles).toHaveLength(3);
+  const signedTransport = station.wrap(transport), credentialDispatches: string[] = [];
+  setRawHubFetch((endpoint, init) => {
+    const headers = init.headers as Record<string, unknown> | undefined;
+    if (headers?.['X-Salcara-Pair-Token'] || headers?.['X-Salcara-Bot-Token']) credentialDispatches.push(endpoint);
+    if (endpoint.includes('/ingress/identity?')) {
+      // This fixture signs synchronously before returning its Promise. Change
+      // only its server timestamp; restore before the client checks the reply.
+      const serverNow = Date.now() + skew;
+      const serverClock = jest.spyOn(Date, 'now').mockReturnValue(serverNow);
+      try { return signedTransport(endpoint, init); }
+      finally { serverClock.mockRestore(); }
+    }
+    return signedTransport(endpoint, init);
+  }, true);
+  expect(await probeSavedConnections()).toEqual(Object.fromEntries(profiles.map(item => [item.id, 'clock_skew'])));
+  expect(credentialDispatches).toEqual([]);
+  expect(getRemoteState().connections).toEqual(profiles);
+  expect(await connectionToken(profile())).toBe(token);
+  expect(await connectionToken(profile('a', 'group'))).toBe(botToken);
+  expect(await connectionToken(profile('b', 'group'))).toBe(botToken);
+});
+
 test.each([
   [403, 'bot_credentials_invalid', 'pairing'],
   [403, 'unknown_policy', 'permission'],

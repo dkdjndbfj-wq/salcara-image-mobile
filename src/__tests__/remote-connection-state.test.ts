@@ -1,6 +1,27 @@
-import { remoteConnectionState, remoteDeviceConnected } from '../remote/connection-state';
+import { remoteConnectionState, remoteDeviceConnected, savedConnectionHealthLabel } from '../remote/connection-state';
 import { connectionFailure } from '../remote/connection-errors';
-import { HubError } from '../remote/client';
+import { HubError, isPairingAuthenticationError } from '../remote/client';
+
+test('clock disagreement has a safe actionable state without retiring pairing or claiming an identity change', () => {
+  const error = new HubError('PRIVATE_CREDENTIAL', 409, 'clock_skew');
+  const failure = connectionFailure(error);
+  expect(failure.connectionProblem).toBe('clock_skew');
+  expect(failure.connectionError).toMatch(/手机.*远程服务.*时间不一致/);
+  expect(failure.connectionError).toContain('自动日期');
+  expect(failure.connectionError).toMatch(/配对.*聊天.*保留/);
+  expect(isPairingAuthenticationError(error)).toBe(false);
+  const state = remoteConnectionState({ connection: 'error', ...failure });
+  expect(state.label).toBe('设备时间不一致');
+  expect(state.detail).toContain('自动日期');
+  expect(JSON.stringify({ failure, state })).not.toMatch(/PRIVATE_CREDENTIAL|重新绑定|身份已改变|电脑离线/);
+  expect(savedConnectionHealthLabel('clock_skew')).toBe('设备时间不一致');
+  expect(savedConnectionHealthLabel('clock_skew', true)).toBe('设备时间不一致');
+});
+
+test('clock wording alone cannot select the clock disagreement category', () => {
+  expect(connectionFailure(new Error('clock_skew 手机与远程服务时间不一致')).connectionProblem).toBe('network');
+  expect(connectionFailure(new HubError('clock_skew 手机与远程服务时间不一致', 409)).connectionProblem).toBe('network');
+});
 
 test.each([
   new HubError('private raw upstream body with secret-pair-token', 503),

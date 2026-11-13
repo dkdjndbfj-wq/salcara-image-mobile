@@ -1254,7 +1254,7 @@ export async function renameRemoteConnection(id: string, alias: string): Promise
   set({ connections });
 }
 
-export type SavedConnectionHealth = 'online' | 'offline' | 'unreachable' | 'reauth' | 'denied' | 'enrollment' | 'identity' | 'unsupported' | 'unavailable' | 'timeout';
+export type SavedConnectionHealth = 'online' | 'offline' | 'unreachable' | 'reauth' | 'denied' | 'enrollment' | 'identity' | 'clock_skew' | 'unsupported' | 'unavailable' | 'timeout';
 /** Read every saved computer without changing the selected route or its UI state. */
 export async function probeSavedConnections(): Promise<Record<string, SavedConnectionHealth>> {
   const profiles = state.connections;
@@ -2600,7 +2600,8 @@ export async function loadAgentProfiles(deviceId: string): Promise<void> {
     publishAgentStatus(deviceId, parsed);
   } catch (error) {
     if (!current()) return;
-    const message = botIdentityUnavailable(error) ? BOT_IDENTITY_CONFIRMATION
+    const message = error instanceof HubError && error.code === 'clock_skew' ? connectionFailure(error).connectionError
+      : botIdentityUnavailable(error) ? BOT_IDENTITY_CONFIRMATION
       : error instanceof HubError && error.code === 'hub_identity_changed' ? '远程服务身份已改变，已停止发送凭据，请核对服务器身份'
         : error instanceof HubError && error.status === 409 ? '电脑不在线' : '没有读到 Agent 信息，请更新电脑端 Salcara Bridge 或重试';
     set((previous) => ({ agents: { ...previous.agents, [deviceId]: { ...entry, loading: false, loaded: true, error: message } } }));

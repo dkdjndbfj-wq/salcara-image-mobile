@@ -8,7 +8,7 @@ import { parseBrowserNavigation, type BrowserNavigation } from './browser-naviga
 import { parseComputerActivity, type ComputerActivity } from './computer-activity';
 import { executionRetryAt, validRetryAt } from './execution-retry';
 import { ingressRuntime } from './ingress-runtime';
-import { IngressIdentityError } from './ingress';
+import { IngressClockSkewError, IngressIdentityError } from './ingress';
 import { hermesSettlement, normalizeHermesEvent } from './hermes-event-compat';
 export type { BrowserNavigation } from './browser-navigation';
 
@@ -435,6 +435,16 @@ export type FetchLike = (url: string, init: Record<string, unknown>) => Promise<
 export class HubError extends Error {
   constructor(message: string, readonly status = 0, readonly code?: string, readonly authenticatedPhoneRequest?: boolean) { super(message); this.name = 'HubError'; }
 }
+export const CLOCK_SKEW_MESSAGE = '手机与远程服务时间不一致，请开启手机的自动日期与时间后重试；已保存的配对和聊天记录保留';
+
+/** Only a locally verified, typed ingress result can become this diagnosis. */
+async function withIngressClockError<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) {
+    if (error instanceof IngressClockSkewError) throw new HubError(CLOCK_SKEW_MESSAGE, 409, 'clock_skew');
+    throw error;
+  }
+}
 
 export function originOf(baseUrl: string): string | null {
   return baseUrl.trim().match(/^(https?:\/\/[^/?#\s]+)/i)?.[1] ?? null;
@@ -456,19 +466,19 @@ export function setHubFetch(next: FetchLike | null, enableIngress = false) {
 /** Public, already validated authority handed to the Android background watcher. */
 export function hubIngressSnapshot(canonical: string) { return ingressEnabled ? ingress.pinSnapshot(canonical) : undefined; }
 export async function adoptRecoveredHubIngress(canonical: string, manifest: unknown, active: () => boolean): Promise<boolean> {
-  return ingressEnabled && await ingress.adoptPinnedManifest(canonical, manifest, active);
+  return ingressEnabled && await withIngressClockError(() => ingress.adoptPinnedManifest(canonical, manifest, active));
 }
 export async function adoptRecoveredBotHubIngress(canonical: string, manifest: unknown, expectedPin: BotBindingPin, active: () => boolean): Promise<boolean> {
-  return ingressEnabled && await ingress.adoptPinnedBotManifest(canonical, manifest, expectedPin, active);
+  return ingressEnabled && await withIngressClockError(() => ingress.adoptPinnedBotManifest(canonical, manifest, expectedPin, active));
 }
 /** A candidate may reuse a saved pairing only after signed membership and a fresh pinned proof. */
-export async function verifyHubAlias(canonical: string, candidate: string): Promise<boolean> { return ingressEnabled && await ingress.verifyAlias(canonical, candidate); }
-export async function confirmPairingHubIdentity(canonical: string, active: () => boolean): Promise<void> { if (ingressEnabled) await ingress.confirmPairingIdentity(canonical, active); }
+export async function verifyHubAlias(canonical: string, candidate: string): Promise<boolean> { return ingressEnabled && await withIngressClockError(() => ingress.verifyAlias(canonical, candidate)); }
+export async function confirmPairingHubIdentity(canonical: string, active: () => boolean): Promise<void> { if (ingressEnabled) await withIngressClockError(() => ingress.confirmPairingIdentity(canonical, active)); }
 async function transportFetch(canonical: string, path: string, init: Record<string, unknown>) {
   if (!ingressEnabled) return { response: await fetchImpl(`${canonical}${path}`, init), endpoint: canonical };
   const result = await ingress.fetch(canonical, path, init);
   // Discovery is bounded and public. It never delays a working single-origin Hub.
-  void ingress.refresh(canonical);
+  void ingress.refresh(canonical).catch(() => undefined);
   return result;
 }
 
@@ -609,6 +619,7 @@ async function request(hub: Hub, path: string, init: { method?: string; body?: u
     return json;
   } catch (error) {
     if (error instanceof HubError) throw error;
+    if (error instanceof IngressClockSkewError) throw new HubError(CLOCK_SKEW_MESSAGE, 409, 'clock_skew');
     if (error instanceof IngressIdentityError) throw new HubError(error.message, 409, 'hub_identity_changed');
     if (init.signal?.aborted) throw new HubError('请求已取消', 499, 'aborted');
     throw new HubError(controller.signal.aborted ? '中转站响应超时，请稍后再试' : '连不上中转站，请检查网络', 0, controller.signal.aborted ? 'hub_timeout' : 'hub_unreachable');
@@ -681,7 +692,7 @@ export async function discoverStation(stationUrl: string): Promise<HubDiscovery>
 /** Saved connections retain their logical identity while using already verified routing authority. */
 export async function discoverSavedStation(hubUrl: string): Promise<HubDiscovery> {
   const canonical = canonicalHubUrl(hubUrl);
-  if (ingressEnabled) await ingress.refresh(canonical);
+  if (ingressEnabled) await withIngressClockError(() => ingress.refresh(canonical));
   // This read is anonymous. Pair tokens are sent only by the subsequent
   // authenticated request, after the router's fresh pinned identity proof.
   // Three bounded proof attempts may precede this anonymous read. Leave room
@@ -781,6 +792,7 @@ async function botRequest(hub: Parameters<typeof request>[0], path: string, init
       : error.code === 'bot_phone_revoke_pending' ? 'Bot 撤销尚未确认，请保留当前记录并重试撤销'
       : error.code === 'bot_phone_bind_pending' ? 'Bot 绑定尚未确认，请保留当前记录并重试原绑定'
       : error.code === 'invalid_request' || error.code === 'ambiguous_credentials' ? 'Bot 请求格式不兼容，请检查手机与 Hub 版本'
+      : error.code === 'clock_skew' ? CLOCK_SKEW_MESSAGE
       : error.code === 'hub_identity_changed' ? 'Bot 服务身份已变更，已停止发送凭据'
       : error.code === 'bot_identity_unavailable' ? '此 Bot 绑定缺少已确认的服务身份，已保留凭据并暂停连接'
       : error.code === 'hub_timeout' ? 'Bot 服务响应超时，请保留当前记录并重试'
@@ -829,7 +841,7 @@ function validBotDevices(value: unknown): DeviceStatus[] {
 export async function verifyBotBindingStation(hubUrl: string, expectedPin?: BotBindingPin, requireV2 = true): Promise<VerifiedBotStation> {
   const canonical = canonicalHubUrl(hubUrl);
   if (expectedPin && ingressEnabled) {
-    try { await ingress.refresh(canonical, expectedPin); }
+    try { await withIngressClockError(() => ingress.refresh(canonical, expectedPin)); }
     catch (error) {
       if (error instanceof IngressIdentityError) throw new HubError('Bot 服务身份已变更，已停止发送凭据', 409, 'hub_identity_changed');
       throw error;
@@ -845,20 +857,29 @@ export async function verifyBotBindingStation(hubUrl: string, expectedPin?: BotB
     throw new HubError('Bot 服务身份已变更，已停止发送绑定信息', 409, 'hub_identity_changed');
   }
   const endpoints = [...new Set([canonical, ...manifest.endpoints.map(item => item.url)])];
+  let clockFailure: HubError | undefined;
   for (const endpoint of endpoints) {
-    if (!await verifyHubAlias(canonical, endpoint)) continue;
-    // Capabilities are read from the same freshly proved endpoint, not a
-    // different anonymous origin or a stale public discovery response.
-    const station = discoveryResult(await request({ url: endpoint }, '/ping', { exact: true, timeoutMs: 8000 }), canonical);
-    const current = hubIngressSnapshot(canonical);
-    if (!current || current.hub_instance_id !== pin.instanceId || current.identity_public_key !== pin.publicKey) {
-      throw new HubError('Bot 服务身份已变更，已停止发送绑定信息', 409, 'hub_identity_changed');
+    try {
+      if (!await verifyHubAlias(canonical, endpoint)) continue;
+      // Capabilities are read from the same freshly proved endpoint, not a
+      // different anonymous origin or a stale public discovery response.
+      const station = discoveryResult(await request({ url: endpoint }, '/ping', { exact: true, timeoutMs: 8000 }), canonical);
+      const current = hubIngressSnapshot(canonical);
+      if (!current || current.hub_instance_id !== pin.instanceId || current.identity_public_key !== pin.publicKey) {
+        throw new HubError('Bot 服务身份已变更，已停止发送绑定信息', 409, 'hub_identity_changed');
+      }
+      if (requireV2 && !station.capabilities.includes('bot.phone.binding.v2')) {
+        throw new HubError('此 Hub 尚不支持安全恢复 Bot 绑定，请先升级 Hub', 426, 'bot_binding_upgrade_required');
+      }
+      return { pin, endpoint };
+    } catch (error) {
+      // One skewed service clock must not hide another healthy, pinned entry.
+      // Identity and ownership failures still stop immediately.
+      if (error instanceof HubError && error.code === 'clock_skew') { clockFailure = error; continue; }
+      throw error;
     }
-    if (requireV2 && !station.capabilities.includes('bot.phone.binding.v2')) {
-      throw new HubError('此 Hub 尚不支持安全恢复 Bot 绑定，请先升级 Hub', 426, 'bot_binding_upgrade_required');
-    }
-    return { pin, endpoint };
   }
+  if (clockFailure) throw clockFailure;
   throw new HubError('无法确认 Bot 服务身份，请检查网络后重试', 409, 'bot_identity_unavailable');
 }
 
@@ -1112,7 +1133,7 @@ export interface StreamOptions {
   onEvent: (event: HubEvent) => void;
   onFeatureChange?: (event: FeatureChangedEvent) => void;
   onDevice: (device: DeviceStatus) => void;
-  onState?: (state: StreamState, info?: { retryInMs?: number; error?: string }) => void;
+  onState?: (state: StreamState, info?: { retryInMs?: number; error?: string; errorCode?: string }) => void;
   /** Reconnect when nothing (not even the 20 s `: ping`) arrives for this long. */
   idleMs?: number;
   wait?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -1225,6 +1246,9 @@ export function openStream(options: StreamOptions): StreamHandle {
       return null;
     } catch (error) {
       if (identityError) throw identityError;
+      if (error instanceof IngressClockSkewError || error instanceof HubError && error.code === 'clock_skew') {
+        throw new HubError(CLOCK_SKEW_MESSAGE, 409, 'clock_skew');
+      }
       if (error instanceof HubError && (error.status === 401 || error.status === 403 || error.code === 'bot_identity_unavailable' || error.code === 'hub_identity_changed' || error.code === 'bot_binding_changed')) throw error;
       if (!outer.signal.aborted && ingressEnabled) ingress.fail(hub.url, endpoint);
       return error instanceof Error ? error.message : String(error);
@@ -1241,7 +1265,8 @@ export function openStream(options: StreamOptions): StreamHandle {
       onState?.('connecting');
       let error: string | null;
       try { error = await connect(); } catch (fatal) {
-        if (!outer.signal.aborted) onState?.('closed', { error: (fatal as Error).message });
+        if (!outer.signal.aborted) onState?.('closed', { error: (fatal as Error).message,
+          ...(fatal instanceof HubError && fatal.code === 'clock_skew' ? { errorCode: 'clock_skew' } : {}) });
         return;
       }
       if (outer.signal.aborted) break;
